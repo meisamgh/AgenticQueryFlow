@@ -43,7 +43,8 @@ async function initialize() {
     );
     await loadDatabaseSchema();
     const models = await api(`/api/models?refresh=${Date.now()}`, { cache: "no-store" });
-    const preferredModel = models.find((item) => item.configured);
+    const preferredModel = models.find((item) => item.configured && item.provider === "justdowork")
+      || models.find((item) => item.configured);
     const preferred = preferredModel && `${preferredModel.provider}|${preferredModel.model}`;
     fillContextSelect(models);
     fillSelect("#sqlModelSelect", models, (item) => `${item.provider}|${item.model}`, modelLabel, preferred);

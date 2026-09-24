@@ -152,7 +152,10 @@ class JustDoWorkSQLModel:
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
         self.api_key = api_key
-        self.base_url = (base_url or "").rstrip("/")
+        configured_base = (base_url or "").rstrip("/")
+        if configured_base and not configured_base.endswith(("/v1", "/anthropic/v1")):
+            configured_base = f"{configured_base}/anthropic/v1"
+        self.base_url = configured_base
         self.timeout = timeout
         self.transport = transport
 

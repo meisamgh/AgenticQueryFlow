@@ -395,6 +395,23 @@ def test_justdowork_uses_anthropic_messages_and_reports_usage() -> None:
     assert requested_models == ["claude-opus-5", "gpt-5.6-sol"]
 
 
+def test_justdowork_root_url_uses_anthropic_v1_messages_path() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/anthropic/v1/messages"
+        return httpx.Response(
+            200,
+            json={"content": [{"type": "text", "text": "SELECT 1"}]},
+        )
+
+    model = JustDoWorkSQLModel(
+        "shared-key",
+        "https://api.justwoker.icu",
+        transport=httpx.MockTransport(handler),
+    )
+    sql = asyncio.run(model.complete("claude-opus-5", "Return SQL only"))
+    assert sql == "SELECT 1"
+
+
 def test_justdowork_fails_without_api_key() -> None:
     with pytest.raises(ModelError, match="JUSTDOWORK_API_KEY"):
         asyncio.run(JustDoWorkSQLModel(None, None).complete("claude-opus-5", "Return SQL"))
