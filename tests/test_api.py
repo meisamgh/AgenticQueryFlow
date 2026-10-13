@@ -110,7 +110,7 @@ def test_model_catalog_contains_configured_remote_providers(monkeypatch) -> None
     assert all(item["configured"] is True for item in agentrouter)
     assert [item["model"] for item in options if item["provider"] == "justdowork"] == [
         "gpt-5.6-sol",
-        "claude-opus-5",
+        "claude-opus-4-8",
     ]
 
 

@@ -716,6 +716,10 @@ class ResultPresentation(StrictModel):
     x: str | None = None
     y: str | None = None
     title: str = Field(default="", max_length=160)
+    x_label: str = Field(default="", max_length=100)
+    y_label: str = Field(default="", max_length=100)
+    number_format: Literal["plain", "compact"] = "plain"
+    time_format: Literal["raw", "year", "month", "day"] = "raw"
     chart_reason: str = Field(default="", max_length=300)
     note: str = "Based on returned rows only; not independent verification of correctness."
     source: Literal["model", "fallback"] = "model"

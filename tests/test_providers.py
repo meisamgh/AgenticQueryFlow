@@ -388,16 +388,16 @@ def test_justdowork_uses_anthropic_messages_and_reports_usage() -> None:
         "https://justdowork.test/v1",
         transport=httpx.MockTransport(handler),
     )
-    for name in ("claude-opus-5", "gpt-5.6-sol"):
+    for name in ("claude-opus-4-8", "gpt-5.6-sol"):
         sql, usage = asyncio.run(model.complete_detailed(name, "Return SQL only"))
         assert sql == "SELECT 1"
         assert usage.total_tokens == 4
-    assert requested_models == ["claude-opus-5", "gpt-5.6-sol"]
+    assert requested_models == ["claude-opus-4-8", "gpt-5.6-sol"]
 
 
-def test_justdowork_root_url_uses_anthropic_v1_messages_path() -> None:
+def test_justdowork_root_url_uses_v1_messages_path() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        assert request.url.path == "/anthropic/v1/messages"
+        assert request.url.path == "/v1/messages"
         return httpx.Response(
             200,
             json={"content": [{"type": "text", "text": "SELECT 1"}]},
@@ -408,7 +408,7 @@ def test_justdowork_root_url_uses_anthropic_v1_messages_path() -> None:
         "https://api.justwoker.icu",
         transport=httpx.MockTransport(handler),
     )
-    sql = asyncio.run(model.complete("claude-opus-5", "Return SQL only"))
+    sql = asyncio.run(model.complete("claude-opus-4-8", "Return SQL only"))
     assert sql == "SELECT 1"
 
 

@@ -33,6 +33,48 @@ test('scalar presentation does not produce a misleading chart', () => {
   context.renderResultChart(container, {chart_type: 'none', note: 'Returned rows'}, {});
   assert.equal(container.children.length, 1);
 });
+test('chart renders proposed labels and compact ticks without changing exact tooltips', () => {
+  const container = new Element();
+  context.renderResultChart(container, {
+    chart_type: 'line', x: 'Month', y: 'Revenue', title: 'Monthly revenue',
+    x_label: 'Month', y_label: 'Revenue', number_format: 'compact',
+    time_format: 'month', note: 'Returned rows',
+  }, {columns: ['Month', 'Revenue'], rows: [['202601', 1200000], ['202602', 2400000]]});
+  const figure = container.children[1];
+  const svg = figure.children[1];
+  assert.equal(figure.children[0].textContent, 'Monthly revenue');
+  assert.ok(svg.children.some(e => e.textContent === 'Revenue'));
+  assert.ok(svg.children.some(e => /M$/.test(e.textContent || '')));
+  assert.ok(svg.children.some(e => /2026/.test(e.textContent || '') && !/202601/.test(e.textContent || '')));
+  assert.ok(svg.children.some(e => e.children.some(child => child.textContent === '202601: 1200000')));
+});
+test('large y values have a dedicated gutter and crowded date labels are skipped', () => {
+  const container = new Element();
+  const rows = Array.from({length: 24}, (_, i) => {
+    const date = new Date(Date.UTC(2012, i, 1));
+    return [`${date.getUTCFullYear()}${String(date.getUTCMonth() + 1).padStart(2, '0')}`, 97633206.73 + i];
+  });
+  context.renderResultChart(container, {
+    chart_type: 'line', x: 'Period', y: 'Value', number_format: 'plain',
+    time_format: 'raw', note: 'Returned rows',
+  }, {columns: ['Period', 'Value'], rows});
+  const svg = container.children[1].children[1];
+  const yTicks = svg.children.filter(e => e['text-anchor'] === 'end');
+  const xTicks = svg.children.filter(e => e['text-anchor'] === 'middle' && e.y === '337');
+  assert.equal(yTicks.length, 5);
+  assert.ok(yTicks.every(e => Number(e.x) >= 100));
+  assert.ok(xTicks.length > 0 && xTicks.length < rows.length);
+});
+test('chart shows only the ten rows sent for model chart selection', () => {
+  const container = new Element();
+  const rows = Array.from({length: 15}, (_, i) => [`Category ${i}`, i + 1]);
+  context.renderResultChart(container, {
+    chart_type: 'bar', x: 'Category', y: 'Value', note: 'Partial preview',
+  }, {columns: ['Category', 'Value'], rows});
+  const svg = container.children[1].children[1];
+  const bars = svg.children.filter(e => e.width !== undefined);
+  assert.equal(bars.length, 10);
+});
 
 vm.runInContext(source.slice(source.indexOf('function renderTable('), source.indexOf('function downloadCsv(')), context);
 test('result table renders headers, rows and NULL explicitly', () => {

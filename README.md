@@ -196,11 +196,12 @@ The API supports three project-scoped provider transports:
 - AgentRouter: `gpt-5.6-sol`, `glm-5.3`, `deepseek-v4-flash`, `claude-opus-5`,
   `claude-opus-4-8`
 - Groq: `qwen/qwen3.6-27b`
-- JustDoWork: `gpt-5.6-sol`, `claude-opus-5`
+- JustDoWork: `gpt-5.6-sol`, `claude-opus-4-8`
 
 Only configured models are available in the interface. Credentials remain server-side and are
 never returned to the browser. JustDoWork has no hard-coded endpoint: set both
-`JUSTDOWORK_API_KEY` and an endpoint you have verified in `JUSTDOWORK_BASE_URL`.
+`JUSTDOWORK_API_KEY` and `JUSTDOWORK_BASE_URL=https://api.justwoker.icu`.
+The Anthropic-compatible client sends requests to `/v1/messages`.
 
 ## Quick start
 

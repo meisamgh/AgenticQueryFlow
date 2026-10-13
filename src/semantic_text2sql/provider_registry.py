@@ -49,7 +49,7 @@ MODEL_CATALOG = (
         "justdowork", "gpt-5.6-sol", "JUSTDOWORK_API_KEY", "JUSTDOWORK_BASE_URL"
     ),
     ProviderModelSpec(
-        "justdowork", "claude-opus-5", "JUSTDOWORK_API_KEY", "JUSTDOWORK_BASE_URL"
+        "justdowork", "claude-opus-4-8", "JUSTDOWORK_API_KEY", "JUSTDOWORK_BASE_URL"
     ),
 )
 
