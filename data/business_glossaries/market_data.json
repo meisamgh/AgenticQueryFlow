@@ -1,0 +1,205 @@
+{
+  "db_id": "market_data",
+  "version": "1.0.0",
+  "source": "Drafted by the operator for the market-index warehouse; aligned with the governed semantic catalog (data/semantic_catalogs/market_data.json, version 1) and live schema on 2026-10-14",
+  "precedence": [
+    "current question",
+    "trusted question evidence",
+    "live schema",
+    "approved landscape: semantic catalog metrics",
+    "business glossary",
+    "historical examples"
+  ],
+  "terms": [
+    {
+      "term": "market index observation",
+      "definition": "One trading-date record for one configured market index in index_prices; the authoritative daily warehouse grain whose privacy-conserving analog is (symbol, trade_date).",
+      "synonyms": [
+        "observation",
+        "index day",
+        "candle",
+        "daily observation"
+      ],
+      "value_aliases": {
+        "S&P 500": "^GSPC",
+        "SPX": "^GSPC",
+        "sp500": "^GSPC",
+        "S and P": "^GSPC",
+        "Dow Jones": "^DJI",
+        "Dow": "^DJI",
+        "Nasdaq": "^IXIC",
+        "Nasdaq Composite": "^IXIC"
+      },
+      "columns": [
+        "index_prices.symbol",
+        "index_prices.trade_date",
+        "index_prices.close"
+      ],
+      "grain": "one row per (symbol, trade_date)",
+      "caveats": [
+        "Close is never summed across dates or symbols; it is a non-additive level.",
+        "Gaps are missing observations, never forward filled."
+      ],
+      "core": true
+    },
+    {
+      "term": "closing price",
+      "definition": "Observed daily closing level of an index, in index points; the canonical measure for level questions.",
+      "synonyms": [
+        "close",
+        "close level",
+        "index level",
+        "closing level"
+      ],
+      "columns": [
+        "index_prices.close"
+      ],
+      "caveats": [
+        "Adjusted close exists in adj_close; state explicitly before using either.",
+        "Not comparable as a return without rebasing."
+      ],
+      "core": true
+    },
+    {
+      "term": "market performance",
+      "definition": "Cumulative return over the selected window: endpoint close relative to the first valid close of the window per symbol; corresponds to semantic catalog metric cumulative_return.",
+      "synonyms": [
+        "performance",
+        "cumulative return",
+        "total return",
+        "returned"
+      ],
+      "formula": "close / first_valid_close_in_selected_window - 1, per symbol",
+      "columns": [
+        "index_prices.close",
+        "index_prices.trade_date"
+      ],
+      "grain": "one series per symbol across the selected window",
+      "caveats": [
+        "Rebase each symbol independently; symbols may enter at different first observations.",
+        "Monthly or weekly rollups use the last trading-session endpoint, never an average of closes.",
+        "Percentages are never summed."
+      ],
+      "core": true
+    },
+    {
+      "term": "normalized performance",
+      "definition": "Index level rebased to 100 at the first valid close of the selected window; corresponds to semantic catalog metric normalized_level.",
+      "synonyms": [
+        "rebased",
+        "base 100",
+        "indexed comparison",
+        "normalized comparison"
+      ],
+      "formula": "100 * close / first_valid_close_in_selected_window, per symbol",
+      "columns": [
+        "index_prices.close",
+        "index_prices.trade_date"
+      ],
+      "grain": "one series per symbol across the selected window",
+      "caveats": [
+        "Always label the base date in the answer or chart.",
+        "Prefer this when the user says compare the indices; propose it rather than asserting it."
+      ],
+      "core": true
+    },
+    {
+      "term": "daily return",
+      "definition": "Return of one trading session relative to the previous available observation per symbol; corresponds to semantic catalog metric daily_return.",
+      "synonyms": [
+        "session return",
+        "day return",
+        "daily change",
+        "daily gain",
+        "daily loss"
+      ],
+      "formula": "close / lag(close) over (partition by symbol order by trade_date) - 1",
+      "columns": [
+        "index_prices.close",
+        "index_prices.trade_date"
+      ],
+      "grain": "one value per symbol and trading observation",
+      "caveats": [
+        "Null after data gaps; no interpolation.",
+        "Order by trade_date within each symbol partition before lagging."
+      ],
+      "core": true
+    },
+    {
+      "term": "volatility",
+      "definition": "Annualized dispersion of daily returns for a stated window; corresponds to semantic catalog metric annualized_volatility.",
+      "synonyms": [
+        "risk",
+        "annualized volatility",
+        "realized volatility"
+      ],
+      "formula": "stddev_samp(daily_return) * sqrt(252) over the stated window",
+      "columns": [
+        "index_prices.close",
+        "index_prices.trade_date"
+      ],
+      "grain": "one value per symbol per stated window",
+      "caveats": [
+        "The window (rolling versus whole selected window) must be stated or asked, never invented.",
+        "Available returns shrink the sample when sessions are missing."
+      ],
+      "core": false
+    },
+    {
+      "term": "drawdown",
+      "definition": "Fraction below the running peak of the normalized level within the window; worst case is max_drawdown.",
+      "synonyms": [
+        "peak to trough",
+        "worst drawdown",
+        "max drawdown",
+        "maximum drawdown"
+      ],
+      "formula": "normalized_level / running_max(normalized_level) - 1; min over the window",
+      "columns": [
+        "index_prices.close",
+        "index_prices.trade_date"
+      ],
+      "grain": "one value per symbol per window",
+      "caveats": [
+        "Report negative fractions or magnitudes consistently; say which convention was used."
+      ],
+      "core": false
+    },
+    {
+      "term": "trading date coverage",
+      "definition": "The observed min and max trade_date per symbol; governs every window question.",
+      "synonyms": [
+        "coverage",
+        "date range",
+        "history starts",
+        "history ends",
+        "observations"
+      ],
+      "columns": [
+        "index_prices.trade_date"
+      ],
+      "grain": "one row per symbol",
+      "caveats": [
+        "Resolve windows against coverage per symbol before computing returns.",
+        "The warehouse updates daily; re-check coverage rather than assuming it."
+      ],
+      "core": false
+    },
+    {
+      "term": "index volume",
+      "definition": "Reported trading volume for an index observation; upstream availability varies by index.",
+      "synonyms": [
+        "volume",
+        "shares traded"
+      ],
+      "columns": [
+        "index_prices.volume"
+      ],
+      "grain": "one value per symbol and trading date",
+      "caveats": [
+        "Confirm a meaningful volume series exists for the requested symbols before aggregating."
+      ],
+      "core": false
+    }
+  ]
+}

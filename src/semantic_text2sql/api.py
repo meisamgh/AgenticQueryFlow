@@ -64,6 +64,12 @@ from semantic_text2sql.presentation import present_result
 from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.provider_registry import configured_model_options, supports_model
 from semantic_text2sql.runtime import RequestBudget
+from semantic_text2sql.semantic_catalog import SemanticCatalogStore, compose_document
+from semantic_text2sql.semantic_catalog_validation import (
+    postgres_runner,
+    sqlite_runner,
+    verify_catalog,
+)
 from semantic_text2sql.service import TextToSQLService
 
 logger = logging.getLogger(__name__)
@@ -80,6 +86,9 @@ def create_app(
     profiles = ProfileStore(Path(os.environ.get("TEXT2SQL_PROFILE_ROOT", "profiles")))
     glossaries = GlossaryStore(
         Path(os.environ.get("TEXT2SQL_GLOSSARY_ROOT", "data/business_glossaries"))
+    )
+    semantic_catalogs = SemanticCatalogStore(
+        Path(os.environ.get("TEXT2SQL_SEMANTIC_CATALOG_ROOT", "data/semantic_catalogs"))
     )
     history = HistoricalQueryStore(
         Path(
@@ -370,6 +379,48 @@ def create_app(
             "time_columns": time_columns[:100],
             "available_kpis": available_kpis[:100],
         }
+
+    @app.get("/api/databases/{db_id}/semantic-catalog")
+    async def semantic_catalog(db_id: str) -> dict[str, Any]:
+        """Governed semantic catalog composed with live schema and profile status."""
+        if db_id in sqlite.list_ids():
+            schema = await asyncio.to_thread(sqlite.inspect, db_id)
+        elif postgres is not None and db_id in postgres.configured_ids():
+            schema = await asyncio.to_thread(postgres.inspect, db_id)
+        else:
+            raise HTTPException(status_code=404, detail="Database was not found or configured.")
+        try:
+            profile = profiles.load(schema.dialect, db_id)
+        except (OSError, ValueError):
+            profile = None
+            logger.warning("Could not read schema profile for %s", db_id, exc_info=True)
+        document = semantic_catalogs.load(db_id)
+        if document is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No semantic catalog document is registered for this database.",
+            )
+        return compose_document(document, schema, profile)
+
+    @app.get("/api/databases/{db_id}/semantic-catalog/verification")
+    async def semantic_catalog_verification(db_id: str) -> dict[str, Any]:
+        """Deterministic evidence probes for the registered catalog document."""
+        if db_id in sqlite.list_ids():
+            schema = await asyncio.to_thread(sqlite.inspect, db_id)
+            runner = sqlite_runner(sqlite, db_id)
+        elif postgres is not None and db_id in postgres.configured_ids():
+            schema = await asyncio.to_thread(postgres.inspect, db_id)
+            runner = postgres_runner(postgres, db_id)
+        else:
+            raise HTTPException(status_code=404, detail="Database was not found or configured.")
+        document = semantic_catalogs.load(db_id)
+        if document is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No semantic catalog document is registered for this database.",
+            )
+        report = await asyncio.to_thread(verify_catalog, document, schema, runner, schema.dialect)
+        return report.model_dump()
 
     @app.post("/api/check", response_model=CheckResponse)
     async def check(request: CheckRequest) -> CheckResponse:

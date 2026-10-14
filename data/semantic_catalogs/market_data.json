@@ -1,0 +1,263 @@
+{
+  "catalog_version": 1,
+  "id": "market_data",
+  "source_db_id": "market_data",
+  "schema_fingerprint": null,
+  "owner": "meisam",
+  "metadata_status": "reviewed",
+  "entities": [
+    {
+      "id": "market_index_daily",
+      "relation": "index_prices",
+      "description": "Trading-date observations of the configured market indices; incremented daily by the separate ingestion project.",
+      "status": "reviewed",
+      "approval": null,
+      "columns": {
+        "symbol": {
+          "role": "identifier",
+          "semantic_type": "index_identifier"
+        },
+        "trade_date": {
+          "role": "time",
+          "semantic_type": "trading_date"
+        },
+        "open": {
+          "role": "measure",
+          "unit": "index_points",
+          "nullable": true
+        },
+        "high": {
+          "role": "measure",
+          "unit": "index_points",
+          "nullable": true
+        },
+        "low": {
+          "role": "measure",
+          "unit": "index_points",
+          "nullable": true
+        },
+        "close": {
+          "role": "measure",
+          "unit": "index_points",
+          "nullable": false
+        },
+        "adj_close": {
+          "role": "measure",
+          "unit": "index_points",
+          "nullable": true
+        },
+        "volume": {
+          "role": "measure",
+          "unit": "shares",
+          "nullable": true
+        },
+        "fetched_at": {
+          "role": "time",
+          "semantic_type": "ingestion_time"
+        }
+      },
+      "grain": {
+        "keys": [
+          "symbol",
+          "trade_date"
+        ],
+        "meaning": "one observation per market index per trading date",
+        "entity_role": "declared_primary_key",
+        "status": "approved",
+        "approval": {
+          "approved_by": "meisam",
+          "approved_at": "2026-10-14T00:00:00Z",
+          "approval_source": "human_review",
+          "evidence": [
+            "primary key (symbol, trade_date) observed in the live schema",
+            "grain probe duplicated zero rows on 2026-10-14"
+          ],
+          "note": "Verified against the live market_data database by the operator during the dashboard-agent build."
+        }
+      },
+      "time": {
+        "event_time": "trade_date",
+        "timezone": "market_local_or_not_applicable",
+        "update_mode": "upsert",
+        "expected_frequency": "trading_day"
+      },
+      "quality": {
+        "required": [
+          "symbol",
+          "trade_date",
+          "close"
+        ],
+        "unique": [
+          [
+            "symbol",
+            "trade_date"
+          ]
+        ],
+        "positive": [
+          "close"
+        ]
+      }
+    }
+  ],
+  "relationships": [],
+  "metrics": [
+    {
+      "id": "close_level",
+      "label": "Index closing level",
+      "description": "Observed daily closing level for one index; never summed across dates or symbols.",
+      "source_relation": "index_prices",
+      "formula": "close",
+      "required_fields": [
+        "close"
+      ],
+      "dimensions": [
+        "symbol",
+        "trade_date"
+      ],
+      "valid_time_grains": [
+        "daily",
+        "trading_day"
+      ],
+      "unit": "index_points",
+      "format": "number",
+      "aggregation": "non_additive",
+      "rollup": null,
+      "missing_data_policy": "gaps left as missing observations; never forward filled",
+      "version": 1,
+      "status": "inferred",
+      "approval": null
+    },
+    {
+      "id": "daily_return",
+      "label": "Daily return",
+      "description": "Return of one trading session relative to the previous available observation.",
+      "source_relation": "index_prices",
+      "formula": "close / lag(close) over (partition by symbol order by trade_date) - 1",
+      "required_fields": [
+        "trade_date",
+        "close"
+      ],
+      "dimensions": [
+        "symbol"
+      ],
+      "valid_time_grains": [
+        "daily",
+        "trading_day"
+      ],
+      "unit": "percentage_fraction",
+      "format": "percentage",
+      "aggregation": "non_additive",
+      "rollup": null,
+      "missing_data_policy": "null after data gaps; no interpolation",
+      "version": 1,
+      "status": "inferred",
+      "approval": null
+    },
+    {
+      "id": "cumulative_return",
+      "label": "Cumulative return of the selected window",
+      "description": "Window return using the endpoint close relative to the first valid close in the selected window; rebased per symbol independently.",
+      "source_relation": "index_prices",
+      "formula": "close / first_valid_close_in_selected_window - 1",
+      "required_fields": [
+        "close"
+      ],
+      "dimensions": [
+        "symbol"
+      ],
+      "valid_time_grains": [
+        "daily",
+        "trading_day",
+        "monthly",
+        "weekly"
+      ],
+      "unit": "percentage_fraction",
+      "format": "percentage",
+      "aggregation": "non_additive",
+      "rollup": "monthly_grain_uses_last_trading_session_endpoint_not_averaged",
+      "missing_data_policy": "baseline is the first valid close inside the window; symbols enter at their own first observation",
+      "version": 1,
+      "status": "inferred",
+      "approval": null
+    },
+    {
+      "id": "normalized_level",
+      "label": "Normalized level (base 100)",
+      "description": "Index level rebased to 100 at the first valid close of the selected window; label the base date.",
+      "source_relation": "index_prices",
+      "formula": "100 * close / first_valid_close_in_selected_window",
+      "required_fields": [
+        "close"
+      ],
+      "dimensions": [
+        "symbol"
+      ],
+      "valid_time_grains": [
+        "daily",
+        "trading_day",
+        "monthly",
+        "weekly"
+      ],
+      "unit": "base_100",
+      "format": "number",
+      "aggregation": "non_additive",
+      "rollup": "monthly_grain_uses_last_trading_session_endpoint_not_averaged",
+      "missing_data_policy": "baseline is the first valid close inside the window; symbols enter at their own first observation",
+      "version": 1,
+      "status": "inferred",
+      "approval": null
+    },
+    {
+      "id": "annualized_volatility",
+      "label": "Annualized volatility",
+      "description": "Sample standard deviation of daily returns annualized with sqrt(252). The window (rolling versus whole selected window, e.g. 30 trading sessions) must be stated with the result; it is not silently invented.",
+      "source_relation": "index_prices",
+      "formula": "stddev_samp(daily_return) * sqrt(252)",
+      "required_fields": [
+        "close"
+      ],
+      "dimensions": [
+        "symbol"
+      ],
+      "valid_time_grains": [
+        "daily",
+        "trading_day"
+      ],
+      "unit": "annualized_fraction",
+      "format": "percentage",
+      "aggregation": "non_additive",
+      "rollup": "requires_explicit_window_versioned_at_first_use",
+      "missing_data_policy": "computed over available returns only; missing sessions shrink the sample",
+      "version": 1,
+      "status": "inferred",
+      "approval": null
+    },
+    {
+      "id": "max_drawdown",
+      "label": "Maximum drawdown",
+      "description": "Worst peak-to-trough fraction of the normalized level within the selected window.",
+      "source_relation": "index_prices",
+      "formula": "min(normalized_level / running_max(normalized_level) - 1)",
+      "required_fields": [
+        "close"
+      ],
+      "dimensions": [
+        "symbol"
+      ],
+      "valid_time_grains": [
+        "daily",
+        "trading_day",
+        "monthly",
+        "weekly"
+      ],
+      "unit": "percentage_fraction",
+      "format": "percentage",
+      "aggregation": "non_additive",
+      "rollup": "computed over the selected window end points",
+      "missing_data_policy": "computed over available observations only",
+      "version": 1,
+      "status": "inferred",
+      "approval": null
+    }
+  ]
+}

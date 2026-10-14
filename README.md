@@ -155,6 +155,7 @@ The three terminal decisions are:
 - Syntax-coloured SQL, tabular results, progress, cancellation and token accounting
 - Result-equivalence and performance gates for explicit optimization requests
 - Evidence-based correctness review and human-in-the-loop escalation
+- Versioned governed semantic catalog with approval-record status model and evidence-backed verification probes
 
 ## Recovery modes
 
@@ -262,6 +263,7 @@ Important settings:
 | `TEXT2SQL_POSTGRES_DATABASES` | PostgreSQL database allowlist | unset |
 | `TEXT2SQL_PROFILE_ROOT` | Offline profile root | `profiles` |
 | `TEXT2SQL_GLOSSARY_ROOT` | Approved glossary root | `data/business_glossaries` |
+| `TEXT2SQL_SEMANTIC_CATALOG_ROOT` | Governed semantic catalog root | `data/semantic_catalogs` |
 | `TEXT2SQL_RETRIEVAL_TABLES` | High-recall table budget | `5` |
 | `TEXT2SQL_RETRIEVAL_COLUMNS` | Approximate columns per table | `5` |
 | `TEXT2SQL_SCHEMA_RERANKER_ENABLED` | Enable LightGBM column reranking | `true` |
@@ -290,6 +292,8 @@ See [.env.example](.env.example) for provider-specific settings. Never commit `.
 | `GET /api/chat/jobs/{job_id}` | Retrieve progress or result |
 | `DELETE /api/chat/jobs/{job_id}` | Cancel an active query |
 | `POST /api/check` | Parse supplied SQL; execution requires administrative enablement |
+| `GET /api/databases/{db_id}/semantic-catalog` | Governed semantic catalog composed with live schema status |
+| `GET /api/databases/{db_id}/semantic-catalog/verification` | Evidence-backed grain, quality, coverage and freshness probes |
 
 Example:
 
@@ -308,6 +312,22 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 
 Conversation state is in memory by default. Set `TEXT2SQL_CONVERSATION_STORE` to retain versioned
 state in SQLite across API restarts.
+
+## Semantic catalog
+
+Databases may carry a governed, versioned semantic catalog document
+(`data/semantic_catalogs/<db_id>.json`). It declares entities, natural grain,
+time semantics, quality contracts, join provenance and business metrics with an
+explicit status model: `observed | inferred | reviewed | approved | stale |
+conflicting`. Machine-authored facts land as `inferred` and can never promote
+themselves; `approved` facts require a human `approval_source: human_review`
+record, are re-validated against the live schema on every read, and a failed
+probe surfaces them as `conflicting` or `stale` instead of silently trusting them.
+
+`GET /api/databases/{db_id}/semantic-catalog` composes the document with live
+schema state; `/verification` runs the read-only probes (relation existence,
+declared column match, grain uniqueness, required null checks, positive measures,
+time coverage) and returns evidence-backed claims.
 
 ## Verification
 
