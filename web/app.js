@@ -816,9 +816,6 @@ function attachChartInvestigations(article, presentation) {
     ]);
   });
 }
-document.addEventListener("pointerdown", event => {
-  if (activeInsight && !activeInsight.contains(event.target)) dismissInsight();
-});
 
 function renderChartInto(slot, presentation, generation) {
   slot._echart?.dispose?.();
@@ -1113,13 +1110,13 @@ async function appendAssistant(body, elapsed, options = {}) {
   const sqlNotAvailable = explanatory || modelUnavailable || body.clarification_required;
   const sqlText = generation.sql || "";
   const displaySql = sqlNotAvailable ? "" : (generation.formatted_sql || formatSqlForDisplay(sqlText));
-  fragment.querySelector(".sql-panel-pane").hidden = sqlNotAvailable;
+  fragment.querySelector(".sql-panel-pane").hidden = sqlNotAvailable || mode === "chart";
   if (!sqlNotAvailable) renderHighlightedSql(fragment.querySelector(".language-sql"), displaySql);
-  fragment.querySelector(".result-panel-pane").hidden = sqlNotAvailable || explanatory;
+  fragment.querySelector(".result-panel-pane").hidden = sqlNotAvailable || explanatory || mode === "chart";
 
   const actions = fragment.querySelector(".answer-actions");
   if (accepted && !explanatory) {
-    if (body.run_id && !options.restored) actions.append(actionButton("Branch from here", "git-branch", async () => {
+    if (body.run_id && !options.restored) actions.append(actionButton("Branch from here", "git", async () => {
       try { await continueRun(body.run_id); $("#messageInput").placeholder = "Explore an alternative question from this point…"; }
       catch (error) { showError(error.message); }
     }));
@@ -2250,6 +2247,9 @@ document.addEventListener("DOMContentLoaded", () => {
   target.querySelectorAll("[data-icon]").forEach((slot) => { slot.innerHTML = icon(slot.dataset.icon, 18); });
 });
 
+document.addEventListener("pointerdown", event => {
+  if (activeInsight && !activeInsight.contains(event.target)) dismissInsight();
+});
 $("#historySearch").addEventListener("input", renderHistory);
 $("#clearHistory").addEventListener("click", async () => {
   try {
