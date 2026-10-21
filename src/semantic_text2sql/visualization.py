@@ -41,6 +41,30 @@ _REQUEST = re.compile(
     re.I,
 )
 _FOLLOWUP = re.compile(r"\b(?:it|that|this|previous|last|instead|horizontal|vertical)\b", re.I)
+_HORIZONTAL = re.compile(r"\bhorizontal\b", re.I)
+_VERTICAL = re.compile(r"\bvertical\b", re.I)
+_PER = re.compile(
+    r"\b(?:grouped\s+by|per)\s+((?:[A-Za-z_][A-Za-z0-9_]*)(?:\s+[A-Za-z_][A-Za-z0-9_]*){0,2}?)"
+    r"(?=\s+(?:in\s+(?:19|20)\d\d\b|as\b)|[,.;!?]|\s*$)",
+    re.I,
+)
+_BY = re.compile(
+    r"\bby\s+((?:[A-Za-z_][A-Za-z0-9_]*)(?:\s+[A-Za-z_][A-Za-z0-9_]*){0,2}?)"
+    r"(?:\s+and\s+(([A-Za-z_][A-Za-z0-9_]*)(?:\s+[A-Za-z_][A-Za-z0-9_]*){0,2}?))?"
+    r"(?=\s+(?:as|and|in\s+(?:19|20)\d\d|of|for|per|with|over|during|between)\b|[,.;!?]|\s*$)",
+    re.I,
+)
+_VERSUS = re.compile(
+    r"\b(?:against|versus|vs\.?)\s+([A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*?)"
+    r"(?=\s+(?:in\s+(?:19|20)\d\d|by|for|per|over)\b|[,.;!?]|\s*$)",
+    re.I,
+)
+_SIZED = re.compile(
+    r"\bsi[sz]ed?\s+by\s+([A-Za-z_][A-Za-z0-9_]*(?:\s+[A-Za-z_][A-Za-z0-9_]*)*?)"
+    r"(?=\s+(?:as|and|in|by|per)\b|[,.;!?]|\s*$)",
+    re.I,
+)
+_GRAIN = re.compile(r"\b(daily|monthly|yearly|weekly)\b", re.I)
 _DATE_SHAPE = re.compile(r"(?:\d{4}|\d{6}|\d{4}-\d{2}|\d{4}-\d{2}-\d{2})\Z")
 
 
@@ -68,8 +92,13 @@ def parse_intent(question: str, *, has_previous: bool = False) -> VisualizationI
         None,
     )
     requested = bool(match or _REQUEST.search(question))
+    orientation_word = _HORIZONTAL.search(question) or _VERTICAL.search(question)
     if not requested:
-        return VisualizationIntent(requested=False)
+        if orientation_word and has_previous and _FOLLOWUP.search(question):
+            # "Make it horizontal" only refers to an existing chart.
+            requested = True
+        else:
+            return VisualizationIntent(requested=False)
     unsupported = re.search(
         r"\b(radar|sankey|gauge|waterfall|funnel|candlestick)\s+(?:chart|plot|graph)\b",
         question,
@@ -81,11 +110,48 @@ def parse_intent(question: str, *, has_previous: bool = False) -> VisualizationI
         or re.match(r"^\s*(?:make|turn|use)\b", question, re.I)
         and not re.search(r"\b(?:by|of|for|in 20\d\d)\b", question, re.I)
     )
+    # Deterministic structural extraction: chart family first, then axes,
+    # series and bubble-size dims when the request names them unambiguously.
+    if match is None:
+        if _HORIZONTAL.search(question) and followup:
+            match = ("horizontal_bar", "")
+        elif _VERTICAL.search(question) and followup:
+            match = ("bar", "")
+        elif _GRAIN.search(question):
+            match = (None, "")
+    per = _PER.search(question)
+    per_name = per.group(1).strip().casefold() if per else None
+    by_dims: list[str] = []
+    for first, second, _third in _BY.findall(question):
+        by_dims.append(first.strip().casefold())
+        if second:
+            by_dims.append(second.strip().casefold())
+    versus = _VERSUS.search(question)
+    sized = _SIZED.search(question)
+    multi_family = bool(
+        match
+        and match[0]
+        in {"multi_line", "stacked_area", "grouped_bar", "stacked_bar"}
+    )
+    if multi_family:
+        # A grouped/stacked/multi-series request maps the named dimension(s) to
+        # the series; the grain word ("monthly") keeps the x axis temporal.
+        series = per_name or (by_dims[0] if by_dims else None)
+        x = by_dims[1] if len(by_dims) > 1 else None
+    else:
+        # "per X" / "by X" names the x-axis dimension for single-series charts
+        # ("races per year", "revenue by month"); a second "by" is the series.
+        series = by_dims[1] if len(by_dims) > 1 else None
+        x = by_dims[0] if by_dims else per_name
     return VisualizationIntent(
         requested=True,
         chart_type=match[0] if match else None,
-        explicit_type=match is not None,
+        explicit_type=match is not None and bool(match[1] or match[0]),
         followup=followup,
+        x=x,
+        y=versus.group(1).strip().casefold() if versus else None,
+        series=series,
+        size=sized.group(1).strip().casefold() if sized else None,
         unsupported_type=unsupported.group(1).lower() if unsupported else None,
     )
 
@@ -152,6 +218,34 @@ def _column_roles(
     return numeric, temporal, category
 
 
+def _resolve_dimension(raw: Any, columns: list[str]) -> str | None:
+    """Map a free-text dimension mention onto an actual result column."""
+
+    if not raw:
+        return None
+    if isinstance(raw, str) and raw in columns:
+        return raw
+    text = re.sub(r"[_\s-]+", " ", str(raw).strip().casefold())
+    if not text:
+        return None
+
+    def norm(name: str) -> str:
+        return re.sub(r"[_\s-]+", " ", name.casefold()).strip()
+
+    exact = next((name for name in columns if norm(name) == text), None)
+    if exact:
+        return exact
+    first_word = text.split()[0]
+    return next(
+        (
+            name
+            for name in columns
+            if text in norm(name) or norm(name) == first_word
+        ),
+        None,
+    )
+
+
 def _mentioned(columns: list[str], text: str) -> str | None:
     normalized = text.casefold().replace("_", " ")
     matches = [
@@ -214,10 +308,10 @@ def plan_chart(
             requested = "grouped_bar" if len(category) == 2 else "bar"
         else:
             raise VisualizationError("Specify a chart type and the columns to plot.")
-    x = intent.x
-    y = intent.y
-    series = intent.series
-    size = intent.size
+    x = _resolve_dimension(intent.x, columns) if intent.x else intent.x
+    y = _resolve_dimension(intent.y, columns) if intent.y else intent.y
+    series = _resolve_dimension(intent.series, columns) if intent.series else intent.series
+    size = _resolve_dimension(intent.size, columns) if intent.size else intent.size
     use_series = requested in {"multi_line", "stacked_area", "grouped_bar", "stacked_bar"}
     point_series = requested in {"scatter", "bubble"}
     frequency = next(
@@ -268,7 +362,17 @@ def plan_chart(
         y = y or (numeric[0] if len(numeric) == 1 else _mentioned(numeric, question))
     else:
         x = x or (temporal[0] if temporal else category[0] if category else None)
-        y = y or (numeric[0] if len(numeric) == 1 else _mentioned(numeric, question))
+        remaining_numeric = [name for name in numeric if name != x]
+        mentioned = _mentioned(numeric, question)
+        if mentioned == x:
+            mentioned = None
+        y = y or mentioned or (
+            remaining_numeric[0]
+            if x and len(remaining_numeric) == 1
+            else numeric[0]
+            if len(numeric) == 1
+            else None
+        )
         if use_series:
             series = series or next((name for name in category if name != x), None)
     if (

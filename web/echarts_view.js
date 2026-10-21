@@ -1,7 +1,12 @@
 /* Apache ECharts adapter for backend-validated, explicit chart specifications.
    No user text is evaluated as code or merged into ECharts options. */
 window.QueryflowECharts = (function () {
-  const PALETTE = ["#6e60e6", "#20946c", "#c1803a", "#627ed1", "#d45d65", "#998df6"];
+  /* Series colors come from the shared token system (--chart-1..--chart-8,
+     overridden per theme in styles.css). No arbitrary rainbow hue, one
+     palette shared by every chart type. */
+  const FALLBACK_PALETTE = [
+    "#6e60e6", "#4f74d4", "#20946c", "#c1803a", "#d45d65", "#998df6", "#2e9bb5", "#b0568d",
+  ];
   const TYPES = new Set([
     "line", "multi_line", "step_line", "area", "stacked_area", "bar",
     "horizontal_bar", "grouped_bar", "stacked_bar", "scatter", "bubble",
@@ -11,6 +16,11 @@ window.QueryflowECharts = (function () {
   function cssVar(name, fallback) {
     if (typeof getComputedStyle !== "function") return fallback;
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  }
+  function palette() {
+    const steps = FALLBACK_PALETTE.map((_, index) => cssVar(`--chart-${index + 1}`, ""));
+    const resolved = steps.filter(Boolean);
+    return resolved.length ? resolved : FALLBACK_PALETTE;
   }
   function formatNumber(value, compact) {
     if (value == null || value === "") return "";
@@ -51,10 +61,10 @@ window.QueryflowECharts = (function () {
     const compact = spec.number_format === "compact";
     const base = {
       animation: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-      color: PALETTE,
+      color: palette(),
       textStyle: { color: text, fontFamily: "Inter, sans-serif" },
       tooltip: { trigger: "item", renderMode: "richText", backgroundColor: cssVar("--sql-bg", "#1d2130"),
-        textStyle: { color: "#f1f1f6" } },
+        textStyle: { color: cssVar("--sql-text", "#dce4ff") } },
       aria: { enabled: true, decal: { show: false } },
     };
     const format = value => formatNumber(value, compact);
@@ -81,7 +91,7 @@ window.QueryflowECharts = (function () {
       const max = Math.max(...data.map(row => Number(row[y])));
       return { ...base, tooltip: { ...base.tooltip, formatter: item => `${item.value[0]}: ${format(item.value[1])}` },
         visualMap: { min, max, calculable: true, orient: "horizontal", left: "center", top: 10,
-          inRange: { color: ["#efedff", "#6e60e6"] } },
+          inRange: { color: [cssVar("--accent-soft", "#efedff"), cssVar("--accent", "#6e60e6")] } },
         calendar: years.map((year, index) => ({ range: year, top: 65 + index * 190,
           cellSize: ["auto", 16], right: 24, left: 40,
           yearLabel: { color: muted }, monthLabel: { color: muted }, dayLabel: { color: muted } })),
@@ -98,7 +108,7 @@ window.QueryflowECharts = (function () {
         yAxis: { type: "category", data: ys, name: group, axisLabel: { color: muted } },
         visualMap: { min: Math.min(...values), max: Math.max(...values), calculable: true,
           orient: "horizontal", left: "center", bottom: 0,
-          inRange: { color: ["#efedff", "#6e60e6"] } },
+          inRange: { color: [cssVar("--accent-soft", "#efedff"), cssVar("--accent", "#6e60e6")] } },
         series: [{ type: "heatmap", data: data.map(row => [xs.indexOf(label(row[x])),
           ys.indexOf(label(row[group])), row[y]]) }] };
     }

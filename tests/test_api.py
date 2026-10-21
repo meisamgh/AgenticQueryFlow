@@ -383,15 +383,22 @@ def test_web_chat_application_is_served() -> None:
     result_position = page.text.index('class="panel-card result-panel-pane"')
     versions_position = page.text.index('class="versions-panel"')
     recovery_position = page.text.index('class="recovery-panel"')
-    details_position = page.text.index('class="technical-details"')
-    attempts_position = page.text.index('class="attempts-panel"')
+    # Run details (attempts, tokens, timings) moved from the answer template
+    # into the inspector's validation section; the message stays clean.
+    assert 'class="technical-details"' not in page.text
+    validation_position = page.text.index('id="validationContent"')
+    attempts_position = script.text.index('class="attempts-panel')
+    assert 'class="attempts-panel' not in page.text
+    assert attempts_position > 0
+    # The inspector (with validation run details) is defined before the
+    # answer template in the document, and the answer keeps only its own
+    # closable panels inline.
+    assert validation_position < sql_position
     assert (
         sql_position
         < result_position
         < versions_position
         < recovery_position
-        < details_position
-        < attempts_position
     )
 
 

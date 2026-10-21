@@ -149,6 +149,40 @@ def test_intent_distinguishes_show_from_plot_and_followup() -> None:
     assert parse_intent("Make it a line chart instead.", has_previous=True).followup
 
 
+def test_intent_axis_extraction_from_per_by_and_multi_dimensions() -> None:
+    intent = parse_intent("Plot the number of races per year as a line chart.")
+    assert intent.chart_type == "line"
+    assert intent.x == "year"
+
+    grouped = parse_intent("Plot revenue by month and country.")
+    assert grouped.x == "month"
+    assert grouped.series == "country"
+
+    stacked = parse_intent("Stacked bar chart of monthly revenue by country.")
+    assert stacked.chart_type == "stacked_bar"
+    assert stacked.series == "country"
+
+    scatter = parse_intent("Scatter plot of spending against transaction count.")
+    assert scatter.chart_type == "scatter"
+    assert scatter.y == "transaction count"
+
+
+def test_unmentioned_aggregate_dimension_becomes_the_remaining_numeric_axis() -> None:
+    """The aggregate alias does not always echo question wording (race_count, total_orders)."""
+
+    intent = parse_intent("Plot the number of races per year as a line chart.")
+    spec = plan_chart(
+        intent,
+        question="Plot the number of races per year as a line chart.",
+        columns=["year", "race_count"],
+        rows=[[1950, 7], [1951, 8]],
+        truncated=False,
+    )
+    assert spec.chart_type == "line"
+    assert spec.x == "year"
+    assert spec.y == "race_count"
+
+
 def test_precomputed_box_summary_requires_ordered_five_numbers() -> None:
     columns = ["segment", "min", "q1", "median", "q3", "max"]
     intent = parse_intent("Create a box plot of spending by segment.")

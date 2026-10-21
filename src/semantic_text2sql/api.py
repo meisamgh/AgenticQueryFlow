@@ -16,6 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.conversation import (
+    ANALYTICAL_CORRECTION_OPERATIONS,
     EXPLANATION_OPERATIONS,
     STATE_REQUIRED_OPERATIONS,
     ConversationConflict,
@@ -58,6 +59,7 @@ from semantic_text2sql.models import (
     HumanReviewRequest,
     ModelOption,
     ModelProvider,
+    PresentationState,
     ResultPresentation,
     TokenUsage,
     TurnInterpretation,
@@ -813,6 +815,33 @@ def create_app(
                 },
             )
         assert pending is not None
+        # Versioned presentation state: an analytical correction that follows a
+        # chart-producing turn keeps the chart as the primary answer. The mode
+        # comes from backend conversation state, never from a client heuristic.
+        last_accepted = recent_results.get((request.session_id, request.db_id))
+        last_chart_spec = (
+            last_accepted.presentation.chart_spec
+            if last_accepted and last_accepted.presentation
+            else None
+        )
+        if (
+            has_matching_state
+            and last_chart_spec is not None
+            and not viz_intent.requested
+            and operation in ANALYTICAL_CORRECTION_OPERATIONS
+        ):
+            stable_types = {"line", "bar", "area", "step_line", "horizontal_bar"}
+            viz_intent = viz_intent.model_copy(
+                update={
+                    "requested": True,
+                    "followup": False,
+                    "chart_type": (
+                        last_chart_spec.chart_type
+                        if last_chart_spec.chart_type in stable_types
+                        else None
+                    ),
+                }
+            )
         for job in chat_jobs.values():
             if job.get("session_id") == request.session_id and job.get("status") == "running":
                 job["understanding"] = {
@@ -1114,16 +1143,45 @@ def create_app(
         )
         return response
 
+    def build_presentation_state(response: ChatResponse) -> PresentationState | None:
+        """Derive the typed presentation state from a completed response.
+
+        A validated chart wins; otherwise an accepted SQL answer is SQL mode.
+        Clarifications and failed operations intentionally yield ``None`` so the
+        previously accepted state is never overwritten by a bad turn.
+        """
+
+        if response.presentation and response.presentation.chart_spec is not None:
+            spec = response.presentation.chart_spec
+            return PresentationState(
+                mode="chart",
+                chart_type=spec.chart_type,
+                x=spec.x,
+                y=spec.y,
+                series=spec.series,
+                size=spec.size,
+                title=spec.title,
+                source_run_id=response.run_id,
+                data_complete=not (response.generation and response.generation.truncated),
+            )
+        if response.generation and response.generation.accepted and response.generation.sql:
+            return PresentationState(mode="sql", source_run_id=response.run_id)
+        return response.presentation_state
+
     async def save_response(request: ChatRequest, response: ChatResponse) -> ChatResponse:
         if response.operation == "RESET_CONTEXT":
             recent_results.pop((request.session_id, request.db_id), None)
             return response
         run_id = uuid4().hex
+        presentation_state = build_presentation_state(response)
+        if presentation_state is not None and presentation_state.source_run_id is None:
+            presentation_state = presentation_state.model_copy(update={"source_run_id": run_id})
         response = response.model_copy(
             update={
                 "run_id": run_id,
                 "turn_id": run_id,
                 "recovery_events": recovery_events(response.generation, run_id),
+                "presentation_state": presentation_state,
             }
         )
         try:

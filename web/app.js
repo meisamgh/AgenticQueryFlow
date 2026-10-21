@@ -648,6 +648,26 @@ function responseMode(body, opts = {}) {
   return "sql";
 }
 
+/* The backend's versioned PresentationState is authoritative when present:
+   analytical corrections received a "chart" mode stay chart-first, and a new
+   independent question comes back as "sql". Client heuristics only serve
+   responses produced before this contract existed. */
+function presentationMode(body, opts = {}) {
+  const stateMode = body.presentation_state?.mode;
+  if (stateMode === "chart") {
+    return body.presentation?.chart_spec ? "chart" : "chart_unavailable";
+  }
+  if (stateMode === "sql") {
+    const fallback = responseMode(body, opts);
+    return fallback === "explanation" ? "explanation" : "sql";
+  }
+  return responseMode(body, opts);
+}
+
+function isChartMode(screen) {
+  return screen === "chart";
+}
+
 function renderChartInto(slot, presentation, generation) {
   slot._echart?.dispose?.();
   slot.replaceChildren();
@@ -665,17 +685,47 @@ function renderChartInto(slot, presentation, generation) {
   return { echarts: null };
 }
 
+/* Independent SQL/data inspection for chart-first responses: at most one
+   panel is open at a time, each closable without touching the chart. */
+function setChartInspection(article, which) {
+  const split = article.querySelector(".sql-result-split");
+  const sqlPane = article.querySelector(".sql-panel-pane");
+  const dataPane = article.querySelector(".result-panel-pane");
+  if (!split || !sqlPane || !dataPane) return;
+  split.classList.add("chart-inspect");
+  split.hidden = which === null;
+  sqlPane.hidden = which !== "sql";
+  dataPane.hidden = which !== "data";
+}
+
 function wireChartSection(article, presentation, generation) {
   const section = article.querySelector(".chart-section");
   const slot = article.querySelector(".chart-slot");
+  if (!section || !slot) return;
   const kinds = section.querySelector(".chart-kinds");
   const more = section.querySelector(".chart-more");
   const menu = section.querySelector(".chart-menu");
-  if (!section || !slot) return;
   article._echart = null;
   article._chartType = presentation.chart_type;
   kinds.hidden = true;
   article._echart = (renderChartInto(slot, presentation, generation)).echarts;
+  /* Theme switches recolor the shared token palette, so live charts repaint. */
+  article._chartRerender = () => {
+    const result = renderChartInto(slot, presentation, generation);
+    article._echart = result.echarts;
+  };
+  [".sql-panel-pane", ".result-panel-pane"].forEach((selector) => {
+    const header = article.querySelector(`${selector} > header`);
+    if (!header) return;
+    const close = document.createElement("button");
+    close.type = "button";
+    close.className = "icon-button chart-inspect-close";
+    close.title = "Close panel";
+    close.setAttribute("aria-label", "Close panel");
+    close.innerHTML = icon("x", 14);
+    header.append(close);
+    close.addEventListener("click", () => setChartInspection(article, null));
+  });
   const closeMenu = () => { menu.hidden = true; more.setAttribute("aria-expanded", "false"); };
   more.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -688,15 +738,18 @@ function wireChartSection(article, presentation, generation) {
     item.addEventListener("click", () => {
       closeMenu();
       const action = item.dataset.chartAction;
-      if (action === "view-sql" || action === "view-data") {
-        article.querySelector(".sql-result-split").hidden = false;
+      if (action === "view-sql") {
+        setChartInspection(article, "sql");
+      } else if (action === "view-data") {
+        setChartInspection(article, "data");
       } else if (action === "download") {
         exportChartPng(article);
       } else if (action === "expand") {
         openChartFullscreen(article, presentation, generation);
       } else if (action === "inspect") {
         revealInspector();
-        article.querySelector(".technical-details")?.scrollIntoView({ behavior: "smooth", block: "start" });
+        const validation = $("#validationSection");
+        if (validation) { validation.open = true; validation.scrollIntoView({ behavior: "smooth", block: "start" }); }
       }
     });
   });
@@ -760,6 +813,9 @@ function openChartFullscreen(article, presentation, generation) {
   const slot = slotHolder;
   const { echarts } = renderChartInto(slot, presentation, generation);
   overlay._echart = echarts;
+  overlay._chartRerender = () => {
+    overlay._echart = renderChartInto(slot, presentation, generation).echarts;
+  };
 }
 
 function closeChartFullscreen() {
@@ -854,12 +910,15 @@ async function appendAssistant(body, elapsed, options = {}) {
   const timings = body.timings_ms || {};
   const optimization = generation.optimization || null;
   const { explanatory, modelUnavailable, status } = responseStatus(body, attempts);
-  const serverElapsed = timings.total == null ? `${elapsed.toFixed(1)}s` : `${(timings.total / 1000).toFixed(1)}s server`;
-  const tokenBadge = tokenTotal == null ? "tokens unavailable" : `${tokenTotal.toLocaleString()} tokens`;
-  const badges = [body.operation, status, serverElapsed, `${attempts.length} attempt${attempts.length === 1 ? "" : "s"}`, tokenBadge];
-  if (optimization) badges.splice(2, 0, optimization.status.toUpperCase().replaceAll("_", " "));
-  if (body.sql_version) badges.unshift(`SQL v${body.sql_version}`);
-  if (options.restored) badges.unshift(`Saved ${new Date(options.run.created_at * 1000).toLocaleString()}`);
+  const badges = [];
+  if (status === "FAILED" || modelUnavailable) badges.push(status === "FAILED" ? "FAILED" : "MODEL UNAVAILABLE");
+  if (optimization
+    && (optimization.status === "changed_result" || optimization.status === "equivalence_unproven")) {
+    badges.push("OPTIMIZATION SKIPPED");
+  }
+  if (options.restored) badges.push(`SAVED ${new Date(options.run.created_at * 1000).toLocaleString()}`);
+  // Latency, attempts, token accounting, pipeline order and the verified
+  // model context live in the inspector's run details — not on the message.
   const meta = fragment.querySelector(".response-meta");
   badges.forEach((value) => {
     const badge = document.createElement("span");
@@ -867,6 +926,7 @@ async function appendAssistant(body, elapsed, options = {}) {
     badge.textContent = value;
     meta.append(badge);
   });
+  if (badges.length) meta.hidden = false;
   fragment.querySelector(".response-heading h3").textContent = modelUnavailable ? "Model unavailable"
     : body.operation === "VISUALIZE" ? "Visualization"
     : explanatory ? "Explanation" : accepted ? "Answer" : "Query issue";
@@ -889,10 +949,14 @@ async function appendAssistant(body, elapsed, options = {}) {
   // explicit visualization requests show a chart-first response (Mode B).
   const viz = options.viz ?? state.pendingVizRequest === true;
   state.pendingVizRequest = null;
-  const mode = responseMode(body, { viz });
+  const mode = presentationMode(body, { viz });
   const chartSection = fragment.querySelector(".chart-section");
   const presentation = body.presentation || null;
-  if (mode === "chart") {
+  const chartDataComplete = body.presentation_state?.data_complete !== false
+    && !generation.truncated
+    && (!(presentation?.chart_spec) || presentation.chart_spec.source_row_count === 0
+      || presentation.chart_spec.data.length >= Math.min(presentation.chart_spec.source_row_count, 500));
+  if (mode === "chart" && chartDataComplete) {
     chartSection.hidden = false;
     const spec = presentation.chart_spec;
     fragment.querySelector(".chart-title").textContent = presentation.title || `${presentation.y} by ${presentation.x}`;
@@ -910,6 +974,13 @@ async function appendAssistant(body, elapsed, options = {}) {
     chartFootnote.textContent = `Generated on request · ${spec.data.length} result rows`;
     chartFoot.append(chartLegend, chartFootnote);
     chartSection.append(chartFoot);
+  } else if (mode === "chart") {
+    // A versioned "chart" state with incomplete data must never render a
+    // partial chart; demand a fresh validated execution instead.
+    chartSection.remove();
+    renderCallout(fragment, "warn", "alert",
+      "The stored chart snapshot is incomplete. Rerun the query to restore this visualization from a fresh, complete result.");
+    state.lastPresentationMode = "chart_incomplete";
   } else if (mode === "chart_unavailable") {
     chartSection.remove();
     renderCallout(fragment, "warn", "alert", presentation?.chart_reason
@@ -922,7 +993,16 @@ async function appendAssistant(body, elapsed, options = {}) {
   const sqlText = generation.sql || "";
   const displaySql = sqlNotAvailable ? "" : (generation.formatted_sql || formatSqlForDisplay(sqlText));
   fragment.querySelector(".sql-panel-pane").hidden = sqlNotAvailable;
-  if (!sqlNotAvailable) renderHighlightedSql(fragment.querySelector(".language-sql"), displaySql);
+  if (!sqlNotAvailable) {
+    renderHighlightedSql(fragment.querySelector(".language-sql"), displaySql);
+    const validity = fragment.querySelector(".sql-validity");
+    if (validity) {
+      const parts = ["Validated"];
+      if (body.sql_version) parts.push(`SQL v${body.sql_version}`);
+      if (generation.truncated) parts.push("preview");
+      validity.textContent = parts.join(" · ");
+    }
+  }
   fragment.querySelector(".result-panel-pane").hidden = sqlNotAvailable || explanatory;
 
   const actions = fragment.querySelector(".answer-actions");
@@ -944,13 +1024,8 @@ async function appendAssistant(body, elapsed, options = {}) {
     actions.before(snapshot);
   }
 
-  renderTokenAccounting(fragment, body, generation);
-  renderPipelineDetails(fragment, timings, body, generation);
-  renderAttempts(fragment, attempts);
   renderHumanReview(fragment, body.human_review);
   if (!sqlNotAvailable) {
-    fragment.querySelector(".context-details").hidden = false;
-    fragment.querySelector(".context-json code").textContent = JSON.stringify(generation.model_context || {}, null, 2);
     fragment.querySelector(".copy-button").addEventListener("click", (event) => {
       navigator.clipboard.writeText(sqlText);
       event.currentTarget.classList.add("active");
@@ -974,9 +1049,6 @@ async function appendAssistant(body, elapsed, options = {}) {
   }
   if (generation.recovery && generation.recovery.activated) {
     renderRecoveryTimeline(fragment.querySelector(".recovery-panel"), generation.recovery, body.recovery_events || []);
-  }
-  if (Object.keys(timings).length) {
-    fragment.querySelector(".response-note").title = `Routing ${timings.routing || 0} ms · Planning ${timings.planning || 0} ms · Generation/validation/execution ${timings.generation_validation_execution || 0} ms`;
   }
   hydrateIcons(article);
   $("#messages").append(fragment);
@@ -1169,6 +1241,19 @@ function updateInspector(body) {
   const understanding = $("#understandingContent");
   understanding.replaceChildren();
   const rows = underRows(body.conversation_interpretation, body.state);
+  const chartSpec = body.presentation?.chart_spec;
+  if (chartSpec) {
+    // A chart answer: provenance of what is on screen comes first.
+    const provenance = [
+      ["Chart type", String(chartSpec.chart_type || "").replaceAll("_", " ")],
+      ["X axis", chartSpec.x_label || chartSpec.x || ""],
+      ["Y axis", chartSpec.y_label || chartSpec.y || ""],
+      chartSpec.series ? ["Series", String(chartSpec.series)] : null,
+      ["Result rows", String(chartSpec.source_row_count ?? chartSpec.data?.length ?? "")],
+      ...(chartSpec.warnings || []).map((warning) => ["Chart note", warning]),
+    ].filter((row) => row && row[1]);
+    rows.splice(0, 0, ...provenance);
+  }
   if (!rows.length) {
     understanding.append(emptyNote("Run a query to see how it was understood."));
   } else {
@@ -1194,6 +1279,77 @@ function updateInspector(body) {
   renderInspectorSchema();
   renderInspectorRecovery(body);
   renderInspectorPerformance(body);
+  renderInspectorRunDetails(body);
+  prioritizeInspector(body);
+}
+
+/* The inspector holds everything technical that used to sit under the answer:
+   validation attempts, token accounting, pipeline timings and the verified
+   model context. Sections are ordered by what the current response is. */
+function renderInspectorRunDetails(body) {
+  const target = $("#validationContent");
+  const schemaContent = $("#schemaContent");
+  if (!target) return;
+  const generation = body.generation || {};
+  const tech = document.createElement("div");
+  tech.innerHTML = [
+    '<details class="attempts-panel inspector-block">',
+    '  <summary><span data-icon="shield"></span> SQL validation attempts <span class="attempts-count"></span></summary>',
+    '  <div class="attempt-summary"></div>',
+    '  <div class="attempts-list"></div>',
+    '</details>',
+    '<details class="token-card inspector-block">',
+    '  <summary><span data-icon="hash"></span> Token usage</summary>',
+    '  <div class="token-reduction"></div>',
+    '  <div class="token-grid"></div>',
+    '  <p class="token-note"></p>',
+    '</details>',
+    '<details class="pipeline-details inspector-block">',
+    '  <summary><span data-icon="clock"></span> Pipeline timings</summary>',
+    '  <div class="pipeline-rows"></div>',
+    '  <details class="progress-history"><summary>Request activity</summary><ul></ul></details>',
+    '</details>',
+  ].join("\n");
+  renderTokenAccounting(tech, body, generation);
+  renderPipelineDetails(tech, body.timings_ms || {}, body, generation);
+  renderAttempts(tech, generation.attempts || []);
+  [...tech.querySelectorAll("details")].forEach((block) => target.append(block));
+  const context = JSON.stringify(generation.model_context || {}, null, 2);
+  if (context !== "{}" && schemaContent) {
+    schemaContent.querySelectorAll("[data-context-panel]").forEach((node) => node.remove());
+    const details = document.createElement("details");
+    details.className = "inspector-block";
+    details.dataset.contextPanel = "true";
+    details.innerHTML = '<summary><span data-icon="network"></span> Verified context sent to the model</summary>';
+    const pre = document.createElement("pre");
+    pre.className = "context-json";
+    pre.append(Object.assign(document.createElement("code"), { textContent: context }));
+    details.append(pre);
+    schemaContent.append(details);
+  }
+}
+
+function prioritizeInspector(body) {
+  const sections = {
+    understanding: $("#understandingSection"),
+    schema: $("#schemaSection"),
+    recovery: $("#recoverySection"),
+    validation: $("#validationSection"),
+  };
+  if (!sections.understanding || !sections.validation) return;
+  const bodyEl = sections.understanding.parentElement;
+  const recoveryActive = body.generation?.recovery?.activated === true;
+  const chartMode = Boolean(body.presentation?.chart_spec);
+  if (!recoveryActive && !chartMode && !body.generation?.recovery) {
+    bodyEl.append(sections.schema, sections.understanding, sections.validation, sections.recovery);
+    return;
+  }
+  const order = recoveryActive
+    ? [sections.recovery, sections.understanding, sections.validation, sections.schema]
+    : chartMode
+      ? [sections.understanding, sections.schema, sections.validation, sections.recovery]
+      : [sections.understanding, sections.validation, sections.schema, sections.recovery];
+  order.forEach((section) => { if (section) { section.open = section === order[0]; bodyEl.append(section); } });
 }
 
 function emptyNote(text) {
@@ -1828,7 +1984,26 @@ async function rerunSaved(record) {
 
 function restoredRunToResponse(record) {
   if (record.response_payload && Object.keys(record.response_payload).length) {
-    return record.response_payload;
+    const payload = record.response_payload;
+    if (payload.presentation_state == null) {
+      // History saved before the typed presentation state existed: synthesize
+      // it from the validated chart spec so restored threads stay chart-first.
+      const spec = payload.presentation?.chart_spec;
+      payload.presentation_state = spec
+        ? {
+            mode: "chart",
+            chart_type: spec.chart_type,
+            x: spec.x,
+            y: spec.y,
+            series: spec.series,
+            size: spec.size,
+            title: spec.title,
+          }
+        : payload.generation?.accepted
+          ? { mode: "sql" }
+          : null;
+    }
+    return payload;
   }
   return {
     session_id: record.session_id,
@@ -1927,6 +2102,8 @@ $("#themeToggle")?.addEventListener("click", () => {
   document.documentElement.dataset.theme = next;
   localStorage.setItem("queryStudioTheme", next);
   applyThemeButtons();
+  document.querySelectorAll("article").forEach((article) => article._chartRerender?.());
+  document.querySelectorAll(".chart-fullscreen").forEach((overlay) => overlay._chartRerender?.());
 });
 $("#themeToggleTop")?.addEventListener("click", () => $("#themeToggle").click());
 applyThemeButtons();

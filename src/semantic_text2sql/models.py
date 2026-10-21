@@ -809,6 +809,26 @@ class ResultPresentation(StrictModel):
     chart_spec: ChartSpec | None = None
 
 
+class PresentationState(StrictModel):
+    """Versioned, typed presentation intent for the current analytical turn.
+
+    The backend decides whether a turn is answered as SQL plus a table or as a
+    chart; the frontend never infers the mode from client-side heuristics alone.
+    """
+
+    mode: Literal["sql", "chart"] = "sql"
+    chart_type: ChartType | None = None
+    x: str | None = None
+    y: str | None = None
+    series: str | None = None
+    size: str | None = None
+    title: str | None = None
+    source_run_id: str | None = Field(
+        default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$"
+    )
+    data_complete: bool = True
+
+
 class ChatResponse(StrictModel):
     session_id: str
     run_id: str | None = None
@@ -846,6 +866,7 @@ class ChatResponse(StrictModel):
     message: str
     explanation: str | None = None
     presentation: ResultPresentation | None = None
+    presentation_state: PresentationState | None = None
     clarification_required: bool = False
     clarification_question: str | None = None
     human_review: HumanReviewRequest | None = None

@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=qf3-4" />
+    <link rel="stylesheet" href="/static/styles.css?v=qf3-6" />
     <script>
       // Apply the stored theme before first paint to avoid a flash.
       try {
@@ -205,7 +205,7 @@
               <span class="result-title response-heading"><h3>Answer</h3></span>
               <span class="status-pill"><span data-icon="check"></span> <span class="status-pill-label">Ready</span></span>
             </header>
-            <div class="badges response-meta"></div>
+            <div class="badges response-meta" hidden></div>
             <p class="response-note"></p>
             <p class="presentation-note" hidden></p>
             <div class="chart-section" hidden>
@@ -284,30 +284,6 @@
             </section>
 
             <div class="answer-actions"></div>
-
-            <div class="technical-details">
-              <details class="context-details">
-                <summary><span data-icon="network"></span> Verified context sent to the model</summary>
-                <pre class="context-json"><code></code></pre>
-                <div class="schema-tags" style="padding:8px 12px;"></div>
-              </details>
-              <details class="attempts-panel">
-                <summary><span data-icon="shield"></span> SQL validation attempts <span class="attempts-count"></span></summary>
-                <div class="attempt-summary"></div>
-                <div class="attempts-list"></div>
-              </details>
-              <details class="token-card">
-                <summary><span data-icon="hash"></span> Token usage</summary>
-                <div class="token-reduction"></div>
-                <div class="token-grid"></div>
-                <p class="token-note"></p>
-              </details>
-              <details class="pipeline-details">
-                <summary><span data-icon="clock"></span> Pipeline timings</summary>
-                <div class="pipeline-rows"></div>
-                <details class="progress-history"><summary>Request activity</summary><ul></ul></details>
-              </details>
-            </div>
           </section>
         </div>
       </article>
@@ -332,7 +308,7 @@
 
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
     <script src="/static/icons.js?v=3"></script>
-    <script src="/static/echarts_view.js?v=6"></script>
-    <script src="/static/app.js?v=qf3-6"></script>
+    <script src="/static/echarts_view.js?v=8"></script>
+    <script src="/static/app.js?v=qf3-8"></script>
   </body>
 </html>

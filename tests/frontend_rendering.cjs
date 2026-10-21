@@ -121,6 +121,9 @@ vm.runInContext(source.slice(
 context.EXPLANATION_OPERATIONS_UI = new Set([
   'EXPLAIN', 'EXPLAIN_SQL', 'EXPLAIN_RESULT', 'EXPLAIN_INTERPRETATION', 'EXPLAIN_CONTEXT', 'EXPLAIN_FAILURE',
 ]);
+context.EXPLANATION_OPERATIONS_UI = new Set([
+  'EXPLAIN', 'EXPLAIN_SQL', 'EXPLAIN_RESULT', 'EXPLAIN_INTERPRETATION', 'EXPLAIN_CONTEXT', 'EXPLAIN_FAILURE',
+]);
 test('explicit visualization language is detected; ordinary requests are not', () => {
   assert.equal(context.vizRequested('Plot monthly revenue as a line chart'), true);
   assert.equal(context.vizRequested('make it a bar chart'), true);
@@ -142,6 +145,35 @@ test('response modes hide charts for ordinary queries and offer them only when r
     'explanation',
   );
   assert.equal(context.responseMode({ generation: { accepted: false } }, { viz: true }), 'sql');
+});
+
+test('backend presentation state overrides client-side heuristics', () => {
+  const chartSpec = { chart_type: 'bar', data: [{ country: 'DE', count: 2 }] };
+  assert.equal(
+    context.presentationMode({ presentation_state: { mode: 'chart' }, presentation: { chart_spec: chartSpec } }),
+    'chart',
+  );
+  assert.equal(
+    context.presentationMode({ presentation_state: { mode: 'chart' }, presentation: { chart_type: 'bar' } }),
+    'chart_unavailable',
+  );
+  assert.equal(
+    context.presentationMode({ presentation_state: { mode: 'sql' }, generation: { accepted: true } }),
+    'sql',
+  );
+  assert.equal(
+    context.presentationMode({
+      operation: 'EXPLAIN_RESULT',
+      presentation_state: { mode: 'sql' },
+      generation: { accepted: true },
+    }),
+    'explanation',
+  );
+  // Legacy payloads (saved before the contract existed) keep the fallback.
+  assert.equal(
+    context.presentationMode({ generation: { accepted: true }, presentation: { chart_type: 'none' } }, { viz: true }),
+    'chart_unavailable',
+  );
 });
 vm.runInContext(source.slice(source.indexOf('function mergeRunChanges('), source.indexOf('async function appendAssistant(')), context);
 test('consecutive same-kind diff edits are merged for display', () => {

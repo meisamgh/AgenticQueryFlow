@@ -50,6 +50,19 @@ EXPLANATION_OPERATIONS = frozenset(
         "EXPLAIN_FAILURE",
     }
 )
+# Analytical corrections depend on the previous turn: when that turn produced a
+# chart, the corrected answer stays chart-first (never silently becomes SQL + table).
+ANALYTICAL_CORRECTION_OPERATIONS = frozenset(
+    {
+        "ADD_FILTER",
+        "REMOVE_FILTER",
+        "CHANGE_METRIC",
+        "CHANGE_GRAIN",
+        "COMPARE",
+        "REFINE",
+        "CORRECTION",
+    }
+)
 STATE_REQUIRED_OPERATIONS = frozenset(
     {
         "REFINE",

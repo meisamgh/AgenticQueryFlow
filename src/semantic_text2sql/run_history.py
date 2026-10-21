@@ -18,7 +18,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from semantic_text2sql.models import ConversationState, RecoveryTrace
+from semantic_text2sql.models import ConversationState, PresentationState, RecoveryTrace
 
 MAX_PREVIEW_ROWS = 20
 DEFAULT_SESSION_HISTORY_LIMIT = 50
@@ -56,6 +56,7 @@ class RunRecord(BaseModel):
     timings_ms: dict[str, int] = Field(default_factory=dict)
     recovery: RecoveryTrace | None = None
     presentation_summary: str | None = Field(default=None, max_length=1_800)
+    presentation_state: PresentationState | None = None
     state_snapshot: ConversationState | None = None
     response_payload: dict[str, Any] = Field(default_factory=dict)
     preview_truncated: bool = False
@@ -169,6 +170,11 @@ class RunHistoryStore:
                 "parent_run_id": record.parent_run_id,
                 "sql_version": record.sql_version,
                 "history_saved": True,
+                "presentation_state": (
+                    record.presentation_state.model_dump(mode="json")
+                    if record.presentation_state
+                    else None
+                ),
             }
         )
         return record
@@ -349,6 +355,7 @@ def build_run_record(raw: dict[str, Any]) -> RunRecord:
         timings_ms=dict(response.timings_ms or {}),
         recovery=generation.recovery if generation else None,
         presentation_summary=(response.presentation.summary if response.presentation else None),
+        presentation_state=response.presentation_state,
         response_payload=payload,
         state_snapshot=state,
         preview_truncated=bool(generation and len(generation.rows) > MAX_PREVIEW_ROWS),
