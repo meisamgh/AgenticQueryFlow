@@ -1,0 +1,173 @@
+/* Apache ECharts adapter for backend-validated, explicit chart specifications.
+   No user text is evaluated as code or merged into ECharts options. */
+window.QueryflowECharts = (function () {
+  const PALETTE = ["#6e60e6", "#20946c", "#c1803a", "#627ed1", "#d45d65", "#998df6"];
+  const TYPES = new Set([
+    "line", "multi_line", "step_line", "area", "stacked_area", "bar",
+    "horizontal_bar", "grouped_bar", "stacked_bar", "scatter", "bubble",
+    "histogram", "box", "heatmap", "pie", "donut", "treemap", "calendar_heatmap",
+  ]);
+
+  function cssVar(name, fallback) {
+    if (typeof getComputedStyle !== "function") return fallback;
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
+  }
+  function formatNumber(value, compact) {
+    if (value == null || value === "") return "";
+    const number = Number(value);
+    if (!Number.isFinite(number)) return String(value);
+    return new Intl.NumberFormat(undefined, compact
+      ? { notation: "compact", maximumFractionDigits: 1 }
+      : { maximumFractionDigits: 2 }).format(number);
+  }
+  function label(value) { return String(value ?? ""); }
+  function unique(values) { return [...new Set(values.map(label))]; }
+  function canonicalDate(value) {
+    const raw = label(value);
+    return /^\d{6}$/.test(raw) ? `${raw.slice(0, 4)}-${raw.slice(4)}-01`
+      : /^\d{4}$/.test(raw) ? `${raw}-01-01`
+      : /^\d{4}-\d{2}$/.test(raw) ? `${raw}-01` : raw;
+  }
+  function friendlyDate(value, format) {
+    if (format === "raw") return label(value);
+    const parsed = Date.parse(`${canonicalDate(value)}T00:00:00Z`);
+    if (!Number.isFinite(parsed)) return label(value);
+    const options = format === "year" ? { year: "numeric" }
+      : format === "month" ? { year: "numeric", month: "short" }
+      : { year: "numeric", month: "short", day: "numeric" };
+    return new Intl.DateTimeFormat(undefined, { ...options, timeZone: "UTC" }).format(parsed);
+  }
+  function supported(type) { return TYPES.has(type); }
+
+  function buildOption(spec) {
+    if (!spec || !supported(spec.chart_type) || !Array.isArray(spec.data) || !spec.data.length) return null;
+    const data = spec.data;
+    const type = spec.chart_type;
+    const x = spec.x, y = spec.y, group = spec.series;
+    if (!x || !y || data.some(row => !(x in row) || !(y in row))) return null;
+    const text = cssVar("--text", "#20212b");
+    const muted = cssVar("--text-muted", "#5c6170");
+    const border = cssVar("--border-strong", "#dcdbe2");
+    const compact = spec.number_format === "compact";
+    const base = {
+      animation: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
+      color: PALETTE,
+      textStyle: { color: text, fontFamily: "Inter, sans-serif" },
+      tooltip: { trigger: "item", renderMode: "richText", backgroundColor: cssVar("--sql-bg", "#1d2130"),
+        textStyle: { color: "#f1f1f6" } },
+      aria: { enabled: true, decal: { show: false } },
+    };
+    const format = value => formatNumber(value, compact);
+    if (["pie", "donut"].includes(type)) {
+      return { ...base, legend: { bottom: 0, type: "scroll", textStyle: { color: muted } },
+        series: [{ type: "pie", radius: type === "donut" ? ["42%", "67%"] : "67%",
+          data: data.map(row => ({ name: label(row[x]), value: row[y] })),
+          label: { formatter: "{b}" } }] };
+    }
+    if (type === "treemap") {
+      const parents = unique(data.map(row => row[x]));
+      const children = parents.map(parent => ({
+        name: parent,
+        children: data.filter(row => label(row[x]) === parent).map(row => ({
+          name: label(row[group]), value: row[y],
+        })),
+      }));
+      return { ...base, series: [{ type: "treemap", data: children, roam: false,
+        breadcrumb: { show: true }, label: { show: true } }] };
+    }
+    if (type === "calendar_heatmap") {
+      const years = unique(data.map(row => canonicalDate(row[x]).slice(0, 4)));
+      const min = Math.min(...data.map(row => Number(row[y])));
+      const max = Math.max(...data.map(row => Number(row[y])));
+      return { ...base, tooltip: { ...base.tooltip, formatter: item => `${item.value[0]}: ${format(item.value[1])}` },
+        visualMap: { min, max, calculable: true, orient: "horizontal", left: "center", top: 10,
+          inRange: { color: ["#efedff", "#6e60e6"] } },
+        calendar: years.map((year, index) => ({ range: year, top: 65 + index * 190,
+          cellSize: ["auto", 16], right: 24, left: 40,
+          yearLabel: { color: muted }, monthLabel: { color: muted }, dayLabel: { color: muted } })),
+        series: years.map((year, index) => ({ type: "heatmap", coordinateSystem: "calendar",
+          calendarIndex: index, data: data.filter(row => canonicalDate(row[x]).startsWith(year))
+            .map(row => [canonicalDate(row[x]), row[y]]) })) };
+    }
+    if (type === "heatmap") {
+      const xs = unique(data.map(row => row[x]));
+      const ys = unique(data.map(row => row[group]));
+      const values = data.map(row => Number(row[y]));
+      return { ...base, grid: { left: 80, right: 30, top: 35, bottom: 75 },
+        xAxis: { type: "category", data: xs, name: spec.x_label, axisLabel: { color: muted } },
+        yAxis: { type: "category", data: ys, name: group, axisLabel: { color: muted } },
+        visualMap: { min: Math.min(...values), max: Math.max(...values), calculable: true,
+          orient: "horizontal", left: "center", bottom: 0,
+          inRange: { color: ["#efedff", "#6e60e6"] } },
+        series: [{ type: "heatmap", data: data.map(row => [xs.indexOf(label(row[x])),
+          ys.indexOf(label(row[group])), row[y]]) }] };
+    }
+    if (type === "box") {
+      return { ...base, grid: { left: 65, right: 25, top: 25, bottom: 40 },
+        xAxis: { type: "category", data: data.map(box => label(box[x])), axisLabel: { color: muted } },
+        yAxis: { type: "value", name: spec.y_label, axisLabel: { formatter: format, color: muted } },
+        series: [{ type: "boxplot", data: data.map(box =>
+          [box.min, box.q1, box.median, box.q3, box.max]) }] };
+    }
+    const category = unique(data.map(row => row[x]));
+    const horizontal = type === "horizontal_bar";
+    const numericX = ["scatter", "bubble"].includes(type);
+    const grouped = ["multi_line", "stacked_area", "grouped_bar", "stacked_bar"].includes(type);
+    const lineType = ["line", "multi_line", "step_line", "area", "stacked_area"].includes(type);
+    const valueAxis = { type: "value", axisLabel: { formatter: format, color: muted },
+      splitLine: { lineStyle: { color: border, type: "dashed" } } };
+    const categoryAxis = { type: "category", data: category.map(value => friendlyDate(value, spec.time_format)),
+      name: spec.x_label, axisLabel: { color: muted, hideOverlap: true, rotate: category.length > 8 ? 30 : 0 } };
+    const option = { ...base,
+      grid: { left: 35, right: 35, top: 35, bottom: 55, containLabel: true },
+      xAxis: horizontal ? valueAxis : numericX ? valueAxis : categoryAxis,
+      yAxis: horizontal ? categoryAxis : { ...valueAxis, name: spec.y_label },
+      dataZoom: category.length > 25 && !numericX ? [{ type: "inside" }, { type: "slider", bottom: 8 }] : [],
+      legend: { show: grouped, type: "scroll", top: 0, textStyle: { color: muted } },
+      series: [],
+    };
+    if (type === "histogram") {
+      option.xAxis = { ...categoryAxis, data: data.map(row => formatNumber(row.bin_start, false)) };
+      option.yAxis.name = "Frequency";
+    }
+    if (numericX) {
+      option.series = [{ type: "scatter", symbolSize: type === "bubble"
+        ? item => Math.max(5, Math.min(45, Math.sqrt(Math.max(0, Number(item[2]))) * 3)) : 11,
+      data: data.map(row => [row[x], row[y], type === "bubble" ? row[spec.size] : null]) }];
+    } else if (grouped) {
+      option.series = unique(data.map(row => row[group])).map(name => {
+        const points = new Map(data.filter(row => label(row[group]) === name)
+          .map(row => [label(row[x]), row[y]]));
+        return { name, type: lineType ? "line" : "bar", stack: type.startsWith("stacked") ? "total" : undefined,
+          areaStyle: type === "stacked_area" ? {} : undefined,
+          connectNulls: false, data: category.map(value => points.has(value) ? points.get(value) : null) };
+      });
+    } else {
+      option.series = [{ name: spec.y_label, type: lineType ? "line" : "bar",
+        step: type === "step_line" ? "end" : undefined,
+        areaStyle: type === "area" ? {} : undefined,
+        connectNulls: false,
+        data: data.map(row => row[y]) }];
+    }
+    return option;
+  }
+
+  function render(container, presentation) {
+    if (!container || !window.echarts || !presentation?.chart_spec) return null;
+    const spec = presentation.chart_spec;
+    const option = buildOption(spec);
+    if (!option) return null;
+    const chart = window.echarts.init(container, null, { renderer: "canvas" });
+    chart.setOption(option);
+    const resize = () => chart.resize();
+    window.addEventListener("resize", resize, { passive: true });
+    const observer = typeof ResizeObserver === "function" ? new ResizeObserver(resize) : null;
+    observer?.observe(container);
+    return {
+      dispose() { window.removeEventListener("resize", resize); observer?.disconnect(); chart.dispose(); },
+      getDataURL(options) { return chart.getDataURL({ type: "png", pixelRatio: 2,
+        backgroundColor: cssVar("--surface", "#fff"), ...options }); },
+    };
+  }
+  return { render, supported, buildOption };
+})();

@@ -16,6 +16,7 @@ from semantic_text2sql.models import (
     ContractDelta,
     ConversationState,
     ModelProvider,
+    RequestedChange,
     TokenUsage,
     TurnInterpretation,
 )
@@ -286,6 +287,11 @@ Rules:
 - If the message contains SQL as a proposed fix, preserve it verbatim in resolved_instruction
   and classify it as CORRECTION.
 - resolved_instruction must state the user's request clearly without inventing requirements.
+- Preserve every earlier constraint that the user did not change: outputs, metric, grouping,
+  filters and ranking. When clear, include a changes array with operation, target,
+  previous_value, new_value and source="model_interpretation". Supported change operations:
+  ADD_FILTER, REMOVE_FILTER, REPLACE_FILTER, CHANGE_METRIC, CHANGE_GRAIN, CHANGE_RANKING, OTHER.
+  Leave changes empty when the target or intended value cannot be determined.
 - target should identify the requested aspect when clear, for example JOIN_STRATEGY, RESULT_ROWS,
   INTERPRETATION, CONTEXT, FAILURE, or PERFORMANCE; otherwise use null.
 - depends_on_previous must be false only for NEW_QUERY or RESET_CONTEXT.
@@ -362,6 +368,10 @@ def resolve_turn(
                 operation=operation,
                 instruction=correction,
                 feedback_category=feedback_category,
+                changes=[RequestedChange(
+                    operation="REPLACE_FILTER", target="explicit filter value",
+                    previous_value=old_value, new_value=new_value,
+                )],
             )
             return operation, previous.model_copy(
                 update={
@@ -389,12 +399,13 @@ def resolve_turn(
         operation=operation,
         instruction=effective_message,
         feedback_category=feedback_category,
+        changes=interpreted.changes if interpreted else [],
     )
     instructions = "\n".join(f"{index}. {item}" for index, item in enumerate(modifications, 1))
     resolved = (
         f"Base request: {previous.root_question}\n"
         "Conversation modifications in chronological order; later instructions override earlier "
-        f"ones:\n{instructions}"
+        f"ones. Preserve all other original constraints, calculations and grouping:\n{instructions}"
     )
     return operation, previous.model_copy(
         update={

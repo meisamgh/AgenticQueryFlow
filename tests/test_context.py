@@ -8,12 +8,56 @@ from semantic_text2sql.context import (
 )
 from semantic_text2sql.formulas import apply_structural_formulas
 from semantic_text2sql.models import (
+    ColumnProfile,
+    ContextRequest,
     DatabaseProfile,
+    PlannerMetadataRequirement,
     RelationshipProfile,
     SchemaInfo,
     SemanticContract,
     StructuralFormula,
 )
+
+
+def test_missing_text_top_values_do_not_block_grounded_context() -> None:
+    schema = SchemaInfo.model_validate({
+        "db_id": "clock",
+        "tables": [{
+            "name": "transactions_1k",
+            "create_sql": "",
+            "columns": [{"name": "Time", "data_type": "TEXT"}],
+        }],
+    })
+    profile = DatabaseProfile(
+        db_id="clock",
+        dialect="sqlite",
+        profiled_at="2026-01-01",
+        columns=[ColumnProfile(
+            table="transactions_1k",
+            column="Time",
+            database_type="TEXT",
+            semantic_type="text",
+            row_count=1_000,
+            null_count=0,
+            null_ratio=0,
+            distinct_count=599,
+            top_values=[],
+            examples=["08:57:00"],
+        )],
+    )
+    request = ContextRequest(metadata_requirements=[PlannerMetadataRequirement(
+        kind="CATEGORY_VALUES", targets=["transactions_1k.Time"]
+    )])
+
+    plan = build_context_plan(
+        schema, profile, SemanticContract(), "Show transaction times", None, request
+    )
+
+    requirement = next(item for item in plan.requirements if item.kind == "ALLOWED_VALUES")
+    assert requirement.resolved is False
+    assert requirement.priority == "SOFT"
+    assert plan.coverage_complete is True
+    assert plan.missing_requirements == []
 
 
 def test_context_plan_records_selected_dependencies(registry) -> None:  # type: ignore[no-untyped-def]

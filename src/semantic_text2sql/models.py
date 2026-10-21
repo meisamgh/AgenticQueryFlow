@@ -10,7 +10,7 @@ from semantic_text2sql.sql_formatting import format_sql_for_display
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 GROQ_QWEN_MODEL = "qwen/qwen3.8-27b"
-ModelProvider = Literal["agentrouter", "groq", "justdowork"]
+ModelProvider = Literal["agentrouter", "groq", "justdowork", "codecraft"]
 
 
 class StrictModel(BaseModel):
@@ -493,12 +493,50 @@ class PipelineTelemetry(StrictModel):
     total_database_calls: int = Field(default=0, ge=0)
 
 
+class RequestedChange(StrictModel):
+    operation: Literal[
+        "ADD_FILTER",
+        "REMOVE_FILTER",
+        "REPLACE_FILTER",
+        "CHANGE_METRIC",
+        "CHANGE_GRAIN",
+        "CHANGE_RANKING",
+        "OTHER",
+    ]
+    target: str = Field(max_length=200)
+    previous_value: str | int | float | None = None
+    new_value: str | int | float | None = None
+    source: Literal["user_correction", "model_interpretation"] = "user_correction"
+
+
 class ContractDelta(StrictModel):
     """A conversational change request; it is not a second semantic contract."""
 
     operation: str
     instruction: str
     feedback_category: str | None = None
+    changes: list[RequestedChange] = Field(default_factory=list, max_length=10)
+
+
+class RecoveryEvent(StrictModel):
+    event_id: str
+    attempt: int | None = None
+    event_type: Literal[
+        "SQL_FAILED",
+        "SCHEMA_INSPECTED",
+        "VALUES_INSPECTED",
+        "DATABASE_PROBED",
+        "TOOL_OBSERVED",
+        "CLAIM_REPORTED",
+        "RECOVERY_DECISION",
+        "SQL_EXECUTED",
+    ]
+    summary: str = Field(max_length=1_000)
+    status: Literal["FAILED", "OBSERVED", "REPORTED", "EXECUTED", "REPAIR", "INFORM", "ESCALATE"]
+    tool: str | None = None
+    evidence_ids: list[str] = Field(default_factory=list)
+    detail: str | None = Field(default=None, max_length=12_000)
+    sql: str | None = None
 
 
 class Attempt(StrictModel):
@@ -631,6 +669,7 @@ class ChatRequest(StrictModel):
     session_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     message: str = Field(min_length=1, max_length=4_000)
+    parent_run_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     evidence: str | None = Field(default=None, max_length=8_000)
     provider: ModelProvider = "agentrouter"
     model: str = Field(default=DEFAULT_MODEL, min_length=1, max_length=200)
@@ -638,6 +677,7 @@ class ChatRequest(StrictModel):
     context_model: str | None = Field(default=None, min_length=1, max_length=200)
     execute: bool = True
     max_rows: int = Field(default=100, ge=1, le=500)
+    visualization: bool | None = None
     context_mode: Literal["model1", "retrieval"] = "retrieval"
     feedback_category: (
         Literal[
@@ -708,11 +748,54 @@ class TurnInterpretation(StrictModel):
     source: Literal["rules", "model", "fallback"] = "model"
     provider: ModelProvider | None = None
     model: str | None = None
+    changes: list[RequestedChange] = Field(default_factory=list, max_length=10)
+
+
+ChartType = Literal[
+    "line",
+    "multi_line",
+    "step_line",
+    "area",
+    "stacked_area",
+    "bar",
+    "horizontal_bar",
+    "grouped_bar",
+    "stacked_bar",
+    "scatter",
+    "bubble",
+    "histogram",
+    "box",
+    "heatmap",
+    "pie",
+    "donut",
+    "treemap",
+    "calendar_heatmap",
+]
+
+
+class ChartSpec(StrictModel):
+    chart_type: ChartType
+    source_columns: list[str] = Field(default_factory=list)
+    source_row_count: int = Field(default=0, ge=0)
+    x: str
+    y: str
+    series: str | None = None
+    size: str | None = None
+    title: str = Field(max_length=160)
+    x_label: str = Field(max_length=100)
+    y_label: str = Field(max_length=100)
+    legend: bool = False
+    null_policy: Literal["reject", "preserve"] = "reject"
+    transformation: Literal["none", "histogram", "five_number_summary"] = "none"
+    data: list[dict[str, str | int | float | None]] = Field(max_length=500)
+    warnings: list[str] = Field(default_factory=list, max_length=4)
+    number_format: Literal["plain", "compact"] = "plain"
+    time_format: Literal["raw", "year", "month", "day"] = "raw"
 
 
 class ResultPresentation(StrictModel):
     summary: str = Field(max_length=1800)
-    chart_type: Literal["none", "bar", "line", "scatter"] = "none"
+    chart_type: ChartType | Literal["none"] = "none"
     x: str | None = None
     y: str | None = None
     title: str = Field(default="", max_length=160)
@@ -723,12 +806,22 @@ class ResultPresentation(StrictModel):
     chart_reason: str = Field(default="", max_length=300)
     note: str = "Based on returned rows only; not independent verification of correctness."
     source: Literal["model", "fallback"] = "model"
+    chart_spec: ChartSpec | None = None
 
 
 class ChatResponse(StrictModel):
     session_id: str
+    run_id: str | None = None
+    turn_id: str | None = None
+    conversation_id: str | None = None
+    parent_run_id: str | None = None
+    sql_version: int = 0
+    history_saved: bool = False
+    previous_sql: str | None = Field(default=None, max_length=20_000)
+    recovery_events: list[RecoveryEvent] = Field(default_factory=list, max_length=40)
     operation: Literal[
         "NEW_QUERY",
+        "VISUALIZE",
         "REFINE",
         "OPTIMIZE",
         "ADD_FILTER",

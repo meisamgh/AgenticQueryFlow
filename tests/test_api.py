@@ -1,11 +1,93 @@
 from __future__ import annotations
 
 import time
+from typing import Any
 
 from fastapi.testclient import TestClient
 
+from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.api import create_app
 from semantic_text2sql.models import ChatRequest
+from semantic_text2sql.run_history import RunHistoryStore
+
+
+class FixedSQLModel:
+    def __init__(self, sql: str) -> None:
+        self.sql = sql
+        self.calls = 0
+
+    async def generate(self, **kwargs: Any) -> tuple[str, int]:
+        self.calls += 1
+        return self.sql, 1
+
+
+def test_visualization_followups_reuse_complete_results_without_new_sql(
+    registry,
+    monkeypatch,
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
+    monkeypatch.setenv("TEXT2SQL_GLOSSARY_ROOT", str(tmp_path / "glossaries"))
+    model = FixedSQLModel(
+        "SELECT country, COUNT(*) AS customer_count FROM customers GROUP BY country"
+    )
+    store = RunHistoryStore(None)
+    client = TestClient(create_app(TextToSQLAgent(registry, model), run_history=store))
+    base = {
+        "session_id": "viz-session",
+        "db_id": "shop",
+        "provider": "agentrouter",
+        "model": "test-model",
+    }
+
+    ordinary = client.post(
+        "/api/chat", json={**base, "message": "Show customer counts by country."}
+    )
+    assert ordinary.status_code == 200
+    first = ordinary.json()
+    assert first["generation"]["accepted"] is True
+    assert first["presentation"]["chart_spec"] is None
+    initial_calls = model.calls
+
+    plotted = client.post("/api/chat", json={**base, "message": "Plot it."})
+    assert plotted.status_code == 200
+    chart = plotted.json()
+    assert chart["operation"] == "VISUALIZE"
+    assert chart["presentation"]["chart_spec"]["chart_type"] == "bar"
+    assert chart["generation"]["sql"] == first["generation"]["sql"]
+    assert chart["token_usage"]["input_tokens"] is None
+    assert chart["call_ledger"] == []
+    assert model.calls == initial_calls
+
+    incompatible = client.post("/api/chat", json={**base, "message": "Make it a line chart."})
+    assert incompatible.status_code == 200
+    assert incompatible.json()["presentation"]["chart_spec"] is None
+    assert "ordered date or numeric" in incompatible.json()["message"]
+    assert model.calls == initial_calls
+    assert [item.operation for item in store.list_sessions("viz-session")[:3]] == [
+        "VISUALIZE",
+        "VISUALIZE",
+        "NEW_QUERY",
+    ]
+
+    explicit = client.post("/api/chat", json={
+        **base, "session_id": "fresh-viz",
+        "message": "Plot customer counts by country as a bar chart.",
+    })
+    assert explicit.status_code == 200
+    assert explicit.json()["presentation"]["chart_spec"]["chart_type"] == "bar"
+    assert not any(item["component"] == "chart_selection"
+                   for item in explicit.json()["call_ledger"])
+
+    incomplete = client.post("/api/chat", json={
+        **base, "session_id": "small-viz",
+        "message": "Plot customer counts by country.", "max_rows": 1,
+    })
+    assert incomplete.status_code == 200
+    assert incomplete.json()["generation"]["truncated"] is True
+    assert incomplete.json()["presentation"]["chart_spec"] is None
+    assert "truncated" in incomplete.json()["presentation"]["chart_reason"]
 
 
 def test_database_catalog_reports_both_dialects(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -57,6 +139,100 @@ def test_database_catalog_uses_postgres_allowlist_without_exposing_dsns(monkeypa
     assert "secret" not in response.text
 
 
+def test_history_records_runs_and_serves_reopen(registry, monkeypatch, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
+    monkeypatch.setenv("TEXT2SQL_GLOSSARY_ROOT", str(tmp_path / "glossaries"))
+    store = RunHistoryStore(None)
+    client = TestClient(
+        create_app(
+            TextToSQLAgent(
+                registry,
+                FixedSQLModel("SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id"),
+            ),
+            run_history=store,
+        )
+    )
+    base = {
+        "session_id": "history-test",
+        "db_id": "shop",
+        "provider": "agentrouter",
+        "model": "test-model",
+        "execute": True,
+    }
+    client.post("/api/chat", json={**base, "message": "How many orders for each customer?"})
+    client.post("/api/chat", json={**base, "message": "Now only customers in Germany"})
+
+    listing = client.get("/api/history", params={"session_id": "history-test"})
+    assert listing.status_code == 200
+    assert listing.headers["cache-control"] == "no-store"
+    runs = listing.json()
+    assert [run["version"] for run in runs] == [2, 1]
+    assert [run["original_message"] for run in runs] == [
+        "Now only customers in Germany",
+        "How many orders for each customer?",
+    ]
+    assert runs[0]["parent_run_id"] == runs[1]["run_id"]
+    assert runs[1]["parent_run_id"] is None
+    assert all(run["accepted"] is True for run in runs)
+    assert all(len(run["rows_preview"]) <= 25 for run in runs)
+    assert all(run["db_id"] == "shop" for run in runs)
+
+    reopened = client.get(
+        f"/api/history/{runs[0]['run_id']}", params={"session_id": "history-test"}
+    )
+    assert reopened.status_code == 200
+    assert reopened.json()["sql"].startswith("SELECT")
+    assert reopened.json()["columns"] == ["customer_id", "COUNT(*)"]
+    assert (
+        client.get("/api/history/missing-run", params={"session_id": "history-test"}).status_code
+        == 404
+    )
+
+    cleared = client.delete("/api/history", params={"session_id": "history-test"})
+    assert cleared.status_code == 204
+    assert client.get("/api/history", params={"session_id": "history-test"}).json() == []
+
+
+def test_sql_diff_endpoint_is_sqlglot_aware_and_falls_back_gracefully() -> None:
+    client = TestClient(create_app())
+
+    changed = client.post(
+        "/api/sql/diff",
+        json={
+            "previous_sql": "SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id",
+            "updated_sql": "SELECT o.customer_id, COUNT(*) + 1 FROM orders o "
+            "JOIN customers c ON o.customer_id = c.customer_id GROUP BY o.customer_id",
+        },
+    )
+    assert changed.status_code == 200
+    body = changed.json()
+    assert body["parse_error"] is False
+    assert {change["kind"] for change in body["changes"]} == {"remove", "insert"}
+
+    formatting = client.post(
+        "/api/sql/diff",
+        json={
+            "previous_sql": "SELECT * FROM orders",
+            "updated_sql": "select * from orders;",
+        },
+    )
+    assert formatting.json()["parse_error"] is False
+    assert formatting.json()["changes"] == []
+    assert set(formatting.json()["invariants"].values()) == {"unchanged"}
+
+    broken = client.post(
+        "/api/sql/diff",
+        json={
+            "previous_sql": "not sql at all ((",
+            "updated_sql": "still broken",
+        },
+    )
+    assert broken.status_code == 200
+    assert broken.json()["parse_error"] is True
+    assert broken.json()["changes"]
+
+
 def test_health_endpoint() -> None:
     response = TestClient(create_app()).get("/api/health")
 
@@ -96,9 +272,15 @@ def test_model_catalog_contains_configured_remote_providers(monkeypatch) -> None
     monkeypatch.setenv("AGENTROUTER_API_KEY", "configured-key")
     monkeypatch.setenv("JUSTDOWORK_API_KEY", "configured-key")
     monkeypatch.setenv("JUSTDOWORK_BASE_URL", "https://justdowork.test/v1")
+    monkeypatch.setenv("CODECRAFT_API_KEY", "configured-key")
 
     options = TestClient(create_app()).get("/api/models").json()
-    assert {item["provider"] for item in options} == {"agentrouter", "groq", "justdowork"}
+    assert {item["provider"] for item in options} == {
+        "agentrouter",
+        "groq",
+        "justdowork",
+        "codecraft",
+    }
     agentrouter = [item for item in options if item["provider"] == "agentrouter"]
     assert [item["model"] for item in agentrouter] == [
         "gpt-5.6-sol",
@@ -111,6 +293,9 @@ def test_model_catalog_contains_configured_remote_providers(monkeypatch) -> None
     assert [item["model"] for item in options if item["provider"] == "justdowork"] == [
         "gpt-5.6-sol",
         "claude-opus-4-8",
+    ]
+    assert [item["model"] for item in options if item["provider"] == "codecraft"] == [
+        "claude-opus-5"
     ]
 
 
@@ -134,7 +319,15 @@ def test_public_post_surface_contains_only_current_workflow() -> None:
     app = create_app()
     post_paths = {route.path for route in app.routes if "POST" in getattr(route, "methods", set())}
 
-    assert post_paths == {"/api/check", "/api/chat", "/api/chat/jobs"}
+    assert post_paths == {
+        "/api/check",
+        "/api/chat",
+        "/api/chat/jobs",
+        "/api/sql/diff",
+        "/api/voice/transcribe",
+        "/api/history/{run_id}/continue",
+        "/api/history/{run_id}/rerun",
+    }
 
 
 def test_public_check_endpoint_does_not_execute_sql_by_default() -> None:
@@ -153,19 +346,19 @@ def test_web_chat_application_is_served() -> None:
     script = client.get("/static/app.js")
 
     assert page.status_code == 200
-    assert "Ask your database in plain language" in page.text
+    assert "What would you like to know?" in page.text
     assert 'id="chatForm"' in page.text
     assert 'id="contextModelSelect"' in page.text
     assert 'id="sqlModelSelect"' in page.text
     assert 'id="contextModeSelect"' not in page.text
     assert 'id="suggestions"' not in page.text
     assert "How many records are in each category?" not in page.text
-    assert 'class="response-tabs"' in page.text
-    assert 'data-tab="answer"' in page.text
-    assert 'data-tab="sql"' in page.text
-    assert 'data-tab="result"' in page.text
-    assert 'data-tab="context"' in page.text
-    assert 'data-tab="validation"' in page.text
+    assert 'class="response-card"' in page.text
+    assert 'class="sql-result-split"' in page.text
+    assert 'class="versions-panel"' in page.text
+    assert 'class="recovery-panel"' in page.text
+    assert 'class="human-review"' in page.text
+    assert 'id="inspectorPane"' in page.text
     assert "Download CSV" in page.text
     assert "Validation attempts" not in page.text
     assert script.status_code == 200
@@ -179,17 +372,27 @@ def test_web_chat_application_is_served() -> None:
     assert "renderSqlTokens" in script.text
     assert "sql-line-number" in script.text
     assert '"NOT SELECTED"' in script.text
-    assert 'class="human-review-panel"' in page.text
+    assert 'class="human-review-panel"' not in page.text
     assert 'class="human-review-editor"' not in page.text
     assert '"Enter another ID"' in script.text
     assert "Enter the replacement ID in the chat" in script.text
     assert 'item.dialect === "sqlite"' not in script.text
     assert "`${item.db_id} (${item.dialect})`" in script.text
 
-    sql_position = page.text.index('class="response-pane sql-panel"')
-    result_position = page.text.index('class="response-pane result-panel"')
-    details_position = page.text.index('class="response-pane attempts-panel"')
-    assert sql_position < result_position < details_position
+    sql_position = page.text.index('class="panel-card sql-panel-pane"')
+    result_position = page.text.index('class="panel-card result-panel-pane"')
+    versions_position = page.text.index('class="versions-panel"')
+    recovery_position = page.text.index('class="recovery-panel"')
+    details_position = page.text.index('class="technical-details"')
+    attempts_position = page.text.index('class="attempts-panel"')
+    assert (
+        sql_position
+        < result_position
+        < versions_position
+        < recovery_position
+        < details_position
+        < attempts_position
+    )
 
 
 def test_chat_request_accepts_independent_context_and_sql_models() -> None:

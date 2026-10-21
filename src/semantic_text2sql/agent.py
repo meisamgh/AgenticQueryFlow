@@ -72,17 +72,28 @@ class TextToSQLAgent:
             return self.postgres
         raise DatabaseError("DATABASE_DIALECT_UNAVAILABLE", f"{dialect} is not configured.")
 
-    def check(self, request: CheckRequest) -> CheckResponse:
+    def check(
+        self, request: CheckRequest, *, budget: RequestBudget | None = None,
+        allowed_tables: set[str] | None = None,
+        allowed_columns: dict[str, set[str]] | None = None,
+    ) -> CheckResponse:
         database = self._database(request.dialect)
+        if budget:
+            budget.claim("database")
         schema = database.inspect(request.db_id)
         sql = clean_model_sql(request.sql)
-        validation = validate_sql(sql, schema, dialect=request.dialect)
+        validation = validate_sql(
+            sql, schema, dialect=request.dialect,
+            allowed_tables=allowed_tables, allowed_columns=allowed_columns,
+        )
         if not validation.valid or not request.execute:
             return CheckResponse(
                 db_id=request.db_id,
                 dialect=request.dialect,
                 validation=validation,
             )
+        if budget:
+            budget.claim("database")
         columns, rows, truncated = database.execute(request.db_id, sql, max_rows=request.max_rows)
         return CheckResponse(
             db_id=request.db_id,

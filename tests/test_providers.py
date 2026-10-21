@@ -10,9 +10,11 @@ from semantic_text2sql.llm import (
     AgentRouterClaudeModel,
     AgentRouterCodexModel,
     AgentRouterModel,
+    CodeCraftSQLModel,
     GroqSQLModel,
     JustDoWorkSQLModel,
     ModelError,
+    RoutingSQLModel,
     _prompt,
 )
 from semantic_text2sql.models import ColumnInfo, SchemaInfo, StrategyHints, TableInfo, TokenUsage
@@ -364,6 +366,56 @@ def test_groq_fails_without_api_key() -> None:
         assert "GROQ_API_KEY" in str(exc)
     else:
         raise AssertionError("Missing Groq key was accepted")
+
+
+def test_codecraft_uses_chat_completions_and_reports_usage() -> None:
+    captured: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["authorization"] = request.headers.get("authorization")
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "SELECT title FROM books"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 4},
+            },
+        )
+
+    codecraft = CodeCraftSQLModel(
+        "codecraft-test-key",
+        transport=httpx.MockTransport(handler),
+    )
+    router = RoutingSQLModel(
+        AgentRouterModel(AgentRouterClaudeModel(None), AgentRouterCodexModel(None)),
+        GroqSQLModel(None),
+        JustDoWorkSQLModel(None, None),
+        codecraft,
+    )
+    sql, usage = asyncio.run(
+        router.complete_detailed("codecraft", "claude-opus-5", "Return SQL only")
+    )
+
+    assert sql == "SELECT title FROM books"
+    assert usage.total_tokens == 14
+    assert captured["path"] == "/v1/chat/completions"
+    assert captured["authorization"] == "Bearer codecraft-test-key"
+    assert captured["body"]["model"] == "claude-opus-5"  # type: ignore[index]
+    assert "reasoning_effort" not in captured["body"]  # type: ignore[operator]
+    assert captured["body"]["stream"] is False  # type: ignore[index]
+
+
+def test_codecraft_rejects_missing_key_and_empty_output() -> None:
+    with pytest.raises(ModelError, match="CODECRAFT_API_KEY"):
+        asyncio.run(CodeCraftSQLModel(None).complete("claude-opus-5", "Return SQL"))
+
+    def empty_response(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": None}}]})
+
+    model = CodeCraftSQLModel("key", transport=httpx.MockTransport(empty_response))
+    with pytest.raises(ModelError, match="no text output"):
+        asyncio.run(model.complete("claude-opus-5", "Return SQL"))
 
 
 def test_justdowork_uses_anthropic_messages_and_reports_usage() -> None:

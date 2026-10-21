@@ -51,6 +51,7 @@ MODEL_CATALOG = (
     ProviderModelSpec(
         "justdowork", "claude-opus-4-8", "JUSTDOWORK_API_KEY", "JUSTDOWORK_BASE_URL"
     ),
+    ProviderModelSpec("codecraft", "claude-opus-5", "CODECRAFT_API_KEY"),
 )
 
 

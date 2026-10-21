@@ -535,7 +535,14 @@ def _planner_requirements(
                     required_by="verified Context Planner request",
                     resolved=resolved,
                     source="verified schema/glossary/profile" if resolved else None,
-                    priority="SOFT" if item.kind == "TABLE_GRAIN" else "HARD",
+                    # Profiled category samples are helpful context, not a complete
+                    # domain or a prerequisite for generating SQL. High-cardinality
+                    # text columns (for example clock times) often have no top values.
+                    priority=(
+                        "SOFT"
+                        if item.kind in {"TABLE_GRAIN", "CATEGORY_VALUES"}
+                        else "HARD"
+                    ),
                 )
             )
     return result

@@ -1,38 +1,70 @@
 const $ = (selector) => document.querySelector(selector);
 const sessionId = localStorage.getItem("queryRoomSession") || crypto.randomUUID().replaceAll("-", "");
 localStorage.setItem("queryRoomSession", sessionId);
-$("#sessionId").textContent = sessionId;
+document.addEventListener("DOMContentLoaded", () => {
+  const el = $("#sessionId");
+  if (el) el.textContent = sessionId;
+});
 
-const state = { busy: false, jobId: null, cancelled: false, currentQuestion: "", ready: false };
+const state = {
+  busy: false, jobId: null, cancelled: false, currentQuestion: "", ready: false,
+  lastBody: null, history: [], saved: [], glossaryByDb: {}, schemaRequest: 0,
+  activeRunId: null, diffCache: new Map(),
+  restorePending: false,
+};
+let voiceInput = null;
+import("/static/voice.js?v=voice-1").then(async ({VoiceInput}) => {
+  voiceInput = new VoiceInput({
+    button: $("#voiceButton"), cancelButton: $("#voiceCancelButton"),
+    input: $("#messageInput"), status: $("#voiceStatus"),
+    onBusy: busy => { $("#sendButton").disabled = busy || state.busy || !state.ready; },
+  });
+  await voiceInput.initialize();
+  $("#voiceButton").hidden = false;
+}).catch(() => { $("#voiceStatus").textContent = "Voice input could not load. You can still type a question."; });
+
 const recentStorageKey = "queryRoomRecentQueries";
+const savedStorageKey = "queryRoomSaved";
 const postSafetyOptimizationCodes = new Set([
   "OPTIMIZATION_NOT_FASTER",
   "OPTIMIZATION_CHANGED_RESULT",
   "OPTIMIZATION_EQUIVALENCE_UNPROVEN",
 ]);
+const EXPLANATION_OPERATIONS_UI = new Set(["EXPLAIN", "EXPLAIN_SQL", "EXPLAIN_RESULT", "EXPLAIN_INTERPRETATION", "EXPLAIN_CONTEXT", "EXPLAIN_FAILURE"]);
+
+function hydrateIcons(root = document) {
+  root.querySelectorAll("[data-icon]").forEach((slot) => {
+    const name = slot.dataset.icon;
+    if (!slot.innerHTML.trim()) slot.innerHTML = icon(name);
+  });
+}
 
 function attemptOutcome(attempt) {
   const validation = attempt.validation || {};
   if (validation.valid === true) return "passed";
   if (postSafetyOptimizationCodes.has(validation.code)) return "not_selected";
   return "failed";
-}
-
-async function api(path, options = {}) {
+}  async function api(path, options = {}) {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
-    throw new Error(body.detail || `Request failed (${response.status})`);
+    let detail = body.detail;
+    if (Array.isArray(detail)) {
+      detail = detail.map((item) => {
+        const path = Array.isArray(item.loc) ? item.loc.join(".") : item.loc;
+        return [path, item.msg].filter(Boolean).join(": ");
+      }).join("; ");
+    }
+    throw new Error(detail || `Request failed (${response.status})`);
   }
   return response.json();
 }
 
 async function initialize() {
+  hydrateIcons();
   try {
     await api("/api/health");
-    $("#healthStatus").classList.add("online");
-    $("#healthStatus").lastChild.textContent = " Online";
-    $("#connectionStatus").textContent = "API online";
+    setHealth(true);
     const databases = await api("/api/databases");
     fillSelect(
       "#databaseSelect",
@@ -41,22 +73,34 @@ async function initialize() {
       (item) => `${item.db_id} (${item.dialect})`,
       null,
     );
-    await loadDatabaseSchema();
+    [...$("#databaseSelect").options].forEach((option) => {
+      const match = databases.find((item) => item.db_id === option.value);
+      if (match) option.dataset.dialect = match.dialect;
+    });
+    await Promise.all([loadDatabaseSchema(), refreshHistory(), loadGlossary($("#databaseSelect").value)]);
     const models = await api(`/api/models?refresh=${Date.now()}`, { cache: "no-store" });
-    const preferredModel = models.find((item) => item.configured && item.provider === "justdowork")
+    const preferredModel = models.find((item) => item.configured && item.provider === "codecraft")
+      || models.find((item) => item.configured && item.provider === "justdowork")
       || models.find((item) => item.configured);
     const preferred = preferredModel && `${preferredModel.provider}|${preferredModel.model}`;
     fillContextSelect(models);
     fillSelect("#sqlModelSelect", models, (item) => `${item.provider}|${item.model}`, modelLabel, preferred);
     state.ready = !!$("#databaseSelect").value && !!preferredModel;
-    $("#sendButton").disabled = !state.ready;
+    $("#sendButton").disabled = !state.ready || !!voiceInput?.busy;
     if (!preferredModel) showError("No model can serve queries right now. Hover an entry in the model list to see why.");
-    renderRecentQueries();
+    renderSaved();
   } catch (error) {
-    $("#healthStatus").lastChild.textContent = " Offline";
-    $("#connectionStatus").textContent = "Connection issue";
+    setHealth(false);
     showError(error.message);
   }
+}
+
+function setHealth(online) {
+  const pill = $("#healthStatus");
+  pill.classList.toggle("online", online === true);
+  pill.classList.toggle("offline", online === false);
+  pill.lastChild.textContent = online === false ? " Offline" : " Online";
+  $("#connectionStatus").textContent = online === false ? "Connection issue" : "API online";
 }
 
 let schemaRequest = 0;
@@ -76,7 +120,7 @@ function setView(view, tableName = null) {
     $("#exploreSearch").value = "";
   }
   if (explore) renderExplore();
-  window.scrollTo({ top: 0, behavior: "instant" });
+  $("#mainColumn").scrollTo({ top: 0, behavior: "instant" });
 }
 
 function renderExplore() {
@@ -94,7 +138,7 @@ function renderExplore() {
     : "Select a configured database in Connections to inspect its schema.";
   if (!tables.length) {
     const empty = document.createElement("p");
-    empty.className = "explore-empty";
+    empty.className = "inspector-empty";
     empty.textContent = term ? "No tables or columns match this search." : "No tables are available.";
     container.append(empty);
   }
@@ -126,7 +170,7 @@ function renderExplore() {
     !term || visibleTables.has(item.from_table) || visibleTables.has(item.to_table));
   if (!matchingRelations.length) {
     const empty = document.createElement("p");
-    empty.className = "explore-empty";
+    empty.className = "inspector-empty";
     empty.textContent = term
       ? "No relationships connect the matching tables. Clear the search to see all relationships."
       : "No declared or profiled relationships are available for this database.";
@@ -152,45 +196,19 @@ async function loadDatabaseSchema() {
   browserRelationships = [];
   selectedExploreTable = null;
   $("#exploreSearch").value = "";
-  if ($("#databaseTables")) $("#databaseTables").replaceChildren();
-  if ($("#schemaCount")) $("#schemaCount").textContent = dbId || "No database selected";
-  if ($("#schemaStatus")) $("#schemaStatus").textContent = dbId ? "Loading table and column names…"
-    : "No database files were found. Check TEXT2SQL_DATABASE_ROOT in the project's .env file, then restart the server. Profiles alone do not contain queryable data.";
-  if (!dbId) { renderExplore(); return; }
+  if (!dbId) { renderExplore(); renderInspectorSchema(); return; }
   try {
     const schema = await api(`/api/databases/${encodeURIComponent(dbId)}/schema`);
     if (request !== schemaRequest) return;
     browserTables = schema.tables || [];
     browserRelationships = schema.relationships || [];
-    if ($("#schemaCount")) $("#schemaCount").textContent = `${dbId} · ${browserTables.length} tables`;
-    renderDatabaseTables();
     renderExplore();
+    renderInspectorSchema();
   } catch (error) {
-    if (request === schemaRequest && $("#schemaStatus")) $("#schemaStatus").textContent = `Could not load tables: ${error.message}. Use Refresh to retry.`;
+    if (request !== schemaRequest) return;
+    $("#exploreSummary").textContent = `Could not load tables: ${error.message}`;
     renderExplore();
   }
-}
-
-function renderDatabaseTables() {
-  if (!$("#schemaSearch") || !$("#databaseTables")) return;
-  const term = $("#schemaSearch").value.trim().toLowerCase();
-  const container = $("#databaseTables");
-  container.replaceChildren();
-  const matches = browserTables.filter(table => table.name.toLowerCase().includes(term)
-    || table.columns.some(column => column.name.toLowerCase().includes(term)));
-  $("#schemaStatus").textContent = matches.length
-    ? "Select a table to inspect its columns and relationships in Explore."
-    : "No tables match your search.";
-  matches.forEach(table => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "database-table-link";
-    button.textContent = `${table.name} · ${table.columns.length} columns`;
-    button.addEventListener("click", () => {
-      setView("explore", table.name);
-    });
-    container.append(button);
-  });
 }
 
 function fillSelect(selector, items, valueKey, labelKey, preferred) {
@@ -244,7 +262,6 @@ function fillContextSelect(models) {
 function formatSqlForDisplay(sql) {
   if (!sql || sql === "No SQL was accepted.") return sql;
 
-  // Protect quoted values and identifiers before formatting SQL keywords.
   const protectedParts = [];
   const masked = sql.replace(/'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\[[^\]]*\]/g, (part) => {
     const marker = `__SQL_PART_${protectedParts.length}__`;
@@ -266,7 +283,6 @@ function formatSqlForDisplay(sql) {
     .replace(/^\n/, "")
     .replace(/\s*;\s*$/, ";");
 
-  // Put top-level output expressions on separate lines without splitting function arguments.
   let depth = 0;
   formatted = [...formatted].map((character) => {
     if (character === "(") depth += 1;
@@ -299,6 +315,16 @@ const sqlFunctions = new Set([
   "ROUND", "ROW_NUMBER", "STRFTIME", "SUBSTR", "SUM", "TOTAL",
 ]);
 
+function schemaIdentifiers() {
+  const tables = new Set();
+  const columns = new Set();
+  browserTables.forEach((table) => {
+    tables.add(table.name.toLowerCase());
+    (table.columns || []).forEach((column) => columns.add(column.name.toLowerCase()));
+  });
+  return { tables, columns };
+}
+
 function renderHighlightedSql(element, sql) {
   element.replaceChildren();
   String(sql || "").split("\n").forEach((line, index) => {
@@ -316,15 +342,26 @@ function renderHighlightedSql(element, sql) {
 }
 
 function renderSqlTokens(element, sql) {
+  const ident = schemaIdentifiers();
   const tokens = sql.match(/--[^\n]*|\/\*.*?\*\/|'(?:''|[^'])*'|"(?:""|[^"])*"|`(?:``|[^`])*`|\b\d+(?:\.\d+)?\b|\b[A-Za-z_][A-Za-z0-9_$]*\b|[^A-Za-z0-9_]+/g) || [sql];
-  tokens.forEach((token) => {
+  tokens.forEach((token, index) => {
     let className = "";
     const upper = token.toUpperCase();
+    const lower = token.toLowerCase();
     if (token.startsWith("--") || token.startsWith("/*")) className = "sql-comment";
     else if (token.startsWith("'") || token.startsWith('"') || token.startsWith("`")) className = "sql-string";
     else if (/^\d/.test(token)) className = "sql-number";
     else if (sqlKeywords.has(upper)) className = "sql-keyword";
     else if (sqlFunctions.has(upper)) className = "sql-function";
+    if (!className && /[A-Za-z_]/.test(token) && (ident.tables.has(lower) || ident.columns.has(lower))) {
+      const span = document.createElement("span");
+      span.className = "sql-ident";
+      span.textContent = token;
+      if (ident.tables.has(lower)) span.dataset.table = token;
+      else span.dataset.column = token;
+      element.append(span);
+      return;
+    }
     if (!className) {
       element.append(document.createTextNode(token));
       return;
@@ -336,25 +373,479 @@ function renderSqlTokens(element, sql) {
   });
 }
 
+function shortLabel(text, max = 46) {
+  return String(text).length > max ? `${String(text).slice(0, max - 3)}…` : String(text);
+}
+
 function appendUser(message) {
   $("#emptyState").hidden = true;
+  const intro = $("#threadIntro");
+  if (intro) {
+    intro.hidden = false;
+    if (!state.activeRunId) {
+      const title = $("#threadIntroTitle");
+      if (title) title.textContent = shortLabel(message, 52);
+    }
+  }
+  const crumb = $("#threadBreadcrumb");
+  if (crumb) crumb.textContent = shortLabel(message);
   state.currentQuestion = message;
-  saveRecentQuery(message);
   const article = document.createElement("article");
   article.className = "message user-message";
-  const bubble = document.createElement("div");
-  bubble.className = "bubble";
-  bubble.textContent = message;
-  article.append(bubble);
+  const speaker = document.createElement("div");
+  speaker.className = "speaker";
+  const avatar = document.createElement("span");
+  avatar.className = "avatar";
+  avatar.innerHTML = icon("user", 13);
+  const name = document.createElement("span");
+  name.textContent = "You";
+  const time = document.createElement("time");
+  time.textContent = "just now";
+  speaker.append(avatar, name, time);
+  const question = document.createElement("p");
+  question.className = "question-text";
+  question.textContent = message;
+  article.append(speaker, question);
   $("#messages").append(article);
 }
 
-function appendAssistant(body, elapsed) {
+const pipelineStages = [
+  ["conversation", "Understanding"],
+  ["retrieval", "Retrieving"],
+  ["context_selection", "Context"],
+  ["grounding", "Grounding"],
+  ["generation", "Generating"],
+  ["validation", "Validating"],
+  ["execution", "Executing"],
+  ["result_review", "Review"],
+  ["recovery", "Recovery"],
+  ["presentation", "Explaining"],
+];
+
+const progressLabels = {
+  queued: "Waiting to start…",
+  presentation: "Preparing a plain-language answer",
+  conversation: "Understanding your request",
+  retrieval: "Finding relevant tables and columns",
+  context_selection: "Selecting context with your context model",
+  grounding: "Verifying schema and metadata",
+  generation: "Generating SQL — waiting for the model",
+  validation: "Checking SQL safety",
+  optimization: "Checking a possible SQL optimization",
+  execution: "Running the read-only query",
+  result_review: "Reviewing an empty or NULL result",
+  recovery: "Investigating the query issue",
+  recovery_reasoning: "Recovery agent: deciding what evidence to check",
+  recovery_schema: "Recovery agent: inspecting schema",
+  recovery_values: "Recovery agent: checking actual database values",
+  recovery_probe: "Recovery agent: running a bounded read-only check",
+  recovery_checks: "Running bounded diagnostic checks",
+  recovery_decision: "Recovery agent: evaluating evidence",
+  completed: "Finished",
+};
+
+function appendProgress(provider, model, contextMode) {
+  $("#emptyState").hidden = true;
+  const fragment = $("#progressTemplate").content.cloneNode(true);
+  const article = fragment.querySelector("article");
+  const tracker = article.querySelector(".pipeline-tracker");
+  tracker.replaceChildren();
+  pipelineStages.forEach(([stage, label]) => {
+    if (stage === "context_selection" && contextMode === "retrieval") return;
+    const step = document.createElement("span");
+    step.dataset.stage = stage;
+    step.textContent = label;
+    tracker.append(step);
+  });
+  article.querySelector(".progress-detail").textContent = `${provider} · ${model}`;
+  hydrateIcons(article);
+  $("#messages").append(article);
+  article.scrollIntoView({ behavior: "smooth", block: "end" });
+  return article;
+}
+
+function wait(milliseconds) {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+async function waitForJob(jobId, progress) {
+  while (true) {
+    const job = await api(`/api/chat/jobs/${jobId}`);
+    const seconds = ((job.elapsed_ms || 0) / 1000).toFixed(1);
+    updatePipeline(progress, job.stage, job.status, job.events || [], job.response);
+    const label = progressLabels[job.stage] || "Processing your request";
+    progress.querySelector(".progress-stage").textContent = label;
+    progress.querySelector(".progress-detail").textContent = `${seconds}s elapsed · ${Number(seconds) > 20 ? "Still working. You can cancel without changing your previous result." : "You can cancel at any time."}`;
+    if (job.understanding) {
+      const understanding = $("#understandingContent");
+      understanding.replaceChildren();
+      const title = document.createElement("strong");
+      title.textContent = `Interpreting as ${job.understanding.operation.replaceAll("_", " ").toLowerCase()}`;
+      const detail = document.createElement("p");
+      detail.textContent = job.understanding.resolved_instruction;
+      understanding.append(title, detail);
+    }
+    const log = progress.querySelector(".progress-history ul");
+    log.replaceChildren();
+    (job.events || []).forEach(event => {
+      const item = document.createElement("li");
+      item.textContent = `${(event.elapsed_ms / 1000).toFixed(1)}s · ${progressLabels[event.stage] || event.stage}`;
+      log.append(item);
+    });
+    if (job.status === "completed") return { ...job.response, progress_events: job.events || [] };
+    if (job.status === "cancelled") throw new Error("Request cancelled.");
+    if (job.status === "failed") throw new Error(job.error || "Chat job failed.");
+    await wait(500);
+  }
+}
+
+function visiblePipelineStage(stage) {
+  if (stage.startsWith("recovery_")) return "recovery";
+  if (stage === "optimization") return "validation";
+  return stage;
+}
+
+function updatePipeline(progress, currentStage, jobStatus, events = [], response = null) {
+  const visibleStage = visiblePipelineStage(currentStage);
+  const seen = new Set(JSON.parse(progress.dataset.seenStages || "[]"));
+  events.forEach((event) => seen.add(visiblePipelineStage(event.stage)));
+  if (progress.dataset.activeStage && progress.dataset.activeStage !== visibleStage) seen.add(progress.dataset.activeStage);
+  seen.add(visibleStage);
+  const resultAccepted = jobStatus === "completed" && response?.generation?.accepted === true;
+  if (resultAccepted) seen.add("result_review");
+  progress.dataset.activeStage = visibleStage;
+  progress.dataset.seenStages = JSON.stringify([...seen]);
+  progress.querySelectorAll(".pipeline-tracker span").forEach((step) => {
+    const completed = seen.has(step.dataset.stage)
+      && (jobStatus === "completed" || step.dataset.stage !== visibleStage);
+    step.classList.toggle("complete", completed);
+    step.classList.toggle("active", jobStatus !== "completed" && step.dataset.stage === visibleStage);
+    const recoverySkipped = resultAccepted && step.dataset.stage === "recovery" && !seen.has("recovery");
+    step.classList.toggle("skipped", recoverySkipped);
+    if (recoverySkipped) step.title = "Not needed — the query succeeded without recovery";
+  });
+}
+
+async function send(message, feedbackCategory = null) {
+  if (state.busy || voiceInput?.busy || !message.trim()) return;
+  setView("workspace");
+  if (!state.ready) {
+    showError("A configured database and SQL model are required before asking a question.");
+    return;
+  }
+  state.busy = true;
+  voiceInput?.setQueryBusy(true);
+  $("#sendButton").disabled = true;
+  ["#databaseSelect", "#sqlModelSelect", "#contextModelSelect", "#resetButton"].forEach(id => { $(id).disabled = true; });
+  appendUser(message.trim());
+  const [provider, model] = $("#sqlModelSelect").value.split("|");
+  const contextSelection = $("#contextModelSelect").value;
+  const contextMode = contextSelection === "retrieval" ? "retrieval" : "model1";
+  const [contextProvider, contextModel] = contextMode === "model1" ? contextSelection.split("|") : [null, null];
+  const started = performance.now();
+  const progress = appendProgress(provider, model, contextMode);
+  state.cancelled = false;
+  state.pendingVizRequest = vizRequested(message);
+  $("#cancelButton").hidden = false;
+  try {
+    if (state.restorePending && state.activeRunId) await continueRun(state.activeRunId, false);
+    const created = await api("/api/chat/jobs", {
+      method: "POST",
+      body: JSON.stringify({
+        session_id: sessionId,
+        db_id: $("#databaseSelect").value,
+        message: message.trim(),
+        parent_run_id: state.activeRunId,
+        provider,
+        model,
+        context_provider: contextMode === "model1" ? contextProvider : null,
+        context_model: contextMode === "model1" ? contextModel : null,
+        context_mode: contextMode,
+        execute: true,
+        max_rows: 100,
+        feedback_category: feedbackCategory,
+      }),
+    });
+    state.jobId = created.job_id;
+    if (state.cancelled) await api(`/api/chat/jobs/${created.job_id}`, { method: "DELETE" });
+    const body = await waitForJob(created.job_id, progress);
+    progress.remove();
+    state.activeRunId = body.history_saved ? body.run_id : null;
+    await appendAssistant(body, (performance.now() - started) / 1000);
+    void refreshHistory();
+  } catch (error) {
+    progress.remove();
+    showError(error.message);
+  } finally {
+    state.busy = false;
+    voiceInput?.setQueryBusy(false);
+    state.jobId = null;
+    $("#sendButton").disabled = !state.ready;
+    ["#databaseSelect", "#sqlModelSelect", "#contextModelSelect", "#resetButton"].forEach(id => { $(id).disabled = false; });
+    $("#cancelButton").hidden = true;
+    $("#messageInput").focus();
+  }
+}
+
+function responseStatus(body, attempts) {
+  const accepted = body.generation?.accepted === true;
+  const explanatory = EXPLANATION_OPERATIONS_UI.has(body.operation || "");
+  const chartOnly = body.operation === "VISUALIZE";
+  const modelUnavailable = body.generation && !accepted && body.generation.termination_reason === "model_error";
+  const status = chartOnly ? (body.presentation?.chart_spec ? "CHART FROM STORED DATA" : "CHART UNAVAILABLE")
+    : explanatory ? "NO NEW QUERY"
+    : accepted ? (body.generation.execution_status === "ACCEPTED" ? "EXECUTED" : body.generation.execution_status || "SAFE SQL")
+    : modelUnavailable ? "MODEL UNAVAILABLE" : "FAILED";
+  return { accepted, explanatory, modelUnavailable, status };
+}
+
+function renderCallout(root, kind, iconName, text) {
+  if (!text) return;
+  const callout = root.querySelector(".callout");
+  callout.hidden = false;
+  callout.classList.remove("error", "warn", "info");
+  callout.classList.add(kind);
+  callout.querySelector(".callout-icon").innerHTML = icon(iconName);
+  callout.querySelector(".callout-text").textContent = text;
+}
+
+function updateStatusPill(fragment, body, accepted, status) {
+  const pill = fragment.querySelector(".status-pill");
+  if (!pill) return;
+  const label = pill.querySelector(".status-pill-label");
+  const slot = pill.querySelector("[data-icon]");
+  let iconName = "check";
+  let text = accepted ? "Ready" : "Query issue";
+  let kind = "ok";
+  if (status === "MODEL UNAVAILABLE") { kind = "error"; iconName = "alert"; text = "Model unavailable"; }
+  else if (status === "FAILED") { kind = "error"; iconName = "alert"; text = "Failed"; }
+  else if (status === "NO NEW QUERY") { kind = "warn"; iconName = "info"; text = "Answered without a new query"; }
+  else if (status === "CHART UNAVAILABLE") { kind = "warn"; iconName = "alert"; text = "Chart unavailable"; }
+  else if (status === "CHART FROM STORED DATA") { text = "Chart ready"; }
+  else if (accepted && String(status).startsWith("EXEC")) { text = "Executed"; }
+  pill.classList.remove("warn", "error");
+  if (kind === "warn") pill.classList.add("warn");
+  if (kind === "error") pill.classList.add("error");
+  if (label) label.textContent = text;
+  if (slot) slot.innerHTML = icon(iconName);
+}
+
+/* ---------- Intent-adaptive response modes (Queryflow v3) ---------- */
+
+const VIZ_REQUEST_PATTERN = /\b(?:plot(?:s|ted|ting)?|chart(?:s|ed|ing)?|graph(?:s|ed|ing)?|visuali[sz]|histogram|heatmap|treemap|box ?plot|donut|scatter plot|line chart|bar chart|area chart|pie chart|stacked (?:bar|area))\b/i;
+
+function vizRequested(...messages) {
+  return messages.filter(Boolean).some((message) => VIZ_REQUEST_PATTERN.test(String(message)));
+}
+
+function responseMode(body, opts = {}) {
+  if (EXPLANATION_OPERATIONS_UI.has(body.operation || "") || body.clarification_required) return "explanation";
+  const generation = body.generation || {};
+  if (generation.accepted !== true) return "sql";
+  const presentation = body.presentation;
+  if (presentation?.chart_spec) return "chart";
+  if (opts.viz || body.operation === "VISUALIZE") return "chart_unavailable";
+  return "sql";
+}
+
+function renderChartInto(slot, presentation, generation) {
+  slot._echart?.dispose?.();
+  slot.replaceChildren();
+  slot.classList.add("chart-slot-ec");
+  const ec = window.QueryflowECharts?.render(slot, presentation, generation) || null;
+  slot._echart = ec;
+  if (ec) {
+    return { echarts: ec };
+  }
+  slot.classList.remove("chart-slot-ec");
+  const note = document.createElement("p");
+  note.className = "chart-note";
+  note.textContent = "Interactive charts are unavailable. SQL and the exact result table remain below.";
+  slot.append(note);
+  return { echarts: null };
+}
+
+function wireChartSection(article, presentation, generation) {
+  const section = article.querySelector(".chart-section");
+  const slot = article.querySelector(".chart-slot");
+  const kinds = section.querySelector(".chart-kinds");
+  const more = section.querySelector(".chart-more");
+  const menu = section.querySelector(".chart-menu");
+  if (!section || !slot) return;
+  article._echart = null;
+  article._chartType = presentation.chart_type;
+  kinds.hidden = true;
+  article._echart = (renderChartInto(slot, presentation, generation)).echarts;
+  const closeMenu = () => { menu.hidden = true; more.setAttribute("aria-expanded", "false"); };
+  more.addEventListener("click", (event) => {
+    event.stopPropagation();
+    menu.hidden = !menu.hidden;
+    more.setAttribute("aria-expanded", String(!menu.hidden));
+  });
+  menu.addEventListener("click", (event) => event.stopPropagation());
+  document.addEventListener("click", closeMenu, { once: false });
+  menu.querySelectorAll("[data-chart-action]").forEach((item) => {
+    item.addEventListener("click", () => {
+      closeMenu();
+      const action = item.dataset.chartAction;
+      if (action === "view-sql" || action === "view-data") {
+        article.querySelector(".sql-result-split").hidden = false;
+      } else if (action === "download") {
+        exportChartPng(article);
+      } else if (action === "expand") {
+        openChartFullscreen(article, presentation, generation);
+      } else if (action === "inspect") {
+        revealInspector();
+        article.querySelector(".technical-details")?.scrollIntoView({ behavior: "smooth", block: "start" });
+      }
+    });
+  });
+}
+
+function toast(message) {
+  document.querySelector(".toasty")?.remove();
+  const node = document.createElement("div");
+  node.className = "toasty";
+  node.textContent = message;
+  document.body.append(node);
+  window.setTimeout(() => node.remove(), 2600);
+}
+
+function exportedChartSource(article) {
+  if (article._echart?.getDataURL) {
+    return article._echart.getDataURL({ pixelRatio: 2, backgroundColor: themeBackgroundColor() });
+  }
+  return null;
+}
+
+function themeBackgroundColor() {
+  return getComputedStyle(document.body).backgroundColor || "#ffffff";
+}
+
+function exportChartPng(article) {
+  const dataUrl = exportedChartSource(article);
+  if (!dataUrl) { toast("Chart export is unavailable while the chart library is offline."); return; }
+  const link = document.createElement("a");
+  link.href = dataUrl;
+  link.download = `queryflow-chart-${new Date().toISOString().slice(0, 10)}.png`;
+  link.click();
+}
+
+function openChartFullscreen(article, presentation, generation) {
+  closeChartFullscreen();
+  const overlay = document.createElement("div");
+  overlay.className = "chart-fullscreen";
+  const inner = document.createElement("div");
+  inner.className = "chart-fullscreen-inner";
+  inner.setAttribute("role", "dialog");
+  inner.setAttribute("aria-modal", "true");
+  inner.setAttribute("aria-label", "Expanded chart");
+  const header = document.createElement("header");
+  const title = document.createElement("strong");
+  title.textContent = presentation.title || `${presentation.y} by ${presentation.x}`;
+  const closeButton = document.createElement("button");
+  closeButton.type = "button";
+  closeButton.className = "icon-button";
+  closeButton.id = "chartFullscreenClose";
+  closeButton.title = "Close expanded chart";
+  closeButton.innerHTML = icon("x", 16);
+  const slotHolder = document.createElement("div");
+  slotHolder.className = "chart-fullscreen-slot";
+  header.append(title, closeButton);
+  inner.append(header, slotHolder);
+  overlay.append(inner);
+  overlay.addEventListener("click", (event) => { if (event.target === overlay) closeChartFullscreen(); });
+  document.body.append(overlay);
+  closeButton.addEventListener("click", closeChartFullscreen);
+  const slot = slotHolder;
+  const { echarts } = renderChartInto(slot, presentation, generation);
+  overlay._echart = echarts;
+}
+
+function closeChartFullscreen() {
+  document.querySelectorAll(".chart-fullscreen").forEach((overlay) => {
+    overlay._echart?.dispose?.();
+    overlay.remove();
+  });
+}
+
+function revealInspector() {
+  if (window.innerWidth <= 1020) document.body.classList.add("inspector-open");
+  else $("#appShell").classList.remove("inspector-hidden");
+}
+
+function mergeRunChanges(changes) {
+  const merged = [];
+  for (const change of changes) {
+    const last = merged[merged.length - 1];
+    if (last && last.kind === change.kind) last.token = `${last.token} ${change.token}`.trim();
+    else merged.push({ kind: change.kind, token: change.token });
+  }
+  return merged;
+}
+
+function recoveryTimelineSteps(recovery, events = []) {
+  if (!recovery || recovery.activated === false) return [];
+  if (events.length) {
+    const titles = {
+      SQL_FAILED: "SQL attempt failed", SCHEMA_INSPECTED: "Inspected live schema",
+      VALUES_INSPECTED: "Checked database values", DATABASE_PROBED: "Ran a bounded database check",
+      TOOL_OBSERVED: "Collected evidence", CLAIM_REPORTED: "Agent interpretation",
+      RECOVERY_DECISION: "Recovery decision", SQL_EXECUTED: "Selected SQL executed",
+    };
+    return events.map(event => ({
+      icon: event.status === "FAILED" ? "alert" : event.status === "EXECUTED" ? "check" : "search",
+      tone: event.status === "FAILED" ? "warn" : event.status === "EXECUTED" ? "ok" : "accent",
+      title: `${titles[event.event_type] || event.event_type}${event.attempt ? ` · Attempt ${event.attempt}` : ""}`,
+      detail: event.summary, evidenceId: event.evidence_ids.join(", "),
+      observation: event.detail, sql: event.sql,
+    }));
+  }
+  const steps = [];
+  const mode = recovery.mode || "FAILURE";
+  steps.push({
+    icon: "alert", tone: "warn", title: `Initial ${mode === "FAILURE" ? "failure" : mode.toLowerCase()}`,
+    detail: [recovery.failure_code, recovery.diagnosis_summary].filter(Boolean).join(" — ") || "The first candidate hit an anomaly.",
+  });
+  (recovery.tool_calls || []).forEach((call) => {
+    const toolIcons = { inspect_schema: "table", inspect_values: "search", query_database: "database" };
+    steps.push({
+      icon: toolIcons[call.tool] || "search",
+      tone: "accent",
+      title: `Recovery tool · ${call.tool}`,
+      detail: [call.purpose, call.result_summary].filter(Boolean).join(" — "),
+      evidenceId: call.evidence_id || null,
+    });
+  });
+  (recovery.claims || []).forEach((claim) => {
+    steps.push({
+      icon: "check", tone: "ok", title: `Claim · ${claim.claim_type.replaceAll("_", " ").toLowerCase()}`,
+      detail: `${claim.statement} — evidence: ${(claim.evidence_ids || []).join(", ")}`,
+    });
+  });
+  (recovery.evidence || []).forEach((item, index) => {
+    steps.push({
+      icon: "shield", tone: "info", title: "Recorded evidence",
+      detail: typeof item === "string" ? item : JSON.stringify(item),
+    });
+  });
+  if (recovery.agent_diagnosis || recovery.agent_action) {
+    steps.push({
+      icon: recovery.agent_action === "REPAIR" ? "refresh" : recovery.agent_action === "INFORM" ? "info" : "alert",
+      tone: recovery.agent_action === "REPAIR" ? "accent" : recovery.agent_action === "INFORM" ? "ok" : "warn",
+      title: `Agent decision · ${recovery.agent_action || "REVIEW"}`,
+      detail: [recovery.agent_diagnosis, recovery.repair_instruction ? `Repair instruction: ${recovery.repair_instruction}` : null]
+        .filter(Boolean).join(" "),
+    });
+  }
+  return steps;
+}
+
+async function appendAssistant(body, elapsed, options = {}) {
   const fragment = $("#assistantTemplate").content.cloneNode(true);
   const article = fragment.querySelector("article");
   const generation = body.generation || {};
   const accepted = generation.accepted === true;
-  const explanatory = body.operation === "EXPLAIN" || body.operation?.startsWith("EXPLAIN_");
   const attempts = generation.attempts || [];
   const usage = body.token_usage || generation.token_usage || {};
   const tokenTotal = usage.input_tokens == null && usage.output_tokens == null
@@ -362,85 +853,591 @@ function appendAssistant(body, elapsed) {
     : (usage.input_tokens || 0) + (usage.output_tokens || 0);
   const timings = body.timings_ms || {};
   const optimization = generation.optimization || null;
+  const { explanatory, modelUnavailable, status } = responseStatus(body, attempts);
   const serverElapsed = timings.total == null ? `${elapsed.toFixed(1)}s` : `${(timings.total / 1000).toFixed(1)}s server`;
-  const modelUnavailable = !accepted && generation.termination_reason === "model_error";
-  const status = explanatory ? "NO NEW QUERY" : accepted
-    ? (generation.execution_status === "ACCEPTED" ? "EXECUTED" : "SAFE SQL")
-    : modelUnavailable ? "MODEL UNAVAILABLE" : "FAILED";
   const tokenBadge = tokenTotal == null ? "tokens unavailable" : `${tokenTotal.toLocaleString()} tokens`;
   const badges = [body.operation, status, serverElapsed, `${attempts.length} attempt${attempts.length === 1 ? "" : "s"}`, tokenBadge];
   if (optimization) badges.splice(2, 0, optimization.status.toUpperCase().replaceAll("_", " "));
-  for (const value of badges) {
+  if (body.sql_version) badges.unshift(`SQL v${body.sql_version}`);
+  if (options.restored) badges.unshift(`Saved ${new Date(options.run.created_at * 1000).toLocaleString()}`);
+  const meta = fragment.querySelector(".response-meta");
+  badges.forEach((value) => {
     const badge = document.createElement("span");
-    badge.className = `badge${value === "FAILED" || value === "MODEL UNAVAILABLE" ? " error" : ""}`;
+    badge.className = `badge${value === "FAILED" || value === "MODEL UNAVAILABLE" ? " error" : value === "RESTORED" ? " accent" : ""}`;
     badge.textContent = value;
-    fragment.querySelector(".response-meta").append(badge);
-  }
-  const rejectedAttempts = attempts.filter((attempt) => attemptOutcome(attempt) !== "passed");
-  const failureSummary = rejectedAttempts.length
-    ? `${rejectedAttempts.length} candidate${rejectedAttempts.length === 1 ? " was" : "s were"} rejected; details are available under Issues.`
-    : "";
+    meta.append(badge);
+  });
+  fragment.querySelector(".response-heading h3").textContent = modelUnavailable ? "Model unavailable"
+    : body.operation === "VISUALIZE" ? "Visualization"
+    : explanatory ? "Explanation" : accepted ? "Answer" : "Query issue";
+  updateStatusPill(fragment, body, accepted, status);
+
   const responseMessage = body.explanation || body.presentation?.summary || body.message || "";
-  fragment.querySelector(".response-note").textContent = [responseMessage, failureSummary].filter(Boolean).join(" ");
-  renderResultChart(fragment.querySelector(".answer-pane"), body.presentation, generation);
-  fragment.querySelector(".response-heading h3").textContent = modelUnavailable
-    ? "Model unavailable" : explanatory ? "Explanation" : accepted ? "Answer" : "Query issue";
-  fragment.querySelector(".response-status-icon").textContent = accepted ? "✓" : "!";
-  fragment.querySelector(".response-status-icon").classList.toggle("error", !accepted);
+  fragment.querySelector(".response-note").textContent = responseMessage;
+  const note = fragment.querySelector(".presentation-note");
+  if (body.presentation?.note) { note.hidden = false; note.textContent = body.presentation.note; }
+
+  // Distinct empty / anomaly states, grounded in the real response.
+  if (accepted && generation.row_count === 0) {
+    renderCallout(fragment, "warn", "search", generation.recovery?.diagnosis_summary
+      || "The query executed but returned no rows. Adjust the question or check the filters.");
+  } else if (!accepted && !explanatory && !modelUnavailable) {
+    renderCallout(fragment, "error", "alert", body.human_review?.reason || body.message || "The query could not be completed.");
+  }
+
+  // Intent-adaptive rendering: ordinary requests show SQL + data (Mode A),
+  // explicit visualization requests show a chart-first response (Mode B).
+  const viz = options.viz ?? state.pendingVizRequest === true;
+  state.pendingVizRequest = null;
+  const mode = responseMode(body, { viz });
+  const chartSection = fragment.querySelector(".chart-section");
+  const presentation = body.presentation || null;
+  if (mode === "chart") {
+    chartSection.hidden = false;
+    const spec = presentation.chart_spec;
+    fragment.querySelector(".chart-title").textContent = presentation.title || `${presentation.y} by ${presentation.x}`;
+    fragment.querySelector(".chart-sub").textContent = [
+      spec.chart_type.replaceAll("_", " "), ...(spec.warnings || []),
+    ].join(" · ");
+    fragment.querySelector(".sql-result-split").hidden = true;
+    const chartFoot = document.createElement("div");
+    chartFoot.className = "chart-foot";
+    const chartLegend = document.createElement("span");
+    chartLegend.className = "legend";
+    chartLegend.textContent = spec.y_label || generation.columns?.[1] || "Results";
+    const chartFootnote = document.createElement("span");
+    chartFootnote.className = "plot-footnote";
+    chartFootnote.textContent = `Generated on request · ${spec.data.length} result rows`;
+    chartFoot.append(chartLegend, chartFootnote);
+    chartSection.append(chartFoot);
+  } else if (mode === "chart_unavailable") {
+    chartSection.remove();
+    renderCallout(fragment, "warn", "alert", presentation?.chart_reason
+      || body.message || "This result cannot support the requested chart. SQL and data are shown below.");
+  } else {
+    chartSection.remove();
+  }
+
+  const sqlNotAvailable = explanatory || modelUnavailable || body.clarification_required;
+  const sqlText = generation.sql || "";
+  const displaySql = sqlNotAvailable ? "" : (generation.formatted_sql || formatSqlForDisplay(sqlText));
+  fragment.querySelector(".sql-panel-pane").hidden = sqlNotAvailable;
+  if (!sqlNotAvailable) renderHighlightedSql(fragment.querySelector(".language-sql"), displaySql);
+  fragment.querySelector(".result-panel-pane").hidden = sqlNotAvailable || explanatory;
+
+  const actions = fragment.querySelector(".answer-actions");
+  if (accepted && !explanatory) {
+    actions.append(
+      actionButton("Check correctness", "shield", () => send("Check whether the previous SQL and result are correct.")),
+      actionButton("Optimize", "zap", () => send("Optimize the previous SQL without changing its result.")),
+      actionButton("Save question", "bookmark", () => toggleSaved(generationQuestion(body, generation), article)),
+    );
+  }
+  if (options.restored && options.run) {
+    actions.append(actionButton("Continue from here", "message", () => continueRun(options.run.run_id).catch(error => showError(error.message))));
+    if (options.run.accepted && options.run.sql) {
+      actions.append(actionButton("Rerun saved SQL", "rerun", () => rerunSaved(options.run)));
+    }
+    const snapshot = document.createElement("p");
+    snapshot.className = "snapshot-note";
+    snapshot.textContent = `Saved snapshot · ${Math.min(options.run.rows_preview.length, 20)} preview rows of ${options.run.row_count} returned${options.run.truncated ? " (original result truncated)" : ""}. Opening history did not run the query.`;
+    actions.before(snapshot);
+  }
+
   renderTokenAccounting(fragment, body, generation);
   renderPipelineDetails(fragment, timings, body, generation);
+  renderAttempts(fragment, attempts);
+  renderHumanReview(fragment, body.human_review);
+  if (!sqlNotAvailable) {
+    fragment.querySelector(".context-details").hidden = false;
+    fragment.querySelector(".context-json code").textContent = JSON.stringify(generation.model_context || {}, null, 2);
+    fragment.querySelector(".copy-button").addEventListener("click", (event) => {
+      navigator.clipboard.writeText(sqlText);
+      event.currentTarget.classList.add("active");
+      window.setTimeout(() => event.currentTarget.classList.remove("active"), 1200);
+    });
+    fragment.querySelector(".csv-button").addEventListener("click", () => {
+      downloadCsv(generation.columns || [], generation.rows || []);
+    });
+    const wrap = fragment.querySelector(".table-wrap");
+    renderTable(wrap, generation.columns || [], generation.rows || []);
+    const table = wrap.querySelector("table");
+    if (table) table.className = "result-grid";
+    fragment.querySelector(".row-count").textContent = `${generation.row_count || 0} rows${generation.truncated ? " · truncated" : ""}`;
+    wireSqlIdents(fragment, article);
+    const versionPanel = fragment.querySelector(".versions-panel");
+    const previous = latestAcceptedPreviousSql(body, options.restored ? options.run : null);
+    if (sqlText && previous) {
+      versionPanel.hidden = false;
+      versionPanel.querySelector("summary").onclick = () => { void loadVersionPanel(versionPanel, previous, sqlText); };
+    }
+  }
+  if (generation.recovery && generation.recovery.activated) {
+    renderRecoveryTimeline(fragment.querySelector(".recovery-panel"), generation.recovery, body.recovery_events || []);
+  }
   if (Object.keys(timings).length) {
     fragment.querySelector(".response-note").title = `Routing ${timings.routing || 0} ms · Planning ${timings.planning || 0} ms · Generation/validation/execution ${timings.generation_validation_execution || 0} ms`;
   }
-  if (explanatory || modelUnavailable || body.clarification_required) {
-    fragment.querySelector(".sql-panel").hidden = true;
-    fragment.querySelector(".result-panel").hidden = true;
-    fragment.querySelector('[data-tab="sql"]').hidden = true;
-    fragment.querySelector('[data-tab="result"]').hidden = true;
-  }
-  if (body.clarification_required) {
-    fragment.querySelector(".feedback-panel").hidden = true;
-  }
-  renderAttempts(fragment, attempts);
-  const sql = generation.sql || "No SQL was accepted.";
-  const displaySql = generation.formatted_sql || formatSqlForDisplay(sql);
-  renderHighlightedSql(fragment.querySelector(".sql-panel code"), displaySql);
-  fragment.querySelector(".copy-button").addEventListener("click", (event) => {
-    navigator.clipboard.writeText(sql);
-    event.currentTarget.textContent = "Copied";
-  });
-  renderTable(fragment.querySelector(".table-wrap"), generation.columns || [], generation.rows || []);
-  fragment.querySelector(".row-count").textContent = `${generation.row_count || 0} rows${generation.truncated ? " · truncated" : ""}`;
-  fragment.querySelector(".csv-button").addEventListener("click", () => {
-    downloadCsv(generation.columns || [], generation.rows || []);
-  });
-  renderModelContext(fragment, body, generation);
-  renderHumanReview(fragment, body.human_review);
-  setupTechnicalTabs(fragment, rejectedAttempts.length, body.presentation ? "answer" : accepted && !explanatory && generation.columns?.length ? "result" : "answer");
+  hydrateIcons(article);
   $("#messages").append(fragment);
-  const correctionButton = article?.querySelector(".correction-button");
-  correctionButton?.addEventListener("click", () => {
-    const category = article.querySelector(".feedback-category").value;
-    const correction = article.querySelector(".correction-input").value.trim();
-    if (!correction) return;
-    send(correction, category);
+  if (mode === "chart") wireChartSection(article, presentation, generation);
+  if (accepted) { $("#composerChips")?.querySelectorAll(".chip").forEach((chip) => { chip.disabled = false; }); }
+  article.scrollIntoView({ behavior: "smooth", block: "end" });
+  if (!options.restored) updateInspector(body);
+  return article;
+}
+
+function generationQuestion(body, generation) {
+  return generation.question || body.resolved_question || body.conversation_interpretation?.resolved_instruction || "";
+}
+
+function actionButton(label, iconName, onClick) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "ghost-button";
+  button.innerHTML = `${icon(iconName)}<span>${label}</span>`;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function latestAcceptedPreviousSql(body, restoredRun) {
+  return body.previous_sql || state.history.find(run => run.run_id === body.parent_run_id)?.sql || null;
+}
+
+async function loadVersionPanel(panel, previousSql, currentSql) {
+  const list = panel.querySelector(".version-list");
+  const diffBox = panel.querySelector(".diff-changes");
+  if (list.dataset.loaded === "1") return;
+  list.replaceChildren();
+  list.dataset.loaded = "1";
+  const difference = await fetchDiff(previousSql, currentSql);
+  const changes = mergeRunChanges(difference.changes || []);
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "version-item";
+  const num = document.createElement("span");
+  num.className = "version-num";
+  num.textContent = "diff";
+  const text = document.createElement("span");
+  text.textContent = `vs previous accepted SQL · ${changes.length} change${changes.length === 1 ? "" : "s"}`;
+  button.append(num, text);
+  button.addEventListener("click", () => renderDiff(diffBox, changes));
+  list.append(button);
+  renderDiff(diffBox, changes);
+  if (Object.keys(difference.invariants || {}).length) {
+    const comparisons = document.createElement("p");
+    comparisons.className = "snapshot-note";
+    comparisons.textContent = "SQL structure: " + Object.entries(difference.invariants).map(([name, status]) => `${name} ${status}`).join(" · ");
+    diffBox.append(comparisons);
+  }
+  for (const change of difference.filter_changes || []) {
+    const update = document.createElement("p");
+    update.className = "snapshot-note";
+    update.textContent = `${change.operation.replaceAll("_", " ")}: ${change.previous_value || "—"} → ${change.new_value || "—"}`;
+    diffBox.append(update);
+  }
+}
+
+async function fetchDiff(previousSql, currentSql) {
+  const key = `${previousSql}\u0000${currentSql}`;
+  if (state.diffCache.has(key)) return state.diffCache.get(key);
+  const observedDialect = $("#databaseSelect")?.selectedOptions?.[0]?.dataset.dialect || "sqlite";
+  const body = await api("/api/sql/diff", {
+    method: "POST",
+    body: JSON.stringify({ previous_sql: previousSql, updated_sql: currentSql, dialect: observedDialect }),
   });
-  article?.querySelector(".correctness-button")?.addEventListener("click", () => {
-    send("Check whether the previous SQL and result are correct.");
+  state.diffCache.set(key, body);
+  return body;
+}
+
+function renderDiff(diffBox, changes) {
+  diffBox.hidden = false;
+  diffBox.querySelectorAll(".diff-line").forEach(node => node.remove());
+  const title = diffBox.querySelector(".diff-changes-title");
+  if (!changes.length) {
+    title.textContent = "No structural changes detected. This comparison does not prove business correctness.";
+    return;
+  }
+  title.textContent = `${changes.filter(c => c.kind === "insert").length} added · ${changes.filter(c => c.kind === "remove").length} removed expressions (SQLGlot-aware)`;
+  const existing = diffBox.querySelector(".diff-lines");
+  if (existing) existing.remove();
+  const container = document.createElement("div");
+  container.className = "diff-lines";
+  mergeRunChanges(changes).forEach((change) => {
+    const line = document.createElement("div");
+    line.className = `diff-line ${change.kind}`;
+    line.textContent = change.token;
+    container.append(line);
   });
-  article?.querySelector(".optimize-button")?.addEventListener("click", () => {
-    send("Optimize the previous SQL without changing its result.");
+  diffBox.append(container);
+}
+
+function renderRecoveryTimeline(panel, recovery, events = []) {
+  panel.hidden = false;
+  const modeBadge = panel.querySelector(".recovery-mode-badge");
+  if (recovery.mode) {
+    modeBadge.hidden = false;
+    modeBadge.textContent = recovery.mode;
+  }
+  const decisionBadges = panel.querySelector(".recovery-decision-badges");
+  decisionBadges.replaceChildren();
+  const actions = [["REPAIR", "refresh", "accent"], ["INFORM", "info", ""], ["ESCALATE", "alert", ""]];
+  actions.forEach(([action, iconName, tone]) => {
+    if (recovery.agent_action !== action) return;
+    const badge = document.createElement("span");
+    badge.className = `badge ${tone === "accent" ? "accent" : "warn"}`;
+    badge.innerHTML = `${icon(iconName)}${action}`;
+    decisionBadges.append(badge);
   });
-  article?.scrollIntoView({ behavior: "smooth", block: "end" });
+  const agentBadges = panel.querySelector(".recovery-agent-badges");
+  agentBadges.replaceChildren();
+  const usage = recovery.usage || {};
+  [
+    `${(usage.llm_calls || 0)} LLM calls`,
+    `${(usage.database_probe_count || 0)} database probes`,
+    `${Math.round((usage.latency_ms || 0) / 100) / 10}s`,
+    usage.budget_exhausted ? "budget exhausted" : null,
+  ].filter(Boolean).forEach((text) => {
+    const badge = document.createElement("span");
+    badge.className = "badge";
+    badge.textContent = text;
+    agentBadges.append(badge);
+  });
+  const steps = panel.querySelector(".recovery-steps");
+  steps.replaceChildren();
+  recoveryTimelineSteps(recovery, events).forEach((step) => {
+    const node = document.createElement("div");
+    node.className = "recovery-step";
+    const iconWrap = document.createElement("span");
+    iconWrap.className = `recovery-step-icon ${step.tone === "info" ? "" : step.tone}`;
+    iconWrap.innerHTML = icon(step.icon, 13);
+    const title = document.createElement("div");
+    title.className = "recovery-step-title";
+    title.textContent = step.title;
+    const detail = document.createElement("div");
+    detail.className = "recovery-step-detail";
+    detail.textContent = step.detail;
+    node.append(iconWrap, title, detail);
+    if (step.evidenceId) {
+      const evidence = document.createElement("span");
+      evidence.className = "evidence-id";
+      evidence.textContent = step.evidenceId;
+      detail.append(" ", evidence);
+    }
+    if (step.observation || step.sql) {
+      const observation = document.createElement("details");
+      const summary = document.createElement("summary");
+      summary.textContent = step.sql ? "View SQL" : "View observation";
+      const pre = document.createElement("pre");
+      if (step.sql) renderHighlightedSql(pre, step.sql);
+      else pre.textContent = step.observation;
+      observation.append(summary, pre);
+      detail.append(observation);
+    }
+    steps.append(node);
+  });
+}
+
+function underRows(interpretation, stateLike) {
+  const rows = [];
+  if (!interpretation && !stateLike) return rows;
+  const source = (interpretation?.source || "rules");
+  if (interpretation) {
+    rows.push(["Operation", `${interpretation.operation} · ${source === "model" ? "model interpretation" : "rules"}`]);
+    rows.push(["Resolved request", interpretation.resolved_instruction]);
+    if (interpretation.confidence != null) rows.push(["Confidence", String(interpretation.confidence)]);
+  }
+  const contract = stateLike?.semantic_contract;
+  if (contract) {
+    if (contract.measures?.length) rows.push(["Metric", contract.measures.join(", ")]);
+    if (contract.aggregation) rows.push(["Aggregation", contract.aggregation]);
+    if (contract.filters?.length) rows.push(["Filters", contract.filters.map(item => `${item.operand || item.column || ""} ${item.operator || "="} ${JSON.stringify(item.value)}`).join("; ")]);
+    if (contract.grain?.length) rows.push(["Grouping / grain", contract.grain.join(", ")]);
+    if (contract.limit != null) rows.push(["Limit", String(contract.limit)]);
+    if (contract.outputs?.length) rows.push(["Metric columns", contract.outputs.join(", ")]);
+    if (contract.proposed_tables?.length) rows.push(["Candidate tables", contract.proposed_tables.join(", ")]);
+    if (contract.ambiguities?.length) rows.push(["Ambiguities", contract.ambiguities.join("; ")]);
+  }
+  for (const change of interpretation?.changes || []) {
+    rows.push(["Requested change", `${change.operation}: ${change.target} · ${change.previous_value ?? "—"} → ${change.new_value ?? "—"}`]);
+  }
+  return rows;
+}
+
+function updateInspector(body) {
+  state.lastBody = body;
+  const understanding = $("#understandingContent");
+  understanding.replaceChildren();
+  const rows = underRows(body.conversation_interpretation, body.state);
+  if (!rows.length) {
+    understanding.append(emptyNote("Run a query to see how it was understood."));
+  } else {
+    rows.forEach(([key, value]) => {
+      const row = document.createElement("div");
+      row.className = "uq-row";
+      const k = document.createElement("span");
+      k.className = "k";
+      k.textContent = key;
+      const v = document.createElement("span");
+      v.className = "v";
+      v.textContent = value;
+      row.append(k, v);
+      understanding.append(row);
+    });
+    const note = document.createElement("p");
+    note.className = "uq-note";
+    note.textContent = body.conversation_interpretation?.source === "model"
+      ? "The resolver's interpretation is shown for inspection. Model confidence does not prove business correctness."
+      : "This view shows the request and available context; execution alone does not verify the intended business meaning.";
+    understanding.append(note);
+  }
+  renderInspectorSchema();
+  renderInspectorRecovery(body);
+  renderInspectorPerformance(body);
+}
+
+function emptyNote(text) {
+  const p = document.createElement("p");
+  p.className = "inspector-empty";
+  p.textContent = text;
+  return p;
+}
+
+function renderInspectorSchema() {
+  const graphBox = $("#schemaGraph");
+  const chips = $("#schemaChips");
+  const detail = $("#schemaDetail");
+  chips.replaceChildren();
+  detail.replaceChildren();
+  const generation = state.lastBody?.generation;
+  const context = generation?.model_context || {};
+  const rawTables = context.tables || context.execution_context?.tables || {};
+  const names = Object.keys(rawTables);
+  graphBox.replaceChildren();
+  if (!names.length && !browserTables.length) {
+    graphBox.append(emptyNote("The verified tables used by the current query appear here."));
+    return;
+  }
+  if (names.length) {
+    graphBox.append(schemaGraphSvg(names, context.relationships || []));
+    names.forEach((name) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "schema-chip";
+      chip.innerHTML = `${icon("table", 12)}<span>${name}</span>`;
+      chip.addEventListener("click", () => showSchemaDetail(detail, { table: name }));
+      chips.append(chip);
+    });
+  } else {
+    graphBox.append(emptyNote("Run a query to see the verified tables it used."));
+  }
+}
+
+function schemaGraphSvg(tableNames, relationships) {
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("class", "schema-graph-svg");
+  const radius = 46;
+  const center = radius * (tableNames.length > 1 ? 2.1 : 1.4);
+  const width = center * 2;
+  const height = center * 2;
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  const positions = tableNames.map((name, index) => {
+    const angle = (Math.PI * 2 * index) / Math.max(tableNames.length, 1) - Math.PI / 2;
+    return { name, x: center + radius * 2 * Math.cos(angle), y: center + radius * 2 * Math.sin(angle) };
+  });
+  const byName = Object.fromEntries(positions.map((pos) => [pos.name, pos]));
+  const parsed = relationships.map((relationship) => {
+    const [leftTable] = String(relationship.left || "").split(".");
+    const [rightTable] = String(relationship.right || "").split(".");
+    return { leftTable, rightTable, left: relationship.left, right: relationship.right, fanout: relationship.fanout_risk };
+  }).filter((edge) => byName[edge.leftTable] && byName[edge.rightTable]);
+  parsed.forEach((edge) => {
+    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
+    line.setAttribute("x1", byName[edge.leftTable].x);
+    line.setAttribute("y1", byName[edge.leftTable].y);
+    line.setAttribute("x2", byName[edge.rightTable].x);
+    line.setAttribute("y2", byName[edge.rightTable].y);
+    line.setAttribute("class", `graph-edge${isDeclared(edge.leftTable, edge.rightTable) ? " graph-edge-declared" : ""}`);
+    svg.append(line);
+  });
+  positions.forEach((pos) => {
+    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+    circle.setAttribute("cx", pos.x);
+    circle.setAttribute("cy", pos.y);
+    circle.setAttribute("r", 26);
+    circle.setAttribute("class", "graph-node");
+    svg.append(circle);
+    const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+    label.setAttribute("x", pos.x);
+    label.setAttribute("y", pos.y + 4);
+    label.setAttribute("text-anchor", "middle");
+    label.setAttribute("class", "graph-label");
+    label.textContent = pos.name;
+    svg.append(label);
+  });
+  return svg;
+}
+
+function isDeclared(fromTable, toTable) {
+  return browserRelationships.some((item) =>
+    ((item.from_table === fromTable && item.to_table === toTable)
+      || (item.from_table === toTable && item.to_table === fromTable))
+    && item.source === "declared_foreign_key");
+}
+
+async function loadGlossary(dbId) {
+  if (!dbId || state.glossaryByDb[dbId]) return state.glossaryByDb[dbId] || {};
+  try {
+    const terms = await api(`/api/databases/${encodeURIComponent(dbId)}/glossary`);
+    state.glossaryByDb[dbId] = Object.fromEntries(terms.map((term) => [term.term.toLowerCase(), term]));
+  } catch {
+    state.glossaryByDb[dbId] = {};
+  }
+  return state.glossaryByDb[dbId];
+}
+
+function showSchemaDetail(container, selection) {
+  const { table, column } = selection;
+  container.replaceChildren();
+  loadGlossary($("#databaseSelect").value).then((glossary) => {
+    const tableInfo = browserTables.find(item => item.name.toLowerCase() === String(table || "").toLowerCase());
+    const glossaryMatch = glossary[String(table || "").toLowerCase()] || glossary[String(column || "").toLowerCase()];
+    const box = document.createElement("section");
+    box.className = "table-meta";
+    if (column) {
+      const candidates = browserTables.filter(t => !table || t.name.toLowerCase() === String(table).toLowerCase())
+        .flatMap(t => (t.columns || []).filter(c => c.name.toLowerCase() === String(column).toLowerCase())
+          .map(c => ({...c, tableWithColumn: t.name})));
+      const columnInfo = candidates.length === 1 ? candidates[0] : null;
+      if (candidates.length > 1) {
+        box.append(metaRow("Column", `${column} appears in multiple tables`));
+        for (const candidate of candidates) {
+          box.append(actionButton(candidate.tableWithColumn, "table", () => showSchemaDetail(container, {
+            table: candidate.tableWithColumn, column,
+          })));
+        }
+      }
+      if (columnInfo) {
+        box.append(metaRow("Column", `${columnInfo.tableWithColumn}.${columnInfo.name}`));
+        box.append(metaRow("Physical type", columnInfo.type || "unknown"));
+        if (columnInfo.primary_key) box.append(metaRow("Key", "Primary key"));
+        const tags = document.createElement("div");
+        tags.className = "tagrow";
+        if (columnInfo.primary_key) tags.innerHTML += `<span class="schema-tag pk">PK</span>`;
+        box.append(tags);
+      } else {
+        box.append(metaRow("Column", String(column)));
+      }
+    } else if (tableInfo) {
+      box.append(metaRow("Table", tableInfo.name));
+      box.append(metaRow("Columns", String(tableInfo.columns?.length || 0)));
+      const primaryKeys = (tableInfo.columns || []).filter(c => c.primary_key).map(c => c.name);
+      if (primaryKeys.length) box.append(metaRow("Primary key", primaryKeys.join(", ")));
+      const relations = browserRelationships.filter(item => item.from_table === tableInfo.name || item.to_table === tableInfo.name);
+      relations.forEach(relationship => {
+        if (relationship.source === "declared_foreign_key") {
+          box.append(metaRow("Declared FK", `${relationship.from_table}.${relationship.from_column} → ${relationship.to_table}.${relationship.to_column}`));
+        }
+      });
+    }
+    if (glossaryMatch) {
+      box.append(metaRow("Glossary", glossaryMatch.definition));
+      if (glossaryMatch.grain) box.append(metaRow("Grain", glossaryMatch.grain));
+    }
+    container.append(box);
+  });
+}
+
+function metaRow(k, v) {
+  const row = document.createElement("div");
+  row.className = "meta-row";
+  const kEl = document.createElement("span");
+  kEl.className = "k";
+  kEl.textContent = k;
+  const vEl = document.createElement("span");
+  vEl.className = "v";
+  vEl.textContent = v;
+  row.append(kEl, vEl);
+  return row;
+}
+
+function renderInspectorRecovery(body) {
+  const box = $("#recoveryMini");
+  const recovery = body.generation?.recovery;
+  box.replaceChildren();
+  if (!recovery || !recovery.activated) {
+    box.append(emptyNote("The recovery agent only activates on anomalies."));
+    return;
+  }
+  const info = document.createElement("div");
+  info.className = "recovery-mini";
+  info.append(metaRow("Mode", recovery.mode || ""));
+  info.append(metaRow("Decision", recovery.agent_action || "pending"));
+  if (recovery.agent_confidence != null) info.append(metaRow("Confidence", String(recovery.agent_confidence)));
+  if (recovery.diagnosis_summary) info.append(metaRow("Diagnosis", recovery.diagnosis_summary));
+  (recovery.claims || []).forEach((claim) => {
+    const item = document.createElement("div");
+    item.className = "claim-item";
+    item.innerHTML = "";
+    const text = document.createElement("span");
+    text.textContent = claim.statement;
+    const small = document.createElement("small");
+    small.textContent = `${claim.claim_type} · evidence ${(claim.evidence_ids || []).join(", ")}`;
+    item.append(text, small);
+    info.append(item);
+  });
+  const link = document.createElement("button");
+  link.type = "button";
+  link.className = "ghost-button";
+  link.innerHTML = `${icon("binoculars", 13)}<span>Open full timeline</span>`;
+  link.addEventListener("click", () => {
+    const last = [...document.querySelectorAll(".recovery-panel")].pop();
+    if (last) { last.open = true; last.scrollIntoView({ behavior: "smooth", block: "center" }); }
+  });
+  info.append(link);
+  box.append(info);
+}
+
+function renderInspectorPerformance(body) {
+  const box = $("#validationContent");
+  box.replaceChildren();
+  const generation = body.generation || {};
+  const timings = body.timings_ms || {};
+  const usage = body.token_usage || generation.token_usage || {};
+  const total = usage.input_tokens == null && usage.output_tokens == null ? null : (usage.input_tokens || 0) + (usage.output_tokens || 0);
+  const attempts = generation.attempts || [];
+  const failed = attempts.filter(a => attemptOutcome(a) === "failed").length;
+  box.append(metaRow("Attempts", `${attempts.length}${failed ? ` (${failed} failed)` : ""}`));
+  box.append(metaRow("Total latency", timings.total != null ? `${timings.total} ms` : "unreported"));
+  box.append(metaRow("Model calls in ledger", String((body.call_ledger || []).length)));
+  box.append(metaRow("Total tokens", total == null ? "unavailable" : total.toLocaleString()));
+  const rejected = attempts.filter(a => attemptOutcome(a) !== "passed");
+  if (rejected.length) {
+    const label = document.createElement("p");
+    label.className = "uq-note";
+    label.textContent = rejected.map(a => `${a.validation?.code || "?"}: ${a.validation?.message || ""}`.trim()).slice(0, 3).join(" · ");
+    box.append(label);
+  }
+}
+
+function wireSqlIdents(fragment, article) {
+  fragment.querySelectorAll(".sql-ident").forEach((span) => {
+    span.addEventListener("click", () => {
+      const detail = $("#schemaDetail");
+      showSchemaDetail(detail, span.dataset.table ? { table: span.dataset.table } : { column: span.dataset.column });
+      if (window.innerWidth <= 1020) document.body.classList.add("inspector-open");
+      $("#schemaContent").scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  });
 }
 
 function renderHumanReview(fragment, review) {
-  const panel = fragment.querySelector(".human-review-panel");
+  const panel = fragment.querySelector(".human-review");
   if (!panel || !review) return;
   panel.hidden = false;
   panel.querySelector(".human-review-reason").textContent = review.reason || "Automated review is uncertain.";
   panel.querySelector(".human-review-question").textContent = review.question || "Please clarify.";
-  const options = panel.querySelector(".human-review-options");
+  const options = panel.querySelector(".review-actions");
   const editableActions = {
     "Enter another ID": "Enter the replacement ID in the chat…",
     "Edit filters": "Describe the corrected filters in the chat…",
@@ -470,6 +1467,52 @@ function renderHumanReview(fragment, review) {
     });
     options.append(button);
   });
+}
+
+function renderTable(container, columns, rows) {
+  if (!columns.length) {
+    const empty = document.createElement("div");
+    empty.className = "empty-result";
+    empty.textContent = "No rows returned, or execution was not completed.";
+    container.append(empty);
+    return;
+  }
+  const table = document.createElement("table");
+  const head = table.createTHead().insertRow();
+  columns.forEach((column) => { const cell = document.createElement("th"); cell.textContent = column; head.append(cell); });
+  const body = table.createTBody();
+  rows.forEach((row) => {
+    const tr = body.insertRow();
+    row.forEach((value) => {
+      const td = tr.insertCell();
+      if (value === null) {
+        const badge = document.createElement("span");
+        badge.className = "null-value";
+        badge.textContent = "NULL";
+        td.append(badge);
+      } else {
+        td.textContent = String(value);
+        if (typeof value === "number") td.classList.add("numeric");
+      }
+    });
+  });
+  container.append(table);
+}
+
+function downloadCsv(columns, rows) {
+  if (!columns.length) return;
+  const escape = (value) => {
+    if (value === null || value === undefined) return "";
+    const text = String(value);
+    return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+  };
+  const csv = [columns, ...rows].map((row) => row.map(escape).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `query-result-${new Date().toISOString().slice(0, 10)}.csv`;
+  link.click();
+  URL.revokeObjectURL(link.href);
 }
 
 function usageTotal(usage) {
@@ -521,7 +1564,7 @@ function renderTokenAccounting(fragment, body, generation) {
     ["Other calls (resolver / recovery)", conversation],
     ["Context model", context],
     ["SQL attempts", sql],
-    ["Chart selection", chartTokens],
+    ...(chartTokens > 0 ? [["Legacy chart-selection call", chartTokens]] : []),
     ["Result interpretation", interpretationTokens],
     ["Discarded-attempt tokens", wasted],
     ["Input tokens", usage.input_tokens ?? null],
@@ -562,13 +1605,16 @@ function renderTokenAccounting(fragment, body, generation) {
 function renderAttempts(fragment, attempts) {
   const panel = fragment.querySelector(".attempts-panel");
   const list = fragment.querySelector(".attempts-list");
-  const summary = fragment.querySelector(".attempts-summary");
-  const visibleAttempts = attempts.filter((attempt) => attemptOutcome(attempt) !== "passed");
+  const summary = fragment.querySelector(".attempt-summary");
+  const count = fragment.querySelector(".attempts-count");
   if (!panel || !list || !summary) return;
+  const visibleAttempts = attempts.filter((attempt) => attemptOutcome(attempt) !== "passed");
+  if (count) count.textContent = attempts.length ? `· ${attempts.length}` : "";
   if (!visibleAttempts.length) {
     summary.textContent = attempts.length
       ? `${attempts.length} attempt${attempts.length === 1 ? "" : "s"} passed validation.`
       : "No SQL validation attempt was required for this response.";
+    panel.open = false;
     return;
   }
 
@@ -578,6 +1624,7 @@ function renderAttempts(fragment, attempts) {
   if (failed) summaryParts.push(`${failed} failed`);
   if (notSelected) summaryParts.push(`${notSelected} not selected`);
   summary.textContent = summaryParts.join(" · ");
+  panel.open = true;
   visibleAttempts.forEach((attempt, index) => {
     const validation = attempt.validation || {};
     const outcome = attemptOutcome(attempt);
@@ -590,8 +1637,11 @@ function renderAttempts(fragment, attempts) {
     header.className = "attempt-header";
     const title = document.createElement("strong");
     const outcomeLabel = passed ? "PASSED" : notSelected ? "NOT SELECTED" : "FAILED";
-    title.textContent = `Attempt ${attempt.number || index + 1} · ${outcomeLabel} · ${validation.code || "UNKNOWN_VALIDATION_RESULT"}`;
+    title.textContent = `Attempt ${attempt.number || index + 1} · ${outcomeLabel}`;
     header.append(title);
+    const code = document.createElement("code");
+    code.textContent = validation.code || "UNKNOWN_VALIDATION_RESULT";
+    header.append(code);
 
     const reason = document.createElement("p");
     reason.className = "attempt-reason";
@@ -599,234 +1649,252 @@ function renderAttempts(fragment, attempts) {
     item.append(header, reason);
 
     if (!passed && attempt.sql) {
-      const sql = document.createElement("pre");
+      const sqlPre = document.createElement("pre");
       const sqlCode = document.createElement("code");
       sqlCode.className = "language-sql";
       renderHighlightedSql(sqlCode, formatSqlForDisplay(attempt.sql));
-      sql.append(sqlCode);
-      item.append(sql);
+      sqlPre.append(sqlCode);
+      item.append(sqlPre);
     }
     list.append(item);
   });
 }
 
-function setupTechnicalTabs(fragment, issueCount, initialTab = "answer") {
-  const article = fragment.querySelector(".assistant-message");
-  if (!article) return;
-  const validationTab = article.querySelector('[data-tab="validation"]');
-  validationTab.textContent = issueCount ? `Validation · ${issueCount}` : "Validation";
-  validationTab.classList.toggle("has-issues", issueCount > 0);
-
-  const activate = (name) => {
-    article.querySelectorAll(".response-tab").forEach((tab) => {
-      tab.classList.toggle("active", tab.dataset.tab === name);
-    });
-    article.querySelectorAll(".response-pane").forEach((pane) => {
-      pane.classList.toggle("active", pane.dataset.tabPanel === name);
-    });
-  };
-  article.querySelectorAll(".response-tab").forEach((tab) => {
-    tab.addEventListener("click", () => activate(tab.dataset.tab));
-  });
-  activate(initialTab);
-}
-
-function renderModelContext(fragment, body, generation) {
-  const panel = fragment.querySelector(".context-panel");
-  if (!panel) return;
-  const modelContext = generation.model_context || null;
-  if (!modelContext) {
-    panel.hidden = true;
-    fragment.querySelector(".context-card").hidden = true;
-    fragment.querySelector('[data-tab="context"]').hidden = true;
-    return;
-  }
-  renderSchemaVisual(fragment.querySelector(".schema-visual"), modelContext);
-  fragment.querySelector(".context-json").textContent = JSON.stringify(modelContext, null, 2);
-  const tables = modelContext.tables || modelContext.execution_context?.tables || {};
-  const relationships = modelContext.relationships || [];
-  const columnCount = Object.values(tables).reduce((count, table) => {
-    const columns = table.columns || {};
-    return count + (Array.isArray(columns) ? columns.length : Object.keys(columns).length);
-  }, 0);
-  fragment.querySelector(".context-summary").textContent = `${Object.keys(tables).length} tables · ${columnCount} columns · ${relationships.length} relationships`;
-}
-
-function renderSchemaVisual(container, modelContext) {
-  if (!container) return;
-  const tables = modelContext.tables || modelContext.execution_context?.tables || {};
-  const tableGrid = document.createElement("div");
-  tableGrid.className = "schema-table-grid";
-  Object.entries(tables).forEach(([tableName, tableData]) => {
-    const card = document.createElement("section");
-    card.className = "schema-table-card";
-    const heading = document.createElement("h4");
-    heading.textContent = tableName;
-    const grain = document.createElement("p");
-    grain.textContent = tableData.grain || "grain not profiled";
-    const list = document.createElement("ul");
-    const columns = tableData.columns || {};
-    const primaryKeys = new Set(tableData.primary_key || []);
-    const relationshipKeys = new Set(tableData.relationship_keys || []);
-    const entries = Array.isArray(columns)
-      ? columns.map((name) => [name, {}])
-      : Object.entries(columns);
-    entries.forEach(([columnName, metadata]) => {
-      const item = document.createElement("li");
-      const name = document.createElement("span");
-      name.textContent = columnName;
-      const tags = document.createElement("span");
-      tags.className = "column-tags";
-      const roles = new Set(metadata.key_roles || []);
-      if (primaryKeys.has(columnName) || roles.has("PRIMARY_KEY")) tags.append(makeTag("PK"));
-      if (relationshipKeys.has(columnName) || roles.has("FOREIGN_KEY")) tags.append(makeTag("FK"));
-      if (metadata.type) tags.append(makeTag(metadata.type));
-      if (metadata.format) tags.append(makeTag(metadata.format));
-      item.append(name, tags);
-      list.append(item);
-    });
-    card.append(heading, grain, list);
-    tableGrid.append(card);
-  });
-  container.append(tableGrid);
-
-  const relationships = modelContext.relationships || [];
-  if (relationships.length) {
-    const relationshipList = document.createElement("div");
-    relationshipList.className = "relationship-list";
-    relationships.forEach((relationship) => {
-      const item = document.createElement("div");
-      item.className = "relationship-item";
-      item.textContent = `${relationship.left}  →  ${relationship.right}`;
-      const details = [relationship.cardinality, relationship.fanout_risk ? "fanout risk" : null]
-        .filter(Boolean)
-        .join(" · ");
-      if (details) item.append(makeTag(details));
-      relationshipList.append(item);
-    });
-    container.append(relationshipList);
-  }
-}
-
-function makeTag(value) {
-  const tag = document.createElement("small");
-  tag.className = "schema-tag";
-  tag.textContent = value;
-  return tag;
-}
-
-function renderTable(container, columns, rows) {
-  if (!columns.length) {
-    const empty = document.createElement("div");
-    empty.className = "empty-result";
-    empty.textContent = "No rows returned, or execution was not completed.";
-    container.append(empty);
-    return;
-  }
-  const table = document.createElement("table");
-  const head = table.createTHead().insertRow();
-  columns.forEach((column) => { const cell = document.createElement("th"); cell.textContent = column; head.append(cell); });
-  const body = table.createTBody();
-  rows.forEach((row) => {
-    const tr = body.insertRow();
-    row.forEach((value) => {
-      const td = tr.insertCell();
-      if (value === null) {
-        const badge = document.createElement("span");
-        badge.className = "null-value";
-        badge.textContent = "NULL";
-        td.append(badge);
-      } else {
-        td.textContent = String(value);
-        if (typeof value === "number") td.classList.add("numeric");
-      }
-    });
-  });
-  container.append(table);
-}
-
-function downloadCsv(columns, rows) {
-  if (!columns.length) return;
-  const escape = (value) => {
-    if (value === null || value === undefined) return "";
-    const text = String(value);
-    return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
-  };
-  const csv = [columns, ...rows].map((row) => row.map(escape).join(",")).join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-  const link = document.createElement("a");
-  link.href = URL.createObjectURL(blob);
-  link.download = `query-result-${new Date().toISOString().slice(0, 10)}.csv`;
-  link.click();
-  URL.revokeObjectURL(link.href);
-}
-
 function renderPipelineDetails(fragment, timings, body, generation) {
-  const container = fragment.querySelector(".pipeline-details");
+  const container = fragment.querySelector(".pipeline-rows");
   if (!container) return;
   const stages = [
-    ["Conversation routing", timings.routing],
+    ["Conversation interpretation", timings.conversation_interpretation],
+    ["Routing", timings.routing],
     ["Context planning", timings.planning],
     ["Generation / validation / execution", timings.generation_validation_execution],
     ["Total request", timings.total],
   ];
   stages.forEach(([label, milliseconds]) => {
     const row = document.createElement("div");
-    row.className = `pipeline-row${milliseconds == null ? " unmeasured" : ""}`;
+    row.className = `pipeline-run${milliseconds == null ? " unmeasured" : ""}`;
     const status = document.createElement("span");
     status.textContent = label;
-    const duration = document.createElement("span");
+    const duration = document.createElement("b");
     duration.textContent = milliseconds == null ? "Not reported" : `${Number(milliseconds).toLocaleString()} ms`;
     row.append(status, duration);
     container.append(row);
   });
   if (body.progress_events?.length) {
-    const history = document.createElement("details");
-    history.className = "progress-history";
-    const summary = document.createElement("summary");
-    summary.textContent = "Request activity";
-    const list = document.createElement("ol");
-    body.progress_events.forEach(event => {
-      const item = document.createElement("li");
-      item.textContent = `${(event.elapsed_ms / 1000).toFixed(1)}s · ${progressLabels[event.stage] || event.stage}`;
-      list.append(item);
-    });
-    history.append(summary, list);
-    container.append(history);
+    const history = container.parentElement.querySelector(".progress-history");
+    const list = history ? history.querySelector("ul") : null;
+    if (list) {
+      list.replaceChildren();
+      body.progress_events.forEach(event => {
+        const item = document.createElement("li");
+        item.textContent = `${(event.elapsed_ms / 1000).toFixed(1)}s · ${progressLabels[event.stage] || event.stage}`;
+        list.append(item);
+      });
+    }
   }
 }
 
-function getRecentQueries() {
-  try { return JSON.parse(localStorage.getItem(recentStorageKey) || "[]"); }
+function showError(message) {
+  appendAssistant({ operation: "ERROR", message, generation: { accepted: false, attempts: [] } }, 0);
+}
+
+/* ---------- History ---------- */
+
+function summarizeRun(run) {
+  const created = run.created_at ? new Date(run.created_at * 1000) : null;
+  const time = created && !Number.isNaN(created.getTime())
+    ? created.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+    : "";
+  return {
+    title: run.original_message || run.resolved_question || "Query",
+    subtitle: [run.operation, `${run.row_count || 0} rows`, run.outcome?.toLowerCase().replaceAll("_", " ") || (run.accepted ? "executed" : "failed"), time]
+      .filter(Boolean).join(" · "),
+    failed: run.outcome ? run.outcome === "FAILED" : run.accepted === false,
+  };
+}
+
+async function refreshHistory() {
+  try {
+    state.history = await api(`/api/history?session_id=${encodeURIComponent(sessionId)}&limit=50`);
+    renderHistory();
+  } catch {
+    state.history = [];
+    renderHistory();
+  }
+}
+
+function renderHistory() {
+  const container = $("#conversationHistory");
+  container.replaceChildren();
+  const term = $("#historySearch").value.trim().toLowerCase();
+  const matches = state.history.filter((run) =>
+    !term
+    || (run.original_message || "").toLowerCase().includes(term)
+    || (run.resolved_question || "").toLowerCase().includes(term)
+    || (run.sql || "").toLowerCase().includes(term));
+  const groups = new Map();
+  for (const run of matches) {
+    const id = run.conversation_id || run.run_id;
+    if (!groups.has(id)) groups.set(id, run);
+  }
+  const visible = [...groups.values()];
+  if (!visible.length) {
+    container.append(emptyNote(term ? "No history matches this search." : "Completed queries appear here."));
+    return;
+  }
+  for (const run of visible) {
+    const item = summarizeRun(run);
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "run-item";
+    button.dataset.runId = run.run_id;
+    if (run.run_id === state.activeRunId) button.classList.add("active");
+    const iconWrap = document.createElement("span");
+    iconWrap.innerHTML = icon(item.failed ? "alert" : "message", 14);
+    const main = document.createElement("div");
+    main.className = "run-main";
+    const title = document.createElement("span");
+    title.className = "run-title";
+    const turns = state.history.filter(turn => (turn.conversation_id || turn.run_id) === (run.conversation_id || run.run_id));
+    const first = turns[turns.length - 1];
+    title.textContent = first?.original_message || item.title;
+    const sub = document.createElement("span");
+    sub.className = "run-sub";
+    sub.textContent = `${run.db_id} · ${turns.length} turn${turns.length === 1 ? "" : "s"} · ${item.subtitle}`;
+    main.append(title, sub);
+    const dot = document.createElement("span");
+    dot.className = `run-status${item.failed ? " failed" : ""}`;
+    button.append(iconWrap, main, dot);
+    button.addEventListener("click", () => openRun(run));
+    container.append(button);
+  }
+}
+
+async function openRun(run) {
+  if (state.busy || voiceInput?.busy) return;
+  setView("workspace");
+  $("#emptyState").hidden = true;
+  state.activeRunId = run.run_id;
+  renderHistory();
+  try {
+    const records = await api(`/api/history/${encodeURIComponent(run.run_id)}/turns?session_id=${encodeURIComponent(sessionId)}`);
+    const record = records[records.length - 1];
+    if (!record) return;
+    await loadGlossary(record.db_id);
+    $("#databaseSelect").value = record.db_id;
+    await loadDatabaseSchema();
+    $("#messages").replaceChildren();
+    for (const turn of records) {
+      appendUser(turn.original_message);
+      await appendAssistant(restoredRunToResponse(turn), 0, {restored: true, run: turn});
+    }
+    state.restorePending = true;
+    updateInspector(restoredRunToResponse(record));
+    $("#mainColumn").scrollTo({top: 0});
+  } catch (error) { showError(`Could not open the saved conversation: ${error.message}`); }
+}
+
+async function continueRun(runId, focus = true) {
+  const savedState = await api(`/api/history/${encodeURIComponent(runId)}/continue?session_id=${encodeURIComponent(sessionId)}`, {method: "POST"});
+  state.activeRunId = runId;
+  state.restorePending = false;
+  $("#databaseSelect").value = savedState.db_id;
+  renderHistory();
+  if (focus) {
+    $("#messageInput").placeholder = "Continue this conversation or correct the previous query…";
+    $("#messageInput").focus();
+  }
+}
+
+async function rerunSaved(record) {
+  if (state.busy || voiceInput?.busy) return;
+  state.busy = true;
+  voiceInput?.setQueryBusy(true);
+  $("#sendButton").disabled = true;
+  try {
+    const response = await api(`/api/history/${encodeURIComponent(record.run_id)}/rerun?session_id=${encodeURIComponent(sessionId)}`, {method: "POST"});
+    state.activeRunId = response.run_id;
+    state.restorePending = false;
+    appendUser("Rerun the saved SQL against current data.");
+    await appendAssistant(response, 0);
+    await refreshHistory();
+  } catch (error) { showError(error.message); }
+  finally {
+    state.busy = false;
+    voiceInput?.setQueryBusy(false);
+    $("#sendButton").disabled = !state.ready;
+  }
+}
+
+function restoredRunToResponse(record) {
+  if (record.response_payload && Object.keys(record.response_payload).length) {
+    return record.response_payload;
+  }
+  return {
+    session_id: record.session_id,
+    operation: record.operation,
+    resolved_question: record.resolved_question,
+    message: record.presentation_summary || record.resolved_question,
+    state: { turn_count: record.turn_count, semantic_contract: null },
+    token_usage: record.token_usage || {},
+    timings_ms: record.timings_ms || {},
+    presentation: record.presentation_summary ? { summary: record.presentation_summary, note: "" } : null,
+    generation: {
+      accepted: record.accepted,
+      execution_status: record.execution_status,
+      question: record.resolved_question,
+      sql: record.sql,
+      columns: record.columns || [],
+      rows: record.rows_preview || [],
+      row_count: record.row_count || 0,
+      truncated: record.truncated,
+      attempts: [],
+      token_usage: record.token_usage || {},
+      recovery: record.recovery || null,
+    },
+  };
+}
+
+/* ---------- Saved questions ---------- */
+
+function getSaved() {
+  try { return JSON.parse(localStorage.getItem(savedStorageKey) || "[]"); }
   catch { return []; }
 }
 
-function saveRecentQuery(question) {
-  const recent = getRecentQueries().filter((item) => item !== question);
-  recent.unshift(question);
-  try { localStorage.setItem(recentStorageKey, JSON.stringify(recent.slice(0, 7))); }
-  catch { /* Browser storage restrictions must not prevent submitting a question. */ }
-  renderRecentQueries();
+function toggleSaved(question, article) {
+  const saved = getSaved();
+  const exists = saved.includes(question);
+  const next = exists ? saved.filter(item => item !== question) : [question, ...saved].slice(0, 20);
+  localStorage.setItem(savedStorageKey, JSON.stringify(next));
+  renderSaved();
+  if (article) {
+    const button = article.querySelector(".save-button");
+    if (button) button.title = exists ? "Save this question" : "Saved";
+  }
 }
 
-function renderRecentQueries() {
-  const container = $("#recentQueries");
-  if (!container) return;
+function renderSaved() {
+  const container = $("#savedQuestions");
   container.replaceChildren();
-  const recent = getRecentQueries();
-  if (!recent.length) {
-    const empty = document.createElement("p");
-    empty.className = "recent-empty";
-    empty.textContent = "Your recent questions will appear here.";
-    container.append(empty);
+  const saved = getSaved();
+  if (!saved.length) {
+    container.append(emptySaveNote());
     return;
   }
-  recent.forEach((question) => {
+  saved.forEach(question => {
     const button = document.createElement("button");
     button.type = "button";
-    button.className = "recent-item";
-    button.textContent = `◯  ${question}`;
-    button.title = question;
+    button.className = "run-item";
+    const iconWrap = document.createElement("span");
+    iconWrap.innerHTML = icon("bookmark", 14);
+    const main = document.createElement("div");
+    main.className = "run-main";
+    const title = document.createElement("span");
+    title.className = "run-title";
+    title.textContent = question;
+    main.append(title);
+    button.append(iconWrap, main);
     button.addEventListener("click", () => {
       $("#messageInput").value = question;
       $("#messageInput").focus();
@@ -835,167 +1903,96 @@ function renderRecentQueries() {
   });
 }
 
-function showError(message) {
-  appendAssistant({ operation: "ERROR", message, generation: { accepted: false, attempts: [] } }, 0);
+function emptySaveNote() {
+  const p = document.createElement("p");
+  p.className = "list-empty";
+  p.textContent = "Star a result to keep the question here.";
+  return p;
 }
 
-const pipelineStages = [
-  ["conversation", "Question"],
-  ["retrieval", "Retrieval"],
-  ["context_selection", "Context"],
-  ["grounding", "Grounding"],
-  ["generation", "Generate SQL"],
-  ["validation", "Validate"],
-  ["execution", "Run query"],
-  ["result_review", "Review result"],
-  ["recovery", "Recovery"],
-  ["presentation", "Choose chart & explain"],
-];
+/* ---------- Theme, inspector, keyboard ---------- */
 
-const progressLabels = {
-  queued: "Waiting to start…",
-  presentation: "Choosing the chart, then preparing a plain-language answer",
-  conversation: "Understanding your request",
-  retrieval: "Finding relevant tables and columns",
-  context_selection: "Selecting context with your context model",
-  grounding: "Verifying schema and metadata",
-  generation: "Generating SQL — waiting for the model",
-  validation: "Checking SQL safety",
-  optimization: "Checking a possible SQL optimization",
-  execution: "Running the read-only query",
-  result_review: "Reviewing an empty or NULL result",
-  recovery: "Investigating the query issue",
-  recovery_reasoning: "Recovery agent: deciding what evidence to check",
-  recovery_schema: "Recovery agent: inspecting schema",
-  recovery_values: "Recovery agent: checking actual database values",
-  recovery_probe: "Recovery agent: running a bounded read-only check",
-  recovery_checks: "Running bounded diagnostic checks",
-  recovery_decision: "Recovery agent: evaluating evidence",
-  completed: "Finished",
-};
-
-function appendProgress(provider, model, contextMode) {
-  const article = document.createElement("article");
-  article.className = "message assistant-message progress-message";
-  article.setAttribute("role", "status");
-  article.innerHTML = '<div class="message-content"><div class="progress-heading"><span class="progress-spinner" aria-hidden="true"></span><p class="progress-stage">Queued…</p></div><p class="progress-detail"></p><div class="pipeline-tracker"></div><details class="progress-history"><summary>Activity log</summary><ol></ol></details></div>';
-  const tracker = article.querySelector(".pipeline-tracker");
-  pipelineStages.forEach(([stage, label]) => {
-    if (stage === "context_selection" && contextMode === "retrieval") return;
-    const step = document.createElement("span");
-    step.dataset.stage = stage;
-    step.textContent = label;
-    tracker.append(step);
-  });
-  article.querySelector(".progress-detail").textContent = `${provider} · ${model}`;
-  $("#messages").append(article);
-  article.scrollIntoView({ behavior: "smooth", block: "end" });
-  return article;
-}
-
-function wait(milliseconds) {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-}
-
-async function waitForJob(jobId, progress) {
-  while (true) {
-    const job = await api(`/api/chat/jobs/${jobId}`);
-    const seconds = ((job.elapsed_ms || 0) / 1000).toFixed(1);
-    updatePipeline(progress, job.stage, job.status, job.events || []);
-    const label = progressLabels[job.stage] || "Processing your request";
-    progress.querySelector(".progress-stage").textContent = label;
-    progress.querySelector(".progress-detail").textContent = `${seconds}s elapsed · ${Number(seconds) > 20 ? "Still working. You can cancel without changing your previous result." : "You can cancel at any time."}`;
-    const log = progress.querySelector(".progress-history ol");
-    log.replaceChildren();
-    (job.events || []).forEach(event => {
-      const item = document.createElement("li");
-      item.textContent = `${(event.elapsed_ms / 1000).toFixed(1)}s · ${progressLabels[event.stage] || event.stage}`;
-      log.append(item);
-    });
-    if (job.status === "completed") return { ...job.response, progress_events: job.events || [] };
-    if (job.status === "cancelled") throw new Error("Request cancelled.");
-    if (job.status === "failed") throw new Error(job.error || "Chat job failed.");
-    await wait(500);
-  }
-}
-
-function visiblePipelineStage(stage) {
-  if (stage.startsWith("recovery_")) return "recovery";
-  if (stage === "optimization") return "validation";
-  return stage;
-}
-
-function updatePipeline(progress, currentStage, jobStatus, events = []) {
-  const visibleStage = visiblePipelineStage(currentStage);
-  const seen = new Set(JSON.parse(progress.dataset.seenStages || "[]"));
-  events.forEach((event) => seen.add(visiblePipelineStage(event.stage)));
-  if (progress.dataset.activeStage && progress.dataset.activeStage !== visibleStage) seen.add(progress.dataset.activeStage);
-  seen.add(visibleStage);
-  progress.dataset.activeStage = visibleStage;
-  progress.dataset.seenStages = JSON.stringify([...seen]);
-  progress.querySelectorAll(".pipeline-tracker span").forEach((step) => {
-    const completed = seen.has(step.dataset.stage)
-      && (jobStatus === "completed" || step.dataset.stage !== visibleStage);
-    step.classList.toggle("complete", completed);
-    step.classList.toggle("active", jobStatus !== "completed" && step.dataset.stage === visibleStage);
+function applyThemeButtons() {
+  const dark = document.documentElement.dataset.theme === "dark";
+  [["#themeToggle", "Toggle appearance"], ["#themeToggleTop", ""]].forEach(([selector, label]) => {
+    const button = $(selector);
+    if (!button) return;
+    button.innerHTML = `<span data-icon="${dark ? "sun" : "moon"}"></span>${label ? ` ${label}` : ""}`;
+    hydrateIcons(button);
   });
 }
 
-async function send(message, feedbackCategory = null) {
-  if (state.busy || !message.trim()) return;
-  setView("workspace");
-  if (!state.ready) {
-    showError("A configured database and SQL model are required before asking a question.");
+$("#themeToggle")?.addEventListener("click", () => {
+  const next = document.documentElement.dataset.theme === "dark" ? "light" : "dark";
+  document.documentElement.dataset.theme = next;
+  localStorage.setItem("queryStudioTheme", next);
+  applyThemeButtons();
+});
+$("#themeToggleTop")?.addEventListener("click", () => $("#themeToggle").click());
+applyThemeButtons();
+
+$("#inspectorToggle")?.addEventListener("click", toggleInspector);
+$("#inspectorClose")?.addEventListener("click", toggleInspector);
+
+function toggleInspector() {
+  if (window.innerWidth <= 1020) {
+    document.body.classList.toggle("inspector-open");
+    $("#inspectorToggle").classList.toggle("active");
+    document.body.classList.contains("inspector-open")
+      ? document.body.insertAdjacentHTML("beforeend", '<button class="inspector-drawer-backdrop" id="inspectorBackdrop" aria-label="Close inspector"></button>')
+      : $("#inspectorBackdrop")?.remove();
+    $("#inspectorBackdrop")?.addEventListener("click", toggleInspector);
     return;
   }
-  state.busy = true;
-  $("#sendButton").disabled = true;
-  ["#databaseSelect", "#sqlModelSelect", "#contextModelSelect", "#resetButton"].forEach(id => { $(id).disabled = true; });
-  appendUser(message.trim());
-  const [provider, model] = $("#sqlModelSelect").value.split("|");
-  const contextSelection = $("#contextModelSelect").value;
-  const contextMode = contextSelection === "retrieval" ? "retrieval" : "model1";
-  const [contextProvider, contextModel] = contextMode === "model1"
-    ? contextSelection.split("|")
-    : [null, null];
-  const started = performance.now();
-  const progress = appendProgress(provider, model, contextMode);
-  state.cancelled = false;
-  $("#cancelButton").hidden = false;
-  try {
-    const created = await api("/api/chat/jobs", {
-      method: "POST",
-      body: JSON.stringify({
-        session_id: sessionId,
-        db_id: $("#databaseSelect").value,
-        message: message.trim(),
-        provider,
-        model,
-        context_provider: contextMode === "model1" ? contextProvider : null,
-        context_model: contextMode === "model1" ? contextModel : null,
-        context_mode: contextMode,
-        execute: true,
-        max_rows: 100,
-        feedback_category: feedbackCategory,
-      }),
-    });
-    state.jobId = created.job_id;
-    if (state.cancelled) await api(`/api/chat/jobs/${created.job_id}`, { method: "DELETE" });
-    const body = await waitForJob(created.job_id, progress);
-    progress.remove();
-    appendAssistant(body, (performance.now() - started) / 1000);
-  } catch (error) {
-    progress.remove();
-    showError(error.message);
-  } finally {
-    state.busy = false;
-    state.jobId = null;
-    $("#sendButton").disabled = !state.ready;
-    ["#databaseSelect", "#sqlModelSelect", "#contextModelSelect", "#resetButton"].forEach(id => { $(id).disabled = false; });
-    $("#cancelButton").hidden = true;
-    $("#messageInput").focus();
-  }
+  const shell = $("#appShell");
+  const hidden = shell.classList.toggle("inspector-hidden");
+  $("#inspectorToggle").classList.toggle("active", hidden);
+  $("#inspectorToggle").setAttribute("aria-expanded", String(!hidden));
+  localStorage.setItem("queryStudioInspector", hidden ? "hidden" : "shown");
+  if (hidden) shell.style.removeProperty("grid-template-columns");
+  else applyInspectorWidth();
 }
+
+function applyInspectorWidth() {
+  const stored = Number(localStorage.getItem("queryStudioInspectorWidth") || 0);
+  if (stored >= 240) document.documentElement.style.setProperty("--inspector-w", `${stored}px`);
+}
+
+(function setupResizer() {
+  document.addEventListener("DOMContentLoaded", () => {
+    applyInspectorWidth();
+    if (localStorage.getItem("queryStudioInspector") !== "shown") {
+      $("#appShell").classList.add("inspector-hidden");
+      $("#inspectorToggle").classList.add("active");
+    }
+    const resizer = $("#inspectorResizer");
+    if (!resizer) return;
+    let dragging = false;
+    resizer.addEventListener("pointerdown", (event) => {
+      dragging = true;
+      resizer.classList.add("dragging");
+      resizer.setPointerCapture(event.pointerId);
+    });
+    resizer.addEventListener("pointermove", (event) => {
+      if (!dragging) return;
+      const width = Math.min(560, Math.max(240, window.innerWidth - event.clientX));
+      document.documentElement.style.setProperty("--inspector-w", `${width}px`);
+      localStorage.setItem("queryStudioInspectorWidth", String(width));
+    });
+    resizer.addEventListener("pointerup", () => {
+      dragging = false;
+      resizer.classList.remove("dragging");
+    });
+    resizer.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      const current = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--inspector-w"), 10) || 340;
+      const next = Math.min(560, Math.max(240, current + (event.key === "ArrowLeft" ? 24 : -24)));
+      document.documentElement.style.setProperty("--inspector-w", `${next}px`);
+      localStorage.setItem("queryStudioInspectorWidth", String(next));
+    });
+    if (window.innerWidth <= 1020) $("#appShell").classList.remove("inspector-hidden");
+  });
+})();
 
 $("#cancelButton").addEventListener("click", async () => {
   if (state.cancelled) return;
@@ -1011,8 +2008,15 @@ $("#cancelButton").addEventListener("click", async () => {
   }
 });
 
+$("#composerChips")?.querySelectorAll(".chip").forEach((chip) => {
+  chip.addEventListener("click", () => {
+    send(chip.dataset.question);
+  });
+});
+
 $("#chatForm").addEventListener("submit", (event) => {
   event.preventDefault();
+  if (state.busy || voiceInput?.busy || !state.ready) return;
   const input = $("#messageInput");
   const message = input.value;
   input.value = "";
@@ -1026,23 +2030,36 @@ $("#messageInput").addEventListener("keydown", (event) => {
   }
 });
 
-document.querySelectorAll("[data-example]").forEach((button) => {
-  button.addEventListener("click", () => {
-    $("#messageInput").value = button.dataset.example;
-    $("#messageInput").focus();
+const HERO_EXAMPLES = [
+  ["table", "Show the top customers by spending"],
+  ["clock", "Compare this month with the previous one"],
+  ["network", "Join two tables step by step"],
+  ["zap", "Plot monthly revenue as a line chart"],
+];
+document.addEventListener("DOMContentLoaded", () => {
+  const target = $("#heroExamples");
+  target.replaceChildren();
+  HERO_EXAMPLES.forEach(([iconName, text]) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "example";
+    button.innerHTML = `<span data-icon="${iconName}"></span><span></span>`;
+    button.lastElementChild.textContent = text;
+    button.addEventListener("click", () => send(text));
+    target.append(button);
   });
+  target.querySelectorAll("[data-icon]").forEach((slot) => { slot.innerHTML = icon(slot.dataset.icon, 18); });
 });
 
-$("#clearRecent").addEventListener("click", () => {
-  localStorage.removeItem(recentStorageKey);
-  renderRecentQueries();
-});
-
-document.addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
-    event.preventDefault();
-    $("#resetButton").click();
-  }
+$("#historySearch").addEventListener("input", renderHistory);
+$("#clearHistory").addEventListener("click", async () => {
+  try {
+    await api(`/api/history?session_id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
+  } catch (error) { showError(`Could not clear history: ${error.message}`); return; }
+  state.history = [];
+  state.activeRunId = null;
+  state.restorePending = false;
+  renderHistory();
 });
 
 $("#resetButton").addEventListener("click", async () => {
@@ -1052,23 +2069,31 @@ $("#resetButton").addEventListener("click", async () => {
       body: JSON.stringify({ session_id: sessionId, db_id: $("#databaseSelect").value, message: "Reset context" }),
     });
     $("#messages").replaceChildren();
+    state.activeRunId = null;
+    state.restorePending = false;
     $("#emptyState").hidden = false;
+    $("#threadIntro").hidden = true;
+    $("#threadBreadcrumb").textContent = "Live database";
+    $("#composerChips")?.querySelectorAll(".chip").forEach((chip) => { chip.disabled = true; });
     $("#messageInput").focus();
   } catch (error) { showError(error.message); }
 });
 
 initialize();
 
-$("#databaseSelect").addEventListener("change", loadDatabaseSchema);
-if ($("#refreshSchema")) $("#refreshSchema").addEventListener("click", loadDatabaseSchema);
-if ($("#schemaSearch")) $("#schemaSearch").addEventListener("input", renderDatabaseTables);
+$("#databaseSelect").addEventListener("change", async () => {
+  state.activeRunId = null;
+  state.restorePending = false;
+  await loadDatabaseSchema();
+  await loadGlossary($("#databaseSelect").value);
+});
 $("#exploreSearch").addEventListener("input", renderExplore);
 document.querySelectorAll(".side-nav a[data-view]").forEach(link => {
   link.addEventListener("click", event => {
     event.preventDefault();
     if (link.dataset.view === "connections") {
       setView("workspace");
-      $("#connectionCard").scrollIntoView({ behavior: "smooth", block: "center" });
+      $("#connectionCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
       document.querySelectorAll(".side-nav a[data-view]").forEach(item => {
         item.classList.toggle("active", item === link);
       });
@@ -1076,4 +2101,12 @@ document.querySelectorAll(".side-nav a[data-view]").forEach(link => {
       setView(link.dataset.view);
     }
   });
+});
+
+document.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+    event.preventDefault();
+    $("#resetButton").click();
+  }
+  if (event.key === "Escape") closeChartFullscreen();
 });

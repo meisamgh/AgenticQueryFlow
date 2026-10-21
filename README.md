@@ -70,6 +70,10 @@ take precedence over this presentation path.
 ### Client workspace
 
 - Browse and search database tables and columns before asking a question.
+- Record a voice question with Qwen3.8-Omni-Flash, review its transcript, and send it as text.
+- Reopen saved conversations with their SQL, result previews, attempts, context and chart proposals.
+- Type corrections in the main composer and inspect SQL versions, filter changes and structural comparisons.
+- Expand recovery history to inspect recorded tool observations, evidence IDs and REPAIR / INFORM / ESCALATE decisions.
 - View the result table, formatted SQL, selected context and validation issues separately.
 - See a model-selected chart and plain-language answer when the returned data supports them.
 - Follow live backend stages and a timestamped activity log, including recovery schema/value
@@ -192,12 +196,15 @@ business-correct. Returning rows is never treated as proof of correctness.
 
 ## Models
 
-The API supports three project-scoped provider transports:
+The API supports four project-scoped provider transports:
 
 - AgentRouter: `gpt-5.6-sol`, `glm-5.3`, `deepseek-v4-flash`, `claude-opus-5`,
   `claude-opus-4-8`
 - Groq: `qwen/qwen3.6-27b`
 - JustDoWork: `gpt-5.6-sol`, `claude-opus-4-8`
+- CodeCraft API: `claude-opus-5`; set `CODECRAFT_API_KEY` in `.env`. The default
+  endpoint is `https://codecraftapi.com/v1`. CodeCraft charges by token usage; check
+  your account's available credits before querying.
 
 Only configured models are available in the interface. Credentials remain server-side and are
 never returned to the browser. JustDoWork has no hard-coded endpoint: set both
@@ -229,6 +236,29 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000). Check the API with:
 ```bash
 curl http://127.0.0.1:8000/api/health
 ```
+
+## Voice questions
+
+Click the microphone beside the question box, speak, then click stop. Qwen transcribes
+the recording into editable text. Review the transcript and press Send to ask the database.
+Existing text is preserved; recording never submits a query automatically.
+
+Configure the audio model separately in `.env`:
+
+```dotenv
+QWEN_AUDIO_API_KEY=your-audio-api-key
+QWEN_AUDIO_BASE_URL=https://YOUR_WORKSPACE_ID.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
+QWEN_AUDIO_MODEL=qwen3.8-omni-flash
+```
+
+Use your workspace's actual Chat Completions URL and a key from the same region;
+see the [Qwen-Omni setup guide](https://www.alibabacloud.com/help/en/model-studio/qwen-omni).
+`DASHSCOPE_API_KEY` and `DASHSCOPE_BASE_URL` also work. The SQL provider is selected separately.
+Recordings are limited to 60 seconds and converted to mono 16-kHz WAV in the browser.
+Audio is sent through the server to Qwen for transcription, without being saved by this app.
+The browser needs microphone permission and localhost or HTTPS. Discard cancels recording
+or transcription. Transcription tokens are reported separately below the composer and by
+`POST /api/voice/transcribe`; `GET /api/voice` reports configuration availability.
 
 ## Database configuration
 
@@ -311,7 +341,32 @@ curl -X POST http://127.0.0.1:8000/api/chat \
 ```
 
 Conversation state is in memory by default. Set `TEXT2SQL_CONVERSATION_STORE` to retain versioned
-state in SQLite across API restarts.
+state in SQLite across API restarts. Completed conversation turns are saved separately to
+`data/runtime/query_history.sqlite` by default (`TEXT2SQL_RUN_HISTORY_PATH`; use `:memory:`
+to disable persistence). The history keeps up to 500 turns with at most 20 preview rows per turn.
+Stored rows are snapshots, labelled with their saved time and preview count.
+
+Opening history calls no model and executes no business SQL. **Continue from here** restores
+the selected turn's accepted context. **Rerun saved SQL** revalidates that exact saved statement
+against its table/column scope and current schema, executes it read-only, and records a new run.
+This is separate from asking the SQL model to regenerate an answer.
+
+History routes are scoped by the browser session ID:
+
+```text
+GET    /api/history?session_id=...
+GET    /api/history/{run_id}?session_id=...
+GET    /api/history/{run_id}/turns?session_id=...
+POST   /api/history/{run_id}/continue?session_id=...
+POST   /api/history/{run_id}/rerun?session_id=...
+DELETE /api/history?session_id=...
+POST   /api/sql/diff
+```
+
+Each turn has stable conversation, turn and run IDs. Recovery presentation events are built
+from actual attempts and observations by backend code; an agent claim is labelled as reported,
+not promoted to a verified fact. The SQL diff compares syntax trees and shows changed filters
+and unchanged/changed SQL structure. These are inspection aids, not semantic correctness proofs.
 
 ## Semantic catalog
 
@@ -344,6 +399,8 @@ result-equivalence protocol. The optional browser-rendering smoke test requires 
 
 ```bash
 node --test tests/frontend_rendering.cjs
+# With Deno installed, run both browser-rendering and voice tests:
+deno test --allow-read tests/frontend_rendering.cjs tests/voice_input_test.mjs
 ```
 
 ## Project structure
@@ -352,6 +409,10 @@ node --test tests/frontend_rendering.cjs
 src/semantic_text2sql/
   api.py               FastAPI endpoints and web delivery
   conversation.py      turn classification and session state
+  run_history.py       durable, scoped conversation turns and bounded result snapshots
+  sql_diffs.py         SQL version comparisons and observed filter changes
+  recovery_events.py   typed presentation events from actual recovery observations
+  voice.py             bounded Qwen3.8-Omni-Flash speech transcription
   hybrid_retrieval.py  BM25, embeddings, values, RRF and ML reranking
   context.py           deterministic grounding and context assembly
   llm.py               provider adapters and generation prompts

@@ -3,138 +3,163 @@ import json
 
 import pytest
 
-from semantic_text2sql.models import ResultPresentation, TokenUsage
-from semantic_text2sql.presentation import present_result, validate_chart
+from semantic_text2sql.models import TokenUsage
+from semantic_text2sql.presentation import present_result
 from semantic_text2sql.runtime import RequestBudget
+from semantic_text2sql.visualization import (
+    VisualizationError,
+    parse_intent,
+    plan_chart,
+)
 
 
 class Presenter:
-    def __init__(self):
-        self.prompts = []
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
 
-    async def complete_detailed(self, **kwargs):
+    async def complete_detailed(self, **kwargs):  # type: ignore[no-untyped-def]
         self.prompts.append(kwargs["prompt"])
-        if len(self.prompts) == 1:
-            return json.dumps({
-                "chart_type": "bar", "x": "Currency", "y": "Count",
-                "title": "Customers by currency", "x_label": "Currency",
-                "y_label": "Customers", "number_format": "plain",
-                "reason": "Compare currency categories.",
-            }), TokenUsage(input_tokens=30, output_tokens=20)
-        return json.dumps({"summary": "EUR has 2 customers; CZK has 30 customers."}), (
-            TokenUsage(input_tokens=10, output_tokens=8)
+        return json.dumps({"summary": "Two currencies are represented."}), TokenUsage(
+            input_tokens=10, output_tokens=8
         )
 
 
-def test_presentation_uses_shared_budget_and_reports_usage():
-    budget = RequestBudget(timeout_seconds=5)
+def _present(question: str, *, truncated: bool = False):  # type: ignore[no-untyped-def]
     presenter = Presenter()
+    budget = RequestBudget(timeout_seconds=5)
     result, usage, entries = asyncio.run(
         present_result(
             presenter,
-            question="Counts by currency?",
-            sql="SELECT ...",
+            question=question,
+            sql="SELECT Currency, Count FROM counts",
             columns=["Currency", "Count"],
             rows=[["EUR", 2], ["CZK", 30]],
-            truncated=False,
+            truncated=truncated,
             model="test",
             provider="test",
             budget=budget,
+            visualization=parse_intent(question),
         )
     )
-    assert result.chart_type == "bar"
-    assert result.chart_reason == "Compare currency categories."
-    assert result.title == "Customers by currency"
-    assert result.y_label == "Customers"
-    assert result.number_format == "plain"
-    assert result.summary == "EUR has 2 customers; CZK has 30 customers."
-    assert usage.total_tokens == 68
-    assert budget.model_calls == 2
-    assert [entry.component for entry in entries] == ["chart_selection", "result_interpretation"]
-    assert all(entry.status == "SUCCEEDED" for entry in entries)
-    assert '"chart_type": "bar"' in presenter.prompts[1]
-    assert "time grain" in presenter.prompts[0]
-    assert "number_format" in presenter.prompts[0]
-    assert "time_format" in presenter.prompts[0]
+    return result, usage, entries, presenter, budget
 
 
-def test_presentation_failure_preserves_scalar_and_partial_warning():
-    result, _, entries = asyncio.run(
-        present_result(
-            None,
-            question="Total?",
-            sql="SELECT ...",
-            columns=["Total"],
-            rows=[[42]],
-            truncated=True,
-            model="test",
-            provider="test",
-            budget=RequestBudget(timeout_seconds=5),
-        )
-    )
-    assert result.summary == "Total: 42"
+def test_ordinary_question_calls_no_chart_model_and_has_no_chart() -> None:
+    result, usage, entries, presenter, budget = _present("Show counts by currency.")
+    assert result.chart_spec is None
     assert result.chart_type == "none"
-    assert "Partial" in result.note
-    assert [entry.status for entry in entries] == ["FAILED", "FAILED"]
-
-
-def test_rejected_chart_does_not_change_the_interpreted_rows():
-    class InvalidChartPresenter(Presenter):
-        async def complete_detailed(self, **kwargs):
-            self.prompts.append(kwargs["prompt"])
-            if len(self.prompts) == 1:
-                return json.dumps({
-                    "chart_type": "bar", "x": "invented", "y": "Count",
-                    "title": "Wrong chart", "reason": "Invalid column.",
-                }), TokenUsage(input_tokens=3, output_tokens=4)
-            return '{"summary":"Two categories are shown."}', TokenUsage(
-                input_tokens=5, output_tokens=6
-            )
-
-    presenter = InvalidChartPresenter()
-    result, usage, entries = asyncio.run(present_result(
-        presenter,
-        question="Counts by currency?", sql="SELECT ...",
-        columns=["Currency", "Count"], rows=[["EUR", 2], ["CZK", 30]],
-        truncated=False, model="test", provider="test", budget=RequestBudget(timeout_seconds=5),
-    ))
-    assert result.chart_type == "none"
-    assert result.summary == "Two categories are shown."
-    assert [entry.status for entry in entries] == ["FAILED", "SUCCEEDED"]
-    assert '"chart_type": "none"' in presenter.prompts[1]
+    assert result.summary == "Two currencies are represented."
     assert usage.total_tokens == 18
+    assert budget.model_calls == 1
+    assert [entry.component for entry in entries] == ["result_interpretation"]
+    assert "chart_type" not in presenter.prompts[0]
 
 
-def test_large_result_sends_only_ten_rows_to_presentation_model():
-    presenter = Presenter()
-    rows = [[f"Category {index}", index] for index in range(25)]
-    result, _, _ = asyncio.run(present_result(
-        presenter,
-        question="Compare categories", sql="SELECT ...",
-        columns=["Currency", "Count"], rows=rows,
-        truncated=False, model="test", provider="test",
-        budget=RequestBudget(timeout_seconds=5),
-    ))
-    assert "first 10 returned rows" in result.note
-    for prompt in presenter.prompts:
-        assert "Category 9" in prompt
-        assert "Category 10" not in prompt
-    assert '"returned_row_count": 25' in presenter.prompts[0]
+def test_explicit_chart_is_deterministic_and_uses_full_result() -> None:
+    result, _, entries, _, budget = _present("Plot counts by currency as a bar chart.")
+    assert result.chart_type == "bar"
+    assert result.chart_spec is not None
+    assert result.chart_spec.data == [
+        {"Currency": "EUR", "Count": 2},
+        {"Currency": "CZK", "Count": 30},
+    ]
+    assert budget.model_calls == 1
+    assert [entry.component for entry in entries] == ["result_interpretation"]
+
+
+def test_truncated_result_is_not_plotted() -> None:
+    result, _, _, _, _ = _present("Plot counts by currency.", truncated=True)
+    assert result.chart_spec is None
+    assert "truncated" in result.chart_reason
 
 
 @pytest.mark.parametrize(
-    "chart,x,y,rows",
+    "word,columns,rows",
     [
-        ("bar", "missing", "Count", [["A", 2], ["B", 3]]),
-        ("bar", "Currency", "Count", [["A", 2], ["A", 3]]),
-        ("line", "Currency", "Count", [["A", 2], ["B", 3]]),
-        ("bar", "Currency", "Count", [["A", None], ["B", None]]),
+        ("line chart", ["Month", "Revenue"], [["2026-01", 4], ["2026-02", 5]]),
+        ("area chart", ["Month", "Revenue"], [["2026-01", 4], ["2026-02", 5]]),
+        ("horizontal bar chart", ["Country", "Revenue"], [["DE", 4], ["FR", 5]]),
+        (
+            "grouped bar chart",
+            ["Month", "Country", "Revenue"],
+            [["Jan", "DE", 4], ["Jan", "FR", 5]],
+        ),
+        (
+            "stacked bar chart",
+            ["Month", "Country", "Revenue"],
+            [["Jan", "DE", 4], ["Jan", "FR", 5]],
+        ),
+        (
+            "stacked area chart",
+            ["Month", "Country", "Revenue"],
+            [["2026-01", "DE", 4], ["2026-01", "FR", 5]],
+        ),
+        ("scatter plot", ["Age", "Spend"], [[25, 40], [30, 50]]),
+        ("bubble plot", ["Age", "Spend", "Count"], [[25, 40, 5], [30, 50, 6]]),
+        ("histogram", ["Spend"], [[40], [50], [60]]),
+        ("box plot", ["Spend"], [[1], [2], [3], [4], [5]]),
+        ("heatmap", ["Country", "Month", "Revenue"], [["DE", "Jan", 4], ["FR", "Feb", 5]]),
+        ("pie chart", ["Country", "Revenue"], [["DE", 4], ["FR", 5]]),
+        ("donut chart", ["Country", "Revenue"], [["DE", 4], ["FR", 5]]),
+        ("treemap", ["Region", "Country", "Revenue"], [["EU", "DE", 4], ["EU", "FR", 5]]),
+        ("calendar heatmap", ["Date", "Revenue"], [["2026-01-01", 4], ["2026-01-02", 5]]),
     ],
 )
-def test_reject_invalid_chart(chart, x, y, rows):
-    with pytest.raises(ValueError):
-        validate_chart(
-            ResultPresentation(summary="test", chart_type=chart, x=x, y=y),
-            ["Currency", "Count"],
-            rows,
+def test_chart_families(word: str, columns: list[str], rows: list[list[object]]) -> None:
+    intent = parse_intent(f"Create a {word}.")
+    assert intent.chart_type is not None
+    spec = plan_chart(
+        intent, question=f"Create a {word}.", columns=columns, rows=rows, truncated=False
+    )
+    assert spec.chart_type == intent.chart_type
+    assert spec.data
+
+
+def test_duplicate_grain_null_and_truncation_are_rejected() -> None:
+    intent = parse_intent("Create a stacked bar chart.")
+    with pytest.raises(VisualizationError, match="Multiple rows"):
+        plan_chart(
+            intent,
+            question="stacked bar chart",
+            columns=["Month", "Country", "Revenue"],
+            rows=[["Jan", "DE", 4], ["Jan", "DE", 5]],
+            truncated=False,
+        )
+    with pytest.raises(VisualizationError, match="NULL"):
+        plan_chart(
+            parse_intent("Plot a bar chart"),
+            question="bar chart",
+            columns=["Country", "Revenue"],
+            rows=[["DE", 4], ["FR", None]],
+            truncated=False,
+        )
+    with pytest.raises(VisualizationError, match="truncated"):
+        plan_chart(
+            parse_intent("Plot a bar chart"),
+            question="bar chart",
+            columns=["Country", "Revenue"],
+            rows=[["DE", 4]],
+            truncated=True,
+        )
+
+
+def test_intent_distinguishes_show_from_plot_and_followup() -> None:
+    assert not parse_intent("Show revenue by month in 2025.").requested
+    assert parse_intent("Plot monthly revenue in 2025.").requested
+    assert parse_intent("Make it a line chart instead.", has_previous=True).followup
+
+
+def test_precomputed_box_summary_requires_ordered_five_numbers() -> None:
+    columns = ["segment", "min", "q1", "median", "q3", "max"]
+    intent = parse_intent("Create a box plot of spending by segment.")
+    spec = plan_chart(
+        intent, question="Create a box plot of spending by segment.", columns=columns,
+        rows=[["SME", 1, 2, 3, 4, 5]], truncated=False,
+    )
+    assert spec.data[0]["median"] == 3
+    assert spec.data[0]["group"] == "SME"
+    with pytest.raises(VisualizationError, match="ordered"):
+        plan_chart(
+            intent, question="Create a box plot of spending by segment.", columns=columns,
+            rows=[["SME", 1, 4, 3, 2, 5]], truncated=False,
         )

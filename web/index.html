@@ -3,65 +3,336 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="description" content="Query your database safely in natural language" />
-    <title>Query · Text-to-SQL workspace</title>
-    <link rel="stylesheet" href="/static/styles.css?v=query-studio-7" />
+    <meta name="description" content="Queryflow — intent-adaptive Text-to-SQL workspace" />
+    <title>Queryflow · Adaptive SQL Studio</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
+    />
+    <link rel="stylesheet" href="/static/styles.css?v=qf3-4" />
+    <script>
+      // Apply the stored theme before first paint to avoid a flash.
+      try {
+        var theme = localStorage.getItem("queryStudioTheme");
+        if (!theme) theme = matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+        document.documentElement.dataset.theme = theme;
+      } catch (error) {
+        document.documentElement.dataset.theme = "light";
+      }
+    </script>
   </head>
   <body>
-    <div class="app-shell">
-      <aside class="sidebar" aria-label="Query navigation and configuration">
-        <div class="brand"><span class="brand-mark">✦</span><div><h1>Query</h1><p>Natural language. Real data.</p></div></div>
-        <button class="new-query" id="resetButton" type="button"><span>＋</span> New query <kbd>⌘ K</kbd></button>
-        <nav class="side-nav"><a class="active" href="#composer" data-view="workspace">⌂ <span>Workspace</span></a><a href="#exploreView" data-view="explore">⌕ <span>Explore</span></a><a href="#connectionCard" data-view="connections">▱ <span>Connections</span></a></nav>
-        <section class="recent-section"><div class="section-title"><span>Recent queries</span><button id="clearRecent" type="button">Clear</button></div><div class="recent-list" id="recentQueries"><p class="recent-empty">Your recent questions will appear here.</p></div></section>
-        <section class="connection-card" id="connectionCard">
-          <div class="connection-heading"><span class="database-icon">▤</span><div><strong>Connection</strong><small id="healthStatus"><i></i> Connecting</small></div></div>
-          <label for="contextModelSelect">Context method</label><select id="contextModelSelect"></select>
-          <label for="sqlModelSelect">SQL generator</label><select id="sqlModelSelect"></select>
-          <code id="sessionId" title="Conversation session"></code>
+    <div class="shell" id="appShell">
+      <aside class="sidebar" aria-label="Navigation, history and settings">
+        <div class="brand">
+          <div class="brand-mark" data-icon="zap"></div>
+          <div>
+            <div class="brand-title">queryflow<span>.</span></div>
+            <div class="brand-sub">ADAPTIVE SQL STUDIO</div>
+          </div>
+        </div>
+
+        <button class="primary-action" id="resetButton" type="button">
+          <span data-icon="plus"></span> New conversation <kbd>⌘ K</kbd>
+        </button>
+
+        <div class="side-label">WORKSPACE</div>
+        <nav class="side-nav" aria-label="Views">
+          <a class="active" href="#composerZone" data-view="workspace"><span data-icon="message"></span><span>Conversations</span></a>
+          <a href="#exploreView" data-view="explore"><span data-icon="table"></span><span>Schema explorer</span></a>
+          <a href="#connectionCard" data-view="connections"><span data-icon="network"></span><span>Execution insights</span></a>
+        </nav>
+
+        <div class="side-label">YOUR CONVERSATIONS</div>
+        <div class="history-search">
+          <span data-icon="search"></span>
+          <input id="historySearch" type="search" placeholder="Search history…" aria-label="Search conversation history" />
+        </div>
+        <section class="side-section" aria-label="Conversation history">
+          <div class="section-head">
+            <span>Recent</span>
+            <button id="clearHistory" class="link-button" type="button">Clear</button>
+          </div>
+          <div class="run-list" id="conversationHistory" role="list"></div>
         </section>
+        <section class="side-section" aria-label="Saved questions">
+          <div class="section-head"><span>Saved</span></div>
+          <div class="run-list" id="savedQuestions" role="list"></div>
+        </section>
+
+        <div class="side-footer">
+          <section class="connection-card" id="connectionCard" aria-label="Model connection settings">
+            <div class="connection-heading">
+              <span class="db-logo" data-icon="database"></span>
+              <div class="db-caption-block">
+                <strong class="db-name">Connection</strong>
+                <span class="health-pill" id="healthStatus"><i></i><span>Connecting</span></span>
+              </div>
+            </div>
+            <label for="sqlModelSelect">SQL generator</label>
+            <select id="sqlModelSelect"></select>
+            <label for="contextModelSelect">Context method</label>
+            <select id="contextModelSelect"></select>
+            <code id="sessionId" title="Conversation session"></code>
+          </section>
+          <button class="theme-switch" id="themeToggle" type="button">
+            <span data-icon="moon"></span> Toggle appearance
+          </button>
+        </div>
       </aside>
 
-      <main class="main-content">
-        <header class="page-header workspace-only"><div><p class="eyebrow">TEXT-TO-SQL WORKSPACE</p><h2>Ask your database in plain language</h2><p>Explore your schema, ask a question, and inspect the answer.</p></div><span class="header-status" id="connectionStatus">Connecting…</span></header>
-        <section class="ask-area workspace-only" id="composer">
-          <form class="composer" id="chatForm"><span class="composer-icon">◯</span><textarea id="messageInput" rows="1" placeholder="Ask a question about your data…" required></textarea><button type="button" id="cancelButton" class="cancel-button" hidden>Cancel</button><button type="submit" id="sendButton" aria-label="Run query">→</button></form>
-          <div class="examples"><span>Enter to send · Shift + Enter for a new line</span></div>
-        </section>
-        <section class="hero workspace-only" id="emptyState"><div class="hero-orb">✦</div><h3>Your answer workspace is ready</h3><p>Ask a question above to see the answer, SQL, result data, grounded context, validation, and execution details.</p></section>
-        <section id="messages" class="messages workspace-only" aria-live="polite"></section>
-        <section id="exploreView" class="explore-view" hidden aria-labelledby="exploreTitle">
-          <header class="page-header"><div><p class="eyebrow">DATABASE EXPLORER</p><h2 id="exploreTitle">Explore database</h2><p>Inspect tables, columns, and the relationships available for this connection.</p></div></header>
-          <div class="explore-toolbar"><div class="explore-database-choice"><label for="databaseSelect">Database</label><select id="databaseSelect"></select></div><div id="exploreSummary" role="status">Loading database schema…</div><label for="exploreSearch">Search tables or columns</label><input id="exploreSearch" type="search" placeholder="Search this database…" /></div>
-          <div id="exploreTables" class="explore-tables"></div>
-          <section class="explore-relations"><h3>Relationships</h3><p>Declared foreign keys come from the live schema. Profile inferences are labeled separately.</p><div id="exploreRelationships" class="explore-relationships"></div></section>
-        </section>
+      <main class="workspace">
+        <header class="topbar">
+          <div class="breadcrumbs">
+            <span>Workspace</span><span class="crumb-sep">›</span>
+            <strong id="threadBreadcrumb">Live database</strong>
+          </div>
+          <div class="top-actions">
+            <span class="header-status" id="connectionStatus">Connecting…</span>
+            <button class="headbtn" id="themeToggleTop" type="button" aria-label="Toggle light or dark theme" data-icon-slot="sun-moon"><span data-icon="moon"></span></button>
+            <button class="headbtn" id="inspectorToggle" type="button" aria-label="Toggle inspector" aria-expanded="true">
+              <span data-icon="panel"></span><span class="headbtn-label">Inspector</span>
+            </button>
+          </div>
+        </header>
+
+        <div class="thread-scroll" id="mainColumn">
+          <div class="thread-body workspace-only">
+            <div class="intro" id="threadIntro" hidden>
+              <div class="intro-eyebrow">INTENT-ADAPTIVE WORKSPACE</div>
+              <h1 id="threadIntroTitle">Your workspace</h1>
+              <p>Grounded retrieval, read-only execution, verified recovery. Charts only when you ask for one.</p>
+            </div>
+
+            <section class="welcome" id="emptyState">
+              <div class="welcome-mark" data-icon="sparkles"></div>
+              <div class="intro-eyebrow">WELCOME TO QUERYFLOW</div>
+              <h2>What would you like to know?</h2>
+              <p>Ask in plain language — get generated SQL with the exact results, or a chart only when you request one.</p>
+              <div class="example-cards" id="heroExamples"></div>
+            </section>
+
+            <section id="messages" class="messages"></section>
+          </div>
+
+          <section id="exploreView" class="explore-view" hidden aria-labelledby="exploreTitle">
+            <header class="explore-head">
+              <div><div class="intro-eyebrow">DATABASE EXPLORER</div><h2 id="exploreTitle">Explore database</h2><p>Physical schema only — profile inferences are labeled separately.</p></div>
+            </header>
+            <div class="explore-toolbar">
+              <div id="exploreSummary" role="status">Loading database schema…</div>
+              <input id="exploreSearch" type="search" placeholder="Search tables or columns…" aria-label="Search tables or columns" />
+            </div>
+            <div id="exploreTables" class="explore-tables"></div>
+            <section class="explore-relationships-block">
+              <h3>Relationships</h3>
+              <p>Declared foreign keys come from the live schema; profile inferences are labeled.</p>
+              <div id="exploreRelationships" class="explore-relationships"></div>
+            </section>
+          </section>
+        </div>
+
+        <div class="composer-zone workspace-only" id="composerZone">
+          <div class="composer-inner">
+            <form class="composer" id="chatForm">
+              <textarea id="messageInput" rows="1" placeholder="Ask a question, request a plot, or refine the previous answer…" aria-label="Question" required></textarea>
+              <div class="chipset" id="composerChips">
+                <button type="button" class="chip" data-question="Check whether the previous SQL and result are correct." disabled>Check correctness</button>
+                <button type="button" class="chip" data-question="Optimize the previous SQL without changing its result." disabled>Optimize query</button>
+                <button type="button" class="chip" data-question="Explain the last result and the SQL behind it in plain language." disabled>Explain this SQL</button>
+                <button type="button" class="chip" data-question="Plot the previous result." disabled>Plot these results</button>
+                <button type="button" class="chip" data-question="Make it a bar chart." disabled>Make it a bar chart</button>
+              </div>
+              <div class="composer-bottom">
+                <select id="databaseSelect" class="selected-db" aria-label="Database"></select>
+                <span class="composer-actions">
+                  <button type="button" id="voiceButton" class="ghost-button" aria-label="Record a question" title="Loading voice input…" hidden>
+                    <span data-icon="mic"></span>
+                  </button>
+                  <button type="button" id="voiceCancelButton" class="ghost-button danger" hidden>Discard</button>
+                  <button type="button" id="cancelButton" class="ghost-button danger" hidden><span data-icon="square"></span> Cancel</button>
+                </span>
+                <span class="composer-hint">Enter to send · Shift + Enter for a new line</span>
+                <button type="submit" id="sendButton" class="submit" aria-label="Run query"><span data-icon="send"></span></button>
+              </div>
+            </form>
+            <p id="voiceStatus" class="voice-status" role="status" aria-live="polite"></p>
+            <p class="bottom-caption">Read-only execution · Generated SQL is validated before it runs · Recovery evidence is never fabricated</p>
+          </div>
+        </div>
       </main>
+
+      <aside class="inspector" id="inspectorPane" aria-label="Query inspector">
+        <div class="inspector-resizer" id="inspectorResizer" role="separator" aria-orientation="vertical" aria-label="Resize inspector" tabindex="0"></div>
+        <header class="inspector-header">
+          <span data-icon="panel"></span> Inspector
+          <button class="icon-button" id="inspectorClose" type="button" title="Collapse inspector"><span data-icon="x"></span></button>
+        </header>
+        <div class="inspector-body">
+          <details class="inspector-section" id="understandingSection" open>
+            <summary><span data-icon="message"></span> Query understanding</summary>
+            <div class="inspector-content" id="understandingContent"><p class="inspector-empty">Run a query to see how it was understood.</p></div>
+          </details>
+          <details class="inspector-section" id="schemaSection" open>
+            <summary><span data-icon="network"></span> Selected schema</summary>
+            <div class="inspector-content" id="schemaContent">
+              <div class="schema-graph" id="schemaGraph"><p class="inspector-empty">The verified tables used by the current query appear here.</p></div>
+              <div class="schema-chips" id="schemaChips"></div>
+              <div id="schemaDetail"></div>
+            </div>
+          </details>
+          <details class="inspector-section" id="recoverySection">
+            <summary><span data-icon="binoculars"></span> Recovery evidence</summary>
+            <div class="inspector-content" id="recoveryMini"><p class="inspector-empty">The recovery agent only activates on anomalies.</p></div>
+          </details>
+          <details class="inspector-section" id="validationSection">
+            <summary><span data-icon="shield"></span> Validation &amp; performance</summary>
+            <div class="inspector-content" id="validationContent"><p class="inspector-empty">Attempts, timings and token usage appear after a run.</p></div>
+          </details>
+        </div>
+      </aside>
     </div>
+    <div id="layers"></div>
 
     <template id="assistantTemplate">
       <article class="message assistant-message">
-        <header class="response-header"><div class="response-status-icon">✓</div><div class="response-heading"><h3>Answer</h3><div class="response-meta"></div></div></header>
-        <div class="response-layout">
-          <section class="response-workspace">
-            <nav class="response-tabs"><button type="button" class="response-tab active" data-tab="answer">Answer</button><button type="button" class="response-tab" data-tab="sql">SQL</button><button type="button" class="response-tab" data-tab="result">Result table</button><button type="button" class="response-tab" data-tab="context">Context</button><button type="button" class="response-tab validation-tab" data-tab="validation">Validation</button></nav>
-            <div class="response-pane answer-pane active" data-tab-panel="answer"><p class="response-note"></p><div class="answer-actions"><button class="correctness-button" type="button">Check correctness</button></div></div>
-            <div class="response-pane sql-panel" data-tab-panel="sql"><div class="panel-header"><div><strong>Generated SQL</strong><span>Validated read-only query</span></div><div class="sql-actions"><button type="button" class="optimize-button">Optimize SQL</button><button type="button" class="copy-button">Copy</button></div></div><pre><code class="language-sql"></code></pre></div>
-            <div class="response-pane result-panel" data-tab-panel="result"><div class="panel-header"><div><strong>Query result</strong><span class="row-count"></span></div><button type="button" class="csv-button">Download CSV</button></div><div class="table-wrap"></div></div>
-            <div class="response-pane context-panel" data-tab-panel="context"><details class="context-json-panel" open><summary>Verified context sent to the SQL model</summary><pre><code class="context-json"></code></pre></details></div>
-            <div class="response-pane attempts-panel" data-tab-panel="validation"><div class="attempts-summary"></div><div class="attempts-list"></div></div>
-            <details class="feedback-panel"><summary>Correct or refine this answer</summary><div class="feedback-form"><select class="feedback-category"><option value="wrong_result">Wrong result</option><option value="wrong_interpretation">Wrong interpretation</option><option value="missing_filter">Missing filter</option><option value="wrong_table_column">Wrong table or column</option><option value="wrong_aggregation">Wrong aggregation</option><option value="wrong_datetime">Wrong date/time logic</option><option value="wrong_output">Wrong output columns</option><option value="wrong_grain">Wrong grouping/grain</option><option value="duplicate_rows">Duplicate rows</option><option value="missing_rows">Missing rows</option><option value="other">Other</option></select><input class="correction-input" placeholder="Describe what should change…" /><button class="correction-button" type="button">Correct & rerun</button></div></details>
-            <section class="human-review-panel" hidden><strong>Human review required</strong><p class="human-review-reason"></p><p class="human-review-question"></p><div class="human-review-options"></div></section>
+        <div class="speaker ai"><span class="avatar"><span data-icon="sparkles"></span></span>Queryflow <time>just now</time></div>
+        <div class="answer">
+          <section class="response-card">
+            <header class="result-head">
+              <span class="result-title response-heading"><h3>Answer</h3></span>
+              <span class="status-pill"><span data-icon="check"></span> <span class="status-pill-label">Ready</span></span>
+            </header>
+            <div class="badges response-meta"></div>
+            <p class="response-note"></p>
+            <p class="presentation-note" hidden></p>
+            <div class="chart-section" hidden>
+              <header class="chart-head">
+                <div class="chart-head-left">
+                  <div class="chart-kicker">REQUESTED VISUALIZATION</div>
+                  <div class="chart-heading">
+                    <strong class="chart-title">Chart</strong>
+                    <small class="chart-sub"></small>
+                  </div>
+                </div>
+                <div class="chart-tools">
+                  <div class="chart-kinds" hidden></div>
+                  <div class="chart-overflow">
+                    <button type="button" class="iconbtn chart-more" title="Chart options" aria-haspopup="true" aria-expanded="false"><span data-icon="more"></span></button>
+                    <div class="chart-menu" hidden>
+                      <button type="button" data-chart-action="view-sql"><span data-icon="zap"></span> View SQL</button>
+                      <button type="button" data-chart-action="view-data"><span data-icon="table"></span> View source data</button>
+                      <button type="button" data-chart-action="download"><span data-icon="download"></span> Download PNG</button>
+                      <button type="button" data-chart-action="expand"><span data-icon="maximize"></span> Expand chart</button>
+                      <button type="button" data-chart-action="inspect"><span data-icon="network"></span> Inspect query details</button>
+                    </div>
+                  </div>
+                </div>
+              </header>
+              <div class="chart-slot"></div>
+            </div>
+
+            <div class="callout error" hidden><span class="callout-icon" data-icon="alert"></span><div class="callout-text"></div></div>
+
+            <div class="sql-result-split">
+              <section class="panel-card sql-panel-pane">
+                <header>
+                  <span data-icon="zap"></span><strong>Generated SQL</strong><small class="sql-validity"></small>
+                  <div class="panel-actions">
+                    <button class="icon-button save-button" type="button" title="Save this question" data-icon="bookmark"></button>
+                    <button class="icon-button copy-button" type="button" title="Copy SQL" data-icon="copy"></button>
+                    <button class="icon-button expand-button" type="button" title="Expand SQL" data-icon="maximize"></button>
+                  </div>
+                </header>
+                <div class="sql-editor"><pre><code class="language-sql"></code></pre></div>
+              </section>
+              <section class="panel-card result-panel-pane">
+                <header>
+                  <span data-icon="table"></span><strong>Result</strong><small class="row-count"></small>
+                  <div class="panel-actions">
+                    <button class="icon-button csv-button" type="button" title="Download CSV" data-icon="download"></button>
+                  </div>
+                </header>
+                <div class="table-wrap"></div>
+              </section>
+            </div>
+
+            <details class="versions-panel" hidden>
+              <summary><span data-icon="history"></span> SQL versions &amp; changes <span data-icon="chevron-right" class="lucide chevron" style="margin-left:auto;"></span></summary>
+              <div class="version-list"></div>
+              <div class="diff-changes" hidden><div class="diff-changes-title"></div></div>
+            </details>
+
+            <details class="recovery-panel" hidden>
+              <summary>
+                <span data-icon="binoculars"></span> Recovery agent
+                <span class="recovery-mode-badge" hidden></span>
+                <span class="recovery-decision-badges"></span>
+                <span data-icon="chevron-right" class="lucide chevron" style="margin-left:auto;"></span>
+              </summary>
+              <div class="recovery-agent-badges"></div>
+              <div class="recovery-steps"></div>
+            </details>
+
+            <section class="human-review" hidden>
+              <strong><span data-icon="alert"></span> Human review required</strong>
+              <p class="human-review-reason"></p>
+              <p class="human-review-question"></p>
+              <div class="review-actions"></div>
+            </section>
+
+            <div class="answer-actions"></div>
+
+            <div class="technical-details">
+              <details class="context-details">
+                <summary><span data-icon="network"></span> Verified context sent to the model</summary>
+                <pre class="context-json"><code></code></pre>
+                <div class="schema-tags" style="padding:8px 12px;"></div>
+              </details>
+              <details class="attempts-panel">
+                <summary><span data-icon="shield"></span> SQL validation attempts <span class="attempts-count"></span></summary>
+                <div class="attempt-summary"></div>
+                <div class="attempts-list"></div>
+              </details>
+              <details class="token-card">
+                <summary><span data-icon="hash"></span> Token usage</summary>
+                <div class="token-reduction"></div>
+                <div class="token-grid"></div>
+                <p class="token-note"></p>
+              </details>
+              <details class="pipeline-details">
+                <summary><span data-icon="clock"></span> Pipeline timings</summary>
+                <div class="pipeline-rows"></div>
+                <details class="progress-history"><summary>Request activity</summary><ul></ul></details>
+              </details>
+            </div>
           </section>
-          <aside class="insight-rail">
-            <section class="insight-card context-card"><div class="insight-title"><strong>Context used</strong><span class="context-summary"></span></div><div class="schema-visual"></div></section>
-            <section class="insight-card pipeline-card"><div class="insight-title"><strong>Query pipeline</strong></div><div class="pipeline-details"></div></section>
-            <section class="insight-card token-card"><div class="insight-title"><strong>Token consumption</strong></div><div class="token-reduction"></div><div class="token-grid"></div><p class="token-note"></p></section>
-          </aside>
         </div>
       </article>
     </template>
-    <script src="/static/charts.js?v=4" defer></script>
-    <script src="/static/app.js?v=query-studio-13" defer></script>
+
+    <template id="progressTemplate">
+      <article class="message assistant-message">
+        <div class="speaker ai"><span class="avatar"><span data-icon="sparkles"></span></span>Queryflow <time>thinking</time></div>
+        <div class="answer">
+          <section class="waiting" role="status" aria-live="polite">
+            <span class="spinner" aria-hidden="true"></span>
+            <div>
+              <p class="progress-stage">Queued…</p>
+              <p class="progress-detail"></p>
+            </div>
+          </section>
+          <div class="pipeline-tracker"></div>
+          <details class="progress-history"><summary>Activity log</summary><ul></ul></details>
+        </div>
+      </article>
+    </template>
+
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
+    <script src="/static/icons.js?v=3"></script>
+    <script src="/static/echarts_view.js?v=6"></script>
+    <script src="/static/app.js?v=qf3-6"></script>
   </body>
 </html>

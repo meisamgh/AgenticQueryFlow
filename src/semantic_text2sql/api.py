@@ -10,7 +10,7 @@ from time import perf_counter
 from typing import Any, cast
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -26,9 +26,9 @@ from semantic_text2sql.conversation import (
     requires_model_interpretation,
     resolve_turn,
 )
-from semantic_text2sql.database import DatabaseRegistry
+from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.explanation import deterministic_explanation, explain_turn_detailed
-from semantic_text2sql.glossary import GlossaryStore
+from semantic_text2sql.glossary import GlossaryStore, GlossaryTerm
 from semantic_text2sql.historical import HistoricalQueryStore
 from semantic_text2sql.hybrid_retrieval import (
     FastEmbedEncoder,
@@ -39,12 +39,14 @@ from semantic_text2sql.llm import (
     AgentRouterClaudeModel,
     AgentRouterCodexModel,
     AgentRouterModel,
+    CodeCraftSQLModel,
     GroqSQLModel,
     JustDoWorkSQLModel,
     ModelError,
     RoutingSQLModel,
 )
 from semantic_text2sql.models import (
+    Attempt,
     CallLedgerEntry,
     ChatRequest,
     ChatResponse,
@@ -56,14 +58,18 @@ from semantic_text2sql.models import (
     HumanReviewRequest,
     ModelOption,
     ModelProvider,
+    ResultPresentation,
     TokenUsage,
     TurnInterpretation,
+    ValidationResult,
 )
 from semantic_text2sql.postgres import PostgresRegistry, postgres_databases_from_environment
 from semantic_text2sql.presentation import present_result
 from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.provider_registry import configured_model_options, supports_model
-from semantic_text2sql.runtime import RequestBudget
+from semantic_text2sql.recovery_events import recovery_events
+from semantic_text2sql.run_history import RunHistoryStore, RunRecord, build_run_record
+from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded
 from semantic_text2sql.semantic_catalog import SemanticCatalogStore, compose_document
 from semantic_text2sql.semantic_catalog_validation import (
     postgres_runner,
@@ -71,6 +77,26 @@ from semantic_text2sql.semantic_catalog_validation import (
     verify_catalog,
 )
 from semantic_text2sql.service import TextToSQLService
+from semantic_text2sql.sql_diffs import (
+    SqlDiffRequest,
+    SqlDiffResponse,
+    sql_changelog,
+)
+from semantic_text2sql.strategy import route_question
+from semantic_text2sql.visualization import (
+    VisualizationError,
+    parse_intent,
+    plan_chart,
+    sql_output_requirement,
+)
+from semantic_text2sql.voice import (
+    MAX_AUDIO_BYTES,
+    MAX_AUDIO_SECONDS,
+    QwenVoiceTranscriber,
+    TranscriptionResult,
+    VoiceInputError,
+    VoiceProviderError,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -78,8 +104,12 @@ logger = logging.getLogger(__name__)
 def create_app(
     agent: TextToSQLAgent | None = None,
     conversation_completers: dict[str, Any] | None = None,
+    voice_transcriber: QwenVoiceTranscriber | None = None,
+    run_history: RunHistoryStore | None = None,
 ) -> FastAPI:
     enforce_model_catalog = agent is None
+    voice = voice_transcriber or QwenVoiceTranscriber.from_environment()
+    runs = run_history or RunHistoryStore.from_environment()
     postgres_databases = postgres_databases_from_environment()
     postgres = PostgresRegistry(postgres_databases) if postgres_databases else None
     sqlite = DatabaseRegistry(Path(os.environ.get("TEXT2SQL_DATABASE_ROOT", "data")))
@@ -119,9 +149,14 @@ def create_app(
         os.environ.get("JUSTDOWORK_BASE_URL"),
         float(os.environ.get("JUSTDOWORK_TIMEOUT_SECONDS", "120")),
     )
+    codecraft = CodeCraftSQLModel(
+        os.environ.get("CODECRAFT_API_KEY"),
+        os.environ.get("CODECRAFT_BASE_URL", "https://codecraftapi.com/v1"),
+        float(os.environ.get("CODECRAFT_TIMEOUT_SECONDS", "120")),
+    )
     active_agent = agent or TextToSQLAgent(
         sqlite,
-        RoutingSQLModel(agentrouter, groq, justdowork),
+        RoutingSQLModel(agentrouter, groq, justdowork, codecraft),
         postgres,
         profiles,
     )
@@ -129,6 +164,7 @@ def create_app(
         "agentrouter": agentrouter,
         "groq": groq,
         "justdowork": justdowork,
+        "codecraft": codecraft,
     }
     app = FastAPI(
         title="Semantic Text-to-SQL v5",
@@ -171,6 +207,9 @@ def create_app(
         conversation_path,
         ttl_seconds=int(os.environ.get("TEXT2SQL_CONVERSATION_TTL_SECONDS", "86400")),
     )
+    # Complete bounded results are kept only for the active process. Persisted
+    # history retains a smaller preview and is reused only when it is complete.
+    recent_results: dict[tuple[str, str], ChatResponse] = {}
     chat_jobs: dict[str, dict[str, Any]] = {}
     job_ttl_seconds = max(60, int(os.environ.get("TEXT2SQL_JOB_TTL_SECONDS", "3600")))
     max_jobs = max(10, int(os.environ.get("TEXT2SQL_MAX_JOBS", "500")))
@@ -203,10 +242,12 @@ def create_app(
         for job in chat_jobs.values():
             if job.get("session_id") == session_id and job.get("status") == "running":
                 if job.get("stage") != stage:
-                    job.setdefault("events", []).append({
-                        "stage": stage,
-                        "elapsed_ms": round((perf_counter() - float(job["started_at"])) * 1000),
-                    })
+                    job.setdefault("events", []).append(
+                        {
+                            "stage": stage,
+                            "elapsed_ms": round((perf_counter() - float(job["started_at"])) * 1000),
+                        }
+                    )
                 job["stage"] = stage
 
     chat_tasks: dict[str, asyncio.Task[None]] = {}
@@ -223,6 +264,94 @@ def create_app(
     async def models(response: Response) -> list[ModelOption]:
         response.headers["Cache-Control"] = "no-store"
         return configured_model_options()
+
+    @app.get("/api/voice")
+    async def voice_configuration(response: Response) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        reason = voice.unavailable_reason()
+        return {
+            "configured": reason is None,
+            "model": voice.model,
+            "max_duration_seconds": MAX_AUDIO_SECONDS,
+            "unavailable_reason": reason,
+        }
+
+    @app.post("/api/voice/transcribe", response_model=TranscriptionResult)
+    async def transcribe_voice(request: Request, response: Response) -> TranscriptionResult:
+        response.headers["Cache-Control"] = "no-store"
+        if reason := voice.unavailable_reason():
+            raise HTTPException(status_code=503, detail=reason)
+        if request.headers.get("content-type", "").split(";")[0].strip() != "audio/wav":
+            raise HTTPException(status_code=415, detail="Send a WAV recording from the microphone.")
+        audio = bytearray()
+        async for chunk in request.stream():
+            if len(audio) + len(chunk) > MAX_AUDIO_BYTES:
+                raise HTTPException(status_code=413, detail="Record up to 60 seconds of audio.")
+            audio.extend(chunk)
+        try:
+            return await voice.transcribe(bytes(audio))
+        except VoiceInputError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except VoiceProviderError as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+
+    @app.get("/api/history")
+    async def history_list(response: Response, session_id: str, limit: int = 50) -> list[Any]:
+        response.headers["Cache-Control"] = "no-store"
+        return [
+            item.model_dump(exclude={"response_payload", "state_snapshot"})
+            for item in runs.list_sessions(session_id, limit=min(limit, 200))
+        ]
+
+    @app.get("/api/history/{run_id}")
+    async def history_run(response: Response, run_id: str, session_id: str) -> RunRecord:
+        response.headers["Cache-Control"] = "no-store"
+        record = runs.get(run_id, session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Run not found.")
+        return record
+
+    @app.get("/api/history/{run_id}/turns", response_model=list[RunRecord])
+    async def history_turns(response: Response, run_id: str, session_id: str) -> list[RunRecord]:
+        response.headers["Cache-Control"] = "no-store"
+        if runs.get(run_id, session_id) is None:
+            raise HTTPException(status_code=404, detail="Conversation turn not found.")
+        return runs.lineage(session_id, run_id)
+
+    @app.post("/api/history/{run_id}/continue", response_model=ConversationState)
+    async def continue_history(run_id: str, session_id: str) -> ConversationState:
+        record = runs.get(run_id, session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Conversation turn not found.")
+        if record.state_snapshot is None:
+            raise HTTPException(status_code=409, detail="This older turn has no restorable state.")
+        current = conversations.get(session_id)
+        try:
+            return conversations.put(
+                record.state_snapshot,
+                expected_version=current.version if current else None,
+            )
+        except ConversationConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.post("/api/sql/diff", response_model=SqlDiffResponse)
+    async def sql_diff(payload: SqlDiffRequest, response: Response) -> SqlDiffResponse:
+        response.headers["Cache-Control"] = "no-store"
+        dialect = "postgres" if payload.dialect == "postgres" else "sqlite"
+        return sql_changelog(payload.previous_sql, payload.updated_sql, dialect=dialect)
+
+    @app.delete("/api/history", status_code=204)
+    async def history_clear(response: Response, session_id: str) -> Response:
+        response.headers["Cache-Control"] = "no-store"
+        runs.drop_session(session_id)
+        return Response(status_code=204)
+
+    @app.get("/api/databases/{db_id}/glossary")
+    async def database_glossary(response: Response, db_id: str) -> list[GlossaryTerm]:
+        """Approved business definitions, for the contextual schema inspector."""
+        response.headers["Cache-Control"] = "no-store"
+        glossary = glossaries.load(db_id)
+        return glossary.terms if glossary else []
 
     @app.get("/api/databases", response_model=list[DatabaseOption])
     async def databases() -> list[DatabaseOption]:
@@ -251,9 +380,7 @@ def create_app(
         else:
             raise HTTPException(status_code=404, detail="Database was not found or configured.")
         live_columns = {
-            (table.name, column.name)
-            for table in schema.tables
-            for column in table.columns
+            (table.name, column.name) for table in schema.tables for column in table.columns
         }
         relationships = [
             {
@@ -278,30 +405,40 @@ def create_app(
         if profile is not None:
             for item in profile.relationships:
                 key = (
-                    item.child_table, item.child_column,
-                    item.parent_table, item.parent_column,
+                    item.child_table,
+                    item.child_column,
+                    item.parent_table,
+                    item.parent_column,
                 )
-                if key in declared or any(part not in live_columns for part in (
-                    (item.child_table, item.child_column),
-                    (item.parent_table, item.parent_column),
-                )):
+                if key in declared or any(
+                    part not in live_columns
+                    for part in (
+                        (item.child_table, item.child_column),
+                        (item.parent_table, item.parent_column),
+                    )
+                ):
                     continue
-                relationships.append({
-                    "from_table": item.child_table,
-                    "from_column": item.child_column,
-                    "to_table": item.parent_table,
-                    "to_column": item.parent_column,
-                    "source": "profile_inference",
-                    "cardinality": item.type,
-                })
+                relationships.append(
+                    {
+                        "from_table": item.child_table,
+                        "from_column": item.child_column,
+                        "to_table": item.parent_table,
+                        "to_column": item.parent_column,
+                        "source": "profile_inference",
+                        "cardinality": item.type,
+                    }
+                )
         return {
             "db_id": db_id,
             "dialect": schema.dialect,
             "tables": [
-                {"name": table.name, "columns": [
-                    {"name": col.name, "type": col.data_type, "primary_key": col.primary_key}
-                    for col in table.columns
-                ]}
+                {
+                    "name": table.name,
+                    "columns": [
+                        {"name": col.name, "type": col.data_type, "primary_key": col.primary_key}
+                        for col in table.columns
+                    ],
+                }
                 for table in schema.tables
             ],
             "relationships": relationships,
@@ -438,8 +575,7 @@ def create_app(
             )
         return await asyncio.to_thread(active_agent.check, request)
 
-    @app.post("/api/chat", response_model=ChatResponse)
-    async def chat(request: ChatRequest) -> ChatResponse:
+    async def process_chat(request: ChatRequest) -> ChatResponse:
         if enforce_model_catalog and not supports_model(request.provider, request.model):
             raise HTTPException(
                 status_code=422,
@@ -462,6 +598,92 @@ def create_app(
         set_session_stage(request.session_id, "conversation")
         previous = conversations.get(request.session_id)
         has_matching_state = previous is not None and previous.db_id == request.db_id
+        viz_intent = parse_intent(request.message, has_previous=has_matching_state)
+        if request.visualization is True and not viz_intent.requested:
+            viz_intent = viz_intent.model_copy(update={"requested": True})
+        if viz_intent.requested and viz_intent.followup and previous and previous.last_sql:
+            prior_response = recent_results.get((request.session_id, request.db_id))
+            if request.parent_run_id and prior_response and (
+                prior_response.run_id != request.parent_run_id
+            ):
+                prior_response = None
+            source = prior_response.generation if prior_response else None
+            if source is None or source.sql != previous.last_sql or source.truncated:
+                candidates = (
+                    [runs.get(request.parent_run_id, request.session_id)]
+                    if request.parent_run_id else runs.list_sessions(request.session_id)
+                )
+                for record in candidates:
+                    if record is None:
+                        continue
+                    if record.db_id != request.db_id or record.sql != previous.last_sql:
+                        continue
+                    if record.truncated or record.row_count != len(record.rows_preview):
+                        break
+                    raw = record.response_payload.get("generation")
+                    if raw:
+                        source = GenerateResponse.model_validate(raw)
+                    break
+            if source and source.accepted and not source.truncated:
+                explanation = (
+                    prior_response.presentation.summary
+                    if prior_response and prior_response.presentation
+                    else f"The stored result contains {source.row_count} rows."
+                )
+                chart_presentation = ResultPresentation(summary=explanation, source="fallback")
+                try:
+                    spec = plan_chart(
+                        viz_intent,
+                        question=request.message,
+                        columns=source.columns,
+                        rows=source.rows,
+                        truncated=source.truncated,
+                    )
+                    chart_presentation = chart_presentation.model_copy(
+                        update={
+                            "chart_type": spec.chart_type,
+                            "chart_spec": spec,
+                            "x": spec.x,
+                            "y": spec.y,
+                            "title": spec.title,
+                            "x_label": spec.x_label,
+                            "y_label": spec.y_label,
+                            "number_format": spec.number_format,
+                            "time_format": spec.time_format,
+                        }
+                    )
+                    message = "Charted the stored result without running SQL again."
+                except VisualizationError as exc:
+                    message = str(exc)
+                    chart_presentation = chart_presentation.model_copy(
+                        update={"chart_reason": message}
+                    )
+                return ChatResponse(
+                    session_id=request.session_id,
+                    operation="VISUALIZE",
+                    resolved_question=previous.resolved_question,
+                    state=previous,
+                    generation=source,
+                    presentation=chart_presentation,
+                    message=message,
+                    previous_sql=previous.last_sql,
+                    timings_ms={"total": round((perf_counter() - started) * 1000)},
+                )
+            # An incomplete saved preview cannot support a trustworthy chart.
+            clarification = (
+                "The complete previous result is unavailable. "
+                "Ask the original question again with the plot request."
+            )
+            return ChatResponse(
+                session_id=request.session_id,
+                operation="VISUALIZE",
+                resolved_question=previous.resolved_question,
+                state=previous,
+                message=clarification,
+                clarification_required=True,
+                clarification_question=clarification,
+                timings_ms={"total": round((perf_counter() - started) * 1000)},
+            )
         conversation_started = perf_counter()
         conversation_usage = TokenUsage()
         interpretation: TurnInterpretation | None = None
@@ -591,6 +813,15 @@ def create_app(
                 },
             )
         assert pending is not None
+        for job in chat_jobs.values():
+            if job.get("session_id") == request.session_id and job.get("status") == "running":
+                job["understanding"] = {
+                    "operation": interpretation.operation,
+                    "resolved_instruction": pending.resolved_question,
+                    "source": interpretation.source,
+                    "confidence": interpretation.confidence,
+                    "changes": [item.model_dump() for item in interpretation.changes],
+                }
         if operation in EXPLANATION_OPERATIONS:
             explanation_started = perf_counter()
             explanation_usage = TokenUsage()
@@ -658,6 +889,7 @@ def create_app(
             question=pending.resolved_question,
             db_id=request.db_id,
             evidence=request.evidence,
+            visualization_requirement=sql_output_requirement(viz_intent),
             provider=request.provider,
             model=request.model,
             context_mode=request.context_mode,
@@ -741,24 +973,46 @@ def create_app(
                     )
             if operation == "CHECK_CORRECTNESS" and previous and previous.last_sql:
                 database = sqlite if request.db_id in sqlite.list_ids() else postgres
-                equivalent = False
+                # None means the comparison could not run (budget exhausted); that is not
+                # the same as the candidate disagreeing with the accepted result.
+                equivalent: bool | None = None
                 if database is not None:
                     try:
-                        old_columns, old_rows, old_truncated = database.execute(
-                            request.db_id, previous.last_sql, max_rows=request.max_rows
-                        )
-                        equivalent = (
-                            not old_truncated
-                            and not generated.truncated
-                            and old_columns == generated.columns
-                            and old_rows == generated.rows
-                        )
-                    except Exception:  # pragma: no cover - review must not break chat
-                        equivalent = False
+                        request_budget.claim("database")
+                    except RequestBudgetExceeded:
+                        equivalent = None
+                    else:
+                        timeout_seconds = max(0.5, min(5.0, request_budget.remaining()))
+                        try:
+                            old_columns, old_rows, old_truncated = await asyncio.to_thread(
+                                database.execute,
+                                request.db_id,
+                                previous.last_sql,
+                                max_rows=request.max_rows,
+                                timeout_seconds=timeout_seconds,
+                            )
+                            equivalent = (
+                                not old_truncated
+                                and not generated.truncated
+                                and old_columns == generated.columns
+                                and old_rows == generated.rows
+                            )
+                        except Exception:  # pragma: no cover - review must not break chat
+                            equivalent = False
                 if equivalent:
                     message = (
                         "An independently generated candidate returned the same bounded result. "
                         "This increases confidence but is not formal proof of business correctness."
+                    )
+                elif equivalent is None:
+                    human_review = HumanReviewRequest(
+                        reason=(
+                            "The request budget was exhausted before the previous SQL could be "
+                            "re-executed, so candidate equivalence is unverified."
+                        ),
+                        question="Which interpretation should be trusted before replacing the SQL?",
+                        options=[],
+                        evidence=generated.recovery.evidence if generated.recovery else [],
                     )
                 else:
                     human_review = HumanReviewRequest(
@@ -800,23 +1054,31 @@ def create_app(
                     options=[],
                     evidence=recovery.evidence if recovery else [],
                 )
-        presentation = None
+        presentation: ResultPresentation | None = None
         presentation_usage = TokenUsage()
         presentation_ledger = []
         if (
-            generated.accepted and generated.rows and not human_review
+            generated.accepted
+            and generated.rows
+            and not human_review
             and operation not in {"CHECK_CORRECTNESS", "OPTIMIZE"}
             and not generated.recovery
         ):
             set_session_stage(request.session_id, "presentation")
             presentation, presentation_usage, presentation_entries = await present_result(
-                turn_completers.get(request.provider), question=pending.resolved_question,
-                sql=generated.sql or "", columns=generated.columns, rows=generated.rows,
-                truncated=generated.truncated, model=request.model, provider=request.provider,
+                turn_completers.get(request.provider),
+                question=pending.resolved_question,
+                sql=generated.sql or "",
+                columns=generated.columns,
+                rows=generated.rows,
+                truncated=generated.truncated,
+                model=request.model,
+                provider=request.provider,
                 budget=request_budget,
+                visualization=viz_intent,
             )
             presentation_ledger.extend(presentation_entries)
-        return ChatResponse(
+        response = ChatResponse(
             session_id=request.session_id,
             operation=operation,
             resolved_question=pending.resolved_question,
@@ -838,7 +1100,9 @@ def create_app(
                 _add_usage(presentation_usage, _add_usage(planner_usage, generated.token_usage)),
             ),
             call_ledger=[
-                *conversation_ledger, *generated.telemetry.call_ledger, *presentation_ledger,
+                *conversation_ledger,
+                *generated.telemetry.call_ledger,
+                *presentation_ledger,
             ],
             timings_ms={
                 "conversation_interpretation": conversation_ms,
@@ -847,6 +1111,191 @@ def create_app(
                 "generation_validation_execution": generation_ms,
                 "total": round((perf_counter() - started) * 1_000),
             },
+        )
+        return response
+
+    async def save_response(request: ChatRequest, response: ChatResponse) -> ChatResponse:
+        if response.operation == "RESET_CONTEXT":
+            recent_results.pop((request.session_id, request.db_id), None)
+            return response
+        run_id = uuid4().hex
+        response = response.model_copy(
+            update={
+                "run_id": run_id,
+                "turn_id": run_id,
+                "recovery_events": recovery_events(response.generation, run_id),
+            }
+        )
+        try:
+            record = await asyncio.to_thread(
+                runs.record,
+                build_run_record(
+                    {
+                        "response": response,
+                        "request": request,
+                        "message": request.message,
+                        "latency_ms": response.timings_ms.get("total", 0),
+                    }
+                ),
+            )
+            saved_response = response.model_copy(
+                update={
+                    "conversation_id": record.conversation_id,
+                    "parent_run_id": record.parent_run_id,
+                    "sql_version": record.sql_version,
+                    "history_saved": True,
+                }
+            )
+            if (
+                saved_response.generation
+                and saved_response.generation.accepted
+                and not saved_response.generation.truncated
+            ):
+                key = (request.session_id, request.db_id)
+                recent_results.pop(key, None)
+                recent_results[key] = saved_response
+                if len(recent_results) > 100:
+                    recent_results.pop(next(iter(recent_results)))
+            return saved_response
+        except Exception:  # History failures must not discard a completed query response.
+            logger.warning("run_history_record_failed", exc_info=True)
+            return response
+
+    @app.post("/api/chat", response_model=ChatResponse)
+    async def chat(request: ChatRequest) -> ChatResponse:
+        if request.parent_run_id:
+            parent = runs.get(request.parent_run_id, request.session_id)
+            if parent is None or parent.db_id != request.db_id:
+                raise HTTPException(
+                    status_code=409, detail="The selected previous turn is unavailable."
+                )
+            if parent.state_snapshot is not None:
+                current = conversations.get(request.session_id)
+                try:
+                    conversations.put(
+                        parent.state_snapshot,
+                        expected_version=current.version if current else None,
+                    )
+                except ConversationConflict as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+        previous = conversations.get(request.session_id)
+        response = await process_chat(request)
+        if previous and previous.db_id == request.db_id and response.operation != "NEW_QUERY":
+            response = response.model_copy(update={"previous_sql": previous.last_sql})
+        return await save_response(request, response)
+
+    @app.post("/api/history/{run_id}/rerun", response_model=ChatResponse)
+    async def rerun_history(run_id: str, session_id: str) -> ChatResponse:
+        record = runs.get(run_id, session_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="Conversation turn not found.")
+        if not record.accepted or not record.sql or record.state_snapshot is None:
+            raise HTTPException(status_code=409, detail="This turn has no accepted SQL to rerun.")
+        context = (record.response_payload.get("generation") or {}).get("model_context") or {}
+        tables = context.get("tables") or context.get("execution_context", {}).get("tables") or {}
+        allowed_tables = set(tables) or set(record.state_snapshot.approved_tables)
+        if not allowed_tables:
+            raise HTTPException(
+                status_code=409, detail="This older turn has no verified table scope."
+            )
+        allowed_columns = (
+            {table: set(info.get("columns") or []) for table, info in tables.items()}
+            if tables
+            else None
+        )
+        original = record.response_payload.get("generation") or {}
+        dialect = original.get("dialect", "sqlite")
+        budget = RequestBudget(15, max_model_calls=0, max_database_calls=2)
+        started = perf_counter()
+        try:
+            checked = await budget.wait(
+                asyncio.to_thread(
+                    active_agent.check,
+                    CheckRequest(
+                        db_id=record.db_id,
+                        sql=record.sql,
+                        dialect=dialect,
+                        execute=True,
+                        max_rows=100,
+                    ),
+                    budget=budget,
+                    allowed_tables=allowed_tables,
+                    allowed_columns=allowed_columns,
+                ),
+                kind="work",
+            )
+        except (DatabaseError, RequestBudgetExceeded) as exc:
+            checked = CheckResponse(
+                db_id=record.db_id,
+                dialect=dialect,
+                validation=ValidationResult(valid=False, code="DATABASE_ERROR", message=str(exc)),
+            )
+        valid = checked.validation.valid
+        elapsed = round((perf_counter() - started) * 1000)
+        generated = GenerateResponse(
+            db_id=record.db_id,
+            question=record.resolved_question,
+            dialect=dialect,
+            provider=cast(ModelProvider, record.provider),
+            model=record.model,
+            strategy=route_question(record.resolved_question),
+            sql=record.sql if valid else None,
+            accepted=valid,
+            execution_status="EXECUTABLE" if valid else "NOT_EXECUTED",
+            columns=checked.columns,
+            rows=checked.rows,
+            row_count=checked.row_count,
+            truncated=checked.truncated,
+            model_context=context,
+            attempts=[
+                Attempt(
+                    number=1,
+                    sql=record.sql,
+                    normalized_sql=record.sql,
+                    validation=checked.validation,
+                    latency_ms=elapsed,
+                )
+            ],
+            termination_reason="accepted" if valid else "database_error",
+            token_usage=TokenUsage(input_tokens=0, output_tokens=0),
+        )
+        response_state = record.state_snapshot
+        if valid:
+            current = conversations.get(session_id)
+            response_state = conversations.put(
+                response_state.model_copy(
+                    update={
+                        "last_sql": record.sql,
+                        "last_columns": checked.columns,
+                        "last_row_count": checked.row_count,
+                        "last_truncated": checked.truncated,
+                    }
+                ),
+                expected_version=current.version if current else None,
+            )
+        return await save_response(
+            ChatRequest(
+                session_id=session_id,
+                db_id=record.db_id,
+                message="Rerun the saved SQL.",
+                parent_run_id=record.run_id,
+                provider=cast(ModelProvider, record.provider),
+                model=record.model,
+            ),
+            ChatResponse(
+                session_id=session_id,
+                operation="REFINE",
+                resolved_question=record.resolved_question,
+                state=response_state,
+                generation=generated,
+                message=(
+                    f"Reran the saved SQL against current data: {checked.row_count} rows returned."
+                    if valid
+                    else "The saved SQL could not be rerun: " + checked.validation.message
+                ),
+                timings_ms={"total": elapsed},
+                token_usage=TokenUsage(input_tokens=0, output_tokens=0),
+            ),
         )
 
     async def run_chat_job(job_id: str, request: ChatRequest) -> None:

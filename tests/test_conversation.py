@@ -4,7 +4,7 @@ import json
 import sqlite3
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import pytest
 from fastapi.testclient import TestClient
@@ -206,6 +206,7 @@ def test_ambiguous_turn_uses_client_selected_model(registry, monkeypatch) -> Non
         "source": "model",
         "provider": "agentrouter",
         "model": DEFAULT_MODEL,
+        "changes": [],
     }
     assert turn_model.calls[0][0] == DEFAULT_MODEL
     assert any("Previous accepted SQL" in prompt for _, prompt in turn_model.calls)
@@ -292,6 +293,7 @@ def test_chat_preserves_adds_removes_and_resets_context(registry, monkeypatch) -
             "operation": "ADD_FILTER",
             "instruction": "Now only customers in Germany",
             "feedback_category": None,
+            "changes": [],
         }
     ]
     assert third["operation"] == "REMOVE_FILTER"
@@ -388,3 +390,93 @@ def test_conversation_store_removes_expired_state(tmp_path: Path) -> None:
         )
 
     assert store.get("expired") is None
+
+
+class CorrectnessModel:
+    """An accepted query, then one independent review candidate per configured SQL."""
+
+    def __init__(self, review_sql: str) -> None:
+        self.queries = iter(
+            [
+                "SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id",
+                review_sql,
+            ]
+        )
+
+    async def generate(self, **kwargs: Any) -> tuple[str, int]:
+        return next(self.queries), 1
+
+
+def _correctness_client(
+    registry, monkeypatch, review_sql: str, session_id: str, extra_env: dict[str, str] | None = None
+) -> tuple[TestClient, dict[str, object]]:
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    for key, value in (extra_env or {}).items():
+        monkeypatch.setenv(key, value)
+    client = TestClient(create_app(TextToSQLAgent(registry, CorrectnessModel(review_sql))))
+    base: dict[str, object] = {
+        "session_id": session_id,
+        "db_id": "shop",
+        "provider": "agentrouter",
+        "model": "test-model",
+        "execute": True,
+    }
+    client.post("/api/chat", json={**base, "message": "How many orders for each customer?"})
+    return client, base
+
+
+def test_correctness_check_reruns_prior_sql_and_confirms_equivalence(
+    registry, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    client, base = _correctness_client(
+        registry,
+        monkeypatch,
+        "SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id",
+        "correctness-equivalent",
+    )
+    response = client.post(
+        "/api/chat", json={**base, "message": "Please verify correctness"}
+    ).json()
+
+    assert response["operation"] == "CHECK_CORRECTNESS"
+    assert response["human_review"] is None
+    assert "same bounded result" in response["message"]
+
+
+def test_correctness_check_reports_disagreement_as_human_review(
+    registry, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    client, base = _correctness_client(
+        registry,
+        monkeypatch,
+        "SELECT o.customer_id, COUNT(*) + 1 FROM orders o JOIN customers c "
+        "ON o.customer_id = c.customer_id GROUP BY o.customer_id",
+        "correctness-disagreement",
+    )
+    response = client.post(
+        "/api/chat", json={**base, "message": "Please verify correctness"}
+    ).json()
+
+    assert response["operation"] == "CHECK_CORRECTNESS"
+    assert response["human_review"] is not None
+    assert "did not reproduce" in response["human_review"]["reason"]
+
+
+def test_correctness_check_without_budget_reports_unverified_review(
+    registry, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
+    client, base = _correctness_client(
+        registry,
+        monkeypatch,
+        "SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id",
+        "correctness-no-budget",
+        extra_env={"TEXT2SQL_REQUEST_MAX_DATABASE_CALLS": "3"},
+    )
+    response = client.post(
+        "/api/chat", json={**base, "message": "Please verify correctness"}
+    ).json()
+
+    assert response["operation"] == "CHECK_CORRECTNESS"
+    assert response["human_review"] is not None
+    assert "unverified" in response["human_review"]["reason"]
+    assert "did not reproduce" not in response["human_review"]["reason"]

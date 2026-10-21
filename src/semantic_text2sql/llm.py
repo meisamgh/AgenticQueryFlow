@@ -1,4 +1,4 @@
-"""Mockable AgentRouter, Groq, and JustDoWork model-provider boundaries."""
+"""Mockable AgentRouter, Groq, JustDoWork, and CodeCraft provider boundaries."""
 
 from __future__ import annotations
 
@@ -224,6 +224,81 @@ class JustDoWorkSQLModel:
             raise ModelError(f"The JustDoWork request failed: {exc}") from exc
         if not isinstance(content, str) or not content.strip():
             raise ModelError("JustDoWork returned no text output.")
+        return content, _token_usage(body.get("usage") or {})
+
+
+class CodeCraftSQLModel:
+    """CodeCraft chat-completions client for SQL and bounded reasoning calls."""
+
+    def __init__(
+        self,
+        api_key: str | None,
+        base_url: str = "https://codecraftapi.com/v1",
+        timeout: float = 120.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.api_key = api_key
+        self.base_url = base_url.rstrip("/")
+        self.timeout = timeout
+        self.transport = transport
+
+    async def generate(self, **kwargs: object) -> tuple[str, int, TokenUsage]:
+        from time import perf_counter
+
+        prompt = _prompt(
+            str(kwargs["question"]),
+            cast(str | None, kwargs.get("evidence")),
+            cast(SchemaInfo, kwargs["schema"]),
+            cast(StrategyHints, kwargs["strategy"]),
+            cast(Literal["sqlite", "postgres"], kwargs["dialect"]),
+            str(kwargs["profile_context"]),
+            cast(str | None, kwargs.get("previous_sql")),
+            cast(str | None, kwargs.get("feedback")),
+            cast(list[str], kwargs["rejected_shapes"]),
+            cast(Literal["reasoning", "icl", "alternative"], kwargs["generation_style"]),
+        )
+        started = perf_counter()
+        content, usage = await self.complete_detailed(str(kwargs["model"]), prompt)
+        return content, round((perf_counter() - started) * 1_000), usage
+
+    async def complete(self, model: str, prompt: str) -> str:
+        content, _ = await self.complete_detailed(model, prompt)
+        return content
+
+    async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+        if not self.api_key:
+            raise ModelError("CODECRAFT_API_KEY is not configured.")
+        payload: dict[str, object] = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": 4_096,
+            "stream": False,
+        }
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=self.timeout,
+                transport=self.transport,
+            ) as client:
+                response = await client.post(
+                    "chat/completions",
+                    headers={
+                        "authorization": f"Bearer {self.api_key}",
+                        "content-type": "application/json",
+                    },
+                    json=payload,
+                )
+                response.raise_for_status()
+                body = response.json()
+                content = body["choices"][0]["message"]["content"]
+        except httpx.HTTPStatusError as exc:
+            raise ModelError(
+                f"The CodeCraft request failed: {_response_detail(exc.response)}"
+            ) from exc
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+            raise ModelError(f"The CodeCraft request failed: {exc}") from exc
+        if not isinstance(content, str) or not content.strip():
+            raise ModelError("CodeCraft returned no text output.")
         return content, _token_usage(body.get("usage") or {})
 
 
@@ -657,11 +732,13 @@ class RoutingSQLModel:
         agentrouter: SQLModel,
         groq: GroqSQLModel,
         justdowork: JustDoWorkSQLModel,
+        codecraft: CodeCraftSQLModel,
     ) -> None:
         self.providers: dict[str, SQLModel] = {
             "agentrouter": agentrouter,
             "groq": groq,
             "justdowork": justdowork,
+            "codecraft": codecraft,
         }
 
     async def generate(

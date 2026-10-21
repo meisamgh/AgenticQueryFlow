@@ -91,6 +91,7 @@ class TextToSQLService:
         provider: ModelProvider,
         model: str,
         evidence: str | None = None,
+        visualization_requirement: str | None = None,
         context_mode: ContextMode = "retrieval",
         context_provider: ModelProvider | None = None,
         context_model: str | None = None,
@@ -300,7 +301,9 @@ class TextToSQLService:
         generation_request = GenerateRequest(
             db_id=db_id,
             question=question,
-            evidence=retrieval_evidence,
+            evidence="\n".join(
+                item for item in (retrieval_evidence, visualization_requirement) if item
+            ) or None,
             provider=provider,
             model=os.environ.get("TEXT2SQL_SQL_MODEL") or model,
             dialect=dialect,

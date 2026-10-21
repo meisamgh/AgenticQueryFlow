@@ -8,6 +8,11 @@ import pytest
 from semantic_text2sql.database import DatabaseRegistry
 
 
+@pytest.fixture(autouse=True)
+def isolate_query_history(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("TEXT2SQL_RUN_HISTORY_PATH", ":memory:")
+
+
 @pytest.fixture
 def registry(tmp_path: Path) -> DatabaseRegistry:
     directory = tmp_path / "shop"
