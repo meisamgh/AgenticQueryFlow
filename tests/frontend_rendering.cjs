@@ -13,6 +13,7 @@ class Element {
   insertCell() { return this.createTHead(); }
   classList = { add() {} };
   setAttribute(name, value) { this[name] = value; }
+  addEventListener(name, callback) { this.listeners ||= {}; this.listeners[name] = callback; }
 }
 const context = vm.createContext({
   document: { createElement: () => new Element() },
@@ -121,6 +122,42 @@ vm.runInContext(source.slice(
 context.EXPLANATION_OPERATIONS_UI = new Set([
   'EXPLAIN', 'EXPLAIN_SQL', 'EXPLAIN_RESULT', 'EXPLAIN_INTERPRETATION', 'EXPLAIN_CONTEXT', 'EXPLAIN_FAILURE',
 ]);
+test('query understanding chips show only fields from the confirmed semantic contract', () => {
+  const strip = new Element();
+  strip.hidden = true;
+  context.renderSemanticChips({querySelector: () => strip}, {
+    state: { semantic_contract: {
+      measures: ['net_revenue'], grain: ['month'],
+      filters: [{column:'country', operator:'=', value:'DE'}],
+    } },
+  });
+  assert.equal(strip.hidden, false);
+  assert.equal(strip.children.length, 4); // eyebrow + 3 chips
+  assert.equal(strip.children[1].children[0].textContent, 'Metric');
+  assert.equal(strip.children[1].children[1].textContent, 'net_revenue');
+  assert.equal(strip.children[3].children[0].textContent, 'Filter');
+  const empty = new Element(); empty.hidden = true;
+  context.renderSemanticChips({querySelector: () => empty}, {state:null});
+  assert.equal(empty.hidden, true);
+});
+test('chart adapter exposes click events for investigate actions', () => {
+  let handlerName = null, selectedHandler = null;
+  const fakeChart = {
+    setOption() {}, resize() {}, dispose() {},
+    on(name, handler) { handlerName = name; selectedHandler = handler; },
+  };
+  context.window.echarts = {init: () => fakeChart};
+  context.window.addEventListener = () => {};
+  context.window.removeEventListener = () => {};
+  const spec = {chart_type: 'line', x: 'Month', y: 'Revenue',
+    data: [{Month:'Jan', Revenue:4}, {Month:'Feb', Revenue:5}]};
+  const mounted = context.window.QueryflowECharts.render(new Element(), {chart_spec:spec});
+  const onClick = () => {};
+  mounted.onSelect(onClick);
+  assert.equal(handlerName, 'click');
+  assert.equal(selectedHandler, onClick);
+  mounted.dispose();
+});
 test('explicit visualization language is detected; ordinary requests are not', () => {
   assert.equal(context.vizRequested('Plot monthly revenue as a line chart'), true);
   assert.equal(context.vizRequested('make it a bar chart'), true);
