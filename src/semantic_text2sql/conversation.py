@@ -40,6 +40,20 @@ Operation = Literal[
     "CHECK_CORRECTNESS",
     "RESET_CONTEXT",
 ]
+__all__ = [
+    "ANALYTICAL_CORRECTION_OPERATIONS",
+    "EXPLANATION_OPERATIONS",
+    "STATE_REQUIRED_OPERATIONS",
+    "ConversationCompleter",
+    "ConversationConflict",
+    "ConversationState",
+    "Operation",
+    "classify_operation",
+    "intent_target",
+    "interpret_turn_detailed",
+    "requires_model_interpretation",
+    "resolve_turn",
+]
 EXPLANATION_OPERATIONS = frozenset(
     {
         "EXPLAIN",

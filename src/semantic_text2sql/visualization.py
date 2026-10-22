@@ -65,7 +65,7 @@ _SIZED = re.compile(
     r"(?=\s+(?:as|and|in|by|per)\b|[,.;!?]|\s*$)",
     re.I,
 )
-_GRAIN = re.compile(r"\b(daily|monthly|yearly|weekly)\b", re.I)
+_GRAIN = re.compile(r"\b(daily|weekly|monthly|quarterly|yearly|annual)\b", re.I)
 _DATE_SHAPE = re.compile(r"(?:\d{4}|\d{6}|\d{4}-\d{2}|\d{4}-\d{2}-\d{2})\Z")
 
 
@@ -122,6 +122,7 @@ def parse_intent(question: str, *, has_previous: bool = False) -> VisualizationI
             match = (None, "")
     per = _PER.search(question)
     per_name = per.group(1).strip().casefold() if per else None
+    grain_word = next(iter(cast(Any, _GRAIN.findall(question)) or []), None)
     by_dims: list[str] = []
     for first, second, _third in _BY.findall(question):
         by_dims.append(first.strip().casefold())
@@ -154,6 +155,10 @@ def parse_intent(question: str, *, has_previous: bool = False) -> VisualizationI
         series=series,
         size=sized.group(1).strip().casefold() if sized else None,
         unsupported_type=unsupported.group(1).lower() if unsupported else None,
+        time_grain=(
+            "yearly" if grain_word and grain_word.casefold() == "annual" else
+            grain_word.casefold() if grain_word else None
+        ),
     )
 
 
@@ -264,6 +269,36 @@ def _quantile(values: list[float], q: float) -> float:
     return values[lo] + (values[hi] - values[lo]) * (offset - lo)
 
 
+_GRAIN_CAPABILITY: dict[str, int] = {
+    "total": 0,
+    "yearly": 4,
+    "quarterly": 8,
+    "monthly": 12,
+    "weekly": 20,
+    "daily": 40,
+}
+
+
+def _grain_capability(grain: str) -> int | None:
+    return _GRAIN_CAPABILITY.get(grain.casefold())
+
+
+def _stored_grain_capability(columns: list[str]) -> int:
+    """Finest time grain implied by the stored column names (0 = no time axis)."""
+    name = " ".join(columns).casefold()
+    if re.search(r"\b(?:day|daily|date)\b", name):
+        return _GRAIN_CAPABILITY["daily"]
+    if re.search(r"\b(?:week|weekly)\b", name):
+        return _GRAIN_CAPABILITY["weekly"]
+    if re.search(r"\b(?:month|monthly)\b", name):
+        return _GRAIN_CAPABILITY["monthly"]
+    if re.search(r"\b(?:quarter|quarterly)\b", name):
+        return _GRAIN_CAPABILITY["quarterly"]
+    if re.search(r"\b(?:year|yearly|annual)\b", name):
+        return _GRAIN_CAPABILITY["yearly"]
+    return 0
+
+
 def plan_chart(
     intent: VisualizationIntent,
     *,
@@ -287,6 +322,27 @@ def plan_chart(
         raise VisualizationError("The result has ambiguous or incomplete columns.")
     if len(rows) > 500:
         raise VisualizationError("The result is too large to plot without a verified reduction.")
+    if intent.time_grain:
+        requested_grain = _grain_capability(intent.time_grain)
+        stored_grain = _stored_grain_capability(columns)
+        if requested_grain is not None and stored_grain != requested_grain:
+            where = (
+                f"carries the {intent.time_grain} grain"
+                if requested_grain > stored_grain
+                else "has no time axis at all and detail cannot be inferred from an aggregate"
+                if stored_grain == 0
+                else f"is aggregated at the {next(
+                    (k for k, v in _GRAIN_CAPABILITY.items() if v == stored_grain), 'coarser'
+                )} grain"
+            )
+            raise VisualizationError(
+                "The stored result "
+                + where
+                + "; the requested "
+                + intent.time_grain
+                + " grain requires a validated SQL change that keeps the "
+                "earlier metric and filters."
+            )
     if any(value is None for row in rows for value in row):
         raise VisualizationError(
             "The result contains NULL values; clarify how missing points should be shown."

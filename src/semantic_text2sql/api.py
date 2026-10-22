@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from semantic_text2sql.agent import TextToSQLAgent
+from semantic_text2sql.analytics_planner import plan_analytics, planner_enabled
 from semantic_text2sql.conversation import (
     ANALYTICAL_CORRECTION_OPERATIONS,
     EXPLANATION_OPERATIONS,
@@ -27,6 +28,7 @@ from semantic_text2sql.conversation import (
     requires_model_interpretation,
     resolve_turn,
 )
+from semantic_text2sql.data_requirement_validator import validate_reusability
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.explanation import deterministic_explanation, explain_turn_detailed
 from semantic_text2sql.glossary import GlossaryStore, GlossaryTerm
@@ -655,6 +657,8 @@ def create_app(
                     else f"The stored result contains {source.row_count} rows."
                 )
                 chart_presentation = ResultPresentation(summary=explanation, source="fallback")
+                analytics_planning_ms = 0
+                requery_requested = False
                 try:
                     spec = plan_chart(
                         viz_intent,
@@ -678,36 +682,80 @@ def create_app(
                     )
                     message = "Charted the stored result without running SQL again."
                 except VisualizationError as exc:
-                    message = str(exc)
-                    chart_presentation = chart_presentation.model_copy(
-                        update={"chart_reason": message}
+                    # The stored rows cannot chart as requested. Decide
+                    # deterministically whether a new validated query is
+                    # required (for example a scalar total asked per month)
+                    # or whether the request simply cannot reuse the rows.
+                    analytics_started = perf_counter()
+                    proposal = None
+                    if planner_enabled():
+                        try:
+                            proposal = plan_analytics(
+                                request.message,
+                                viz_intent=viz_intent,
+                                previous=previous,
+                                db_id=request.db_id,
+                            )
+                        except Exception:  # noqa: BLE001 - planner proposals never abort a chart turn
+                            proposal = None
+                    analytics_planning_ms = round((perf_counter() - analytics_started) * 1000)
+                    requery_requested = False
+                    if proposal is not None:
+                        requirement = validate_reusability(
+                            proposal,
+                            stored_columns=source.columns,
+                            stored_rows=source.rows,
+                            stored_row_count=source.row_count,
+                            stored_truncated=source.truncated,
+                        )
+                        if (
+                            requirement.decision == "requery_database"
+                            and proposal.semantic_changes
+                        ):
+                            requery_requested = True
+                    if not requery_requested:
+                        message = (
+                            requirement.reason
+                            if proposal is not None
+                            and requirement.decision != "reuse_result"
+                            else str(exc)
+                        )
+                        chart_presentation = chart_presentation.model_copy(
+                            update={"chart_reason": message}
+                        )
+                if not requery_requested:
+                    return ChatResponse(
+                        session_id=request.session_id,
+                        operation="VISUALIZE",
+                        resolved_question=previous.resolved_question,
+                        state=previous,
+                        generation=source,
+                        presentation=chart_presentation,
+                        message=message,
+                        previous_sql=previous.last_sql,
+                        timings_ms={
+                            "analytics_planning": analytics_planning_ms,
+                            "total": round((perf_counter() - started) * 1000),
+                        },
                     )
+                # Fall through: proposed semantic changes route through the
+                # accepted text-to-SQL pipeline with the chart output hint.
+            else:
+                # An incomplete saved preview cannot support a trustworthy chart.
+                clarification = (
+                    "The complete previous result is unavailable. "
+                    "Ask the original question again with the plot request."
+                )
                 return ChatResponse(
                     session_id=request.session_id,
                     operation="VISUALIZE",
                     resolved_question=previous.resolved_question,
                     state=previous,
-                    generation=source,
-                    presentation=chart_presentation,
-                    message=message,
-                    previous_sql=previous.last_sql,
+                    message=clarification,
+                    clarification_required=True,
+                    clarification_question=clarification,
                     timings_ms={"total": round((perf_counter() - started) * 1000)},
                 )
-            # An incomplete saved preview cannot support a trustworthy chart.
-            clarification = (
-                "The complete previous result is unavailable. "
-                "Ask the original question again with the plot request."
-            )
-            return ChatResponse(
-                session_id=request.session_id,
-                operation="VISUALIZE",
-                resolved_question=previous.resolved_question,
-                state=previous,
-                message=clarification,
-                clarification_required=True,
-                clarification_question=clarification,
-                timings_ms={"total": round((perf_counter() - started) * 1000)},
-            )
         conversation_started = perf_counter()
         conversation_usage = TokenUsage()
         interpretation: TurnInterpretation | None = None
