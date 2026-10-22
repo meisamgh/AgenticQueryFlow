@@ -709,7 +709,7 @@ function renderSemanticChips(fragment, body) {
   const strip = fragment.querySelector(".query-semantic-strip");
   if (!strip) return;
   const contract = body.state?.semantic_contract;
-  if (!contract || body.clarification_required) return;
+  if (!contract || body.clarification_required || body.generation?.accepted === false) return;
   const items = [];
   if (contract.measures?.length) items.push([
     "Metric", contract.measures.map(readableResultLabel).join(", "), contract.measures.join(", "),
@@ -1005,6 +1005,12 @@ function wireChartSection(article, presentation, generation, runId) {
       activeParts.push(`Series: ${settings.series || "none"}`);
     if (settings.chartType && settings.chartType !== original.chart_type)
       activeParts.push(settings.chartType.replaceAll("_", " "));
+    section.querySelector(".chart-category-current").textContent = settings.categories?.length
+      ? settings.categories.length === 1 ? settings.categories[0] : `${settings.categories.length} selected`
+      : "All";
+    const selectedMeasures = settings.metrics?.length ? settings.metrics : [original.y];
+    section.querySelector(".chart-measures-current").textContent = selectedMeasures.length === 1
+      ? selectedMeasures[0] : `${selectedMeasures.length} selected`;
     section.querySelector(".chart-active-label").textContent = activeParts.length
       ? `${activeParts.join(" · ")} · display only; SQL unchanged`
       : "Current executed result · no display filters";
@@ -1108,6 +1114,7 @@ function wireChartSection(article, presentation, generation, runId) {
         return;
       }
       settings.legend = section.querySelector(".chart-legend-filter").checked;
+      section.querySelectorAll(".chart-choice-chip").forEach(choice => { choice.open = false; });
       delete settings.zoom;
       saveSettings();
       renderCurrent();

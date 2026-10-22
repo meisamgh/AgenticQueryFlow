@@ -292,6 +292,18 @@ test('chart UI stays within the response; visual controls do not call query APIs
   assert.ok(!chartWiring.includes('await api('));
   assert.ok(!chartWiring.includes('send('));
 });
+test('filter parameters use compact accessible label-value chips', () => {
+  for (const name of ['chart-x-control', 'chart-series-control', 'chart-start-control',
+    'chart-end-control', 'chart-top-control']) {
+    assert.ok(markup.includes(`chart-parameter-chip ${name}`));
+  }
+  assert.ok(markup.includes('chart-parameter-chip chart-choice-chip chart-category-control'));
+  assert.ok(markup.includes('chart-parameter-chip chart-choice-chip chart-measures-control'));
+  assert.ok(markup.includes('class="chart-query-parameters"'));
+  assert.ok(styles.includes('.chart-filter-controls .chart-parameter-chip'));
+  assert.ok(styles.includes('.chart-choice-menu'));
+  assert.ok(source.includes('section.querySelector(".chart-category-current").textContent'));
+});
 
 vm.runInContext(source.slice(source.indexOf('function renderTable('), source.indexOf('function downloadCsv(')), context);
 test('result table renders headers, rows and NULL explicitly', () => {
@@ -397,6 +409,19 @@ test('query understanding chips show only fields from the confirmed semantic con
   const empty = new Element(); empty.hidden = true;
   context.renderSemanticChips({querySelector: () => empty}, {state:null});
   assert.equal(empty.hidden, true);
+});
+test('Understood as matches the v4 position and compact chip treatment', () => {
+  const template = markup.split('<template id="assistantTemplate">')[1].split('</template>')[0];
+  assert.ok(template.indexOf('class="result-head"') < template.indexOf('class="query-semantic-strip"'));
+  assert.ok(template.indexOf('class="query-semantic-strip"') < template.indexOf('class="response-tabs"'));
+  assert.ok(styles.includes('.query-semantic-chip { border:1px solid #e6e4ef; border-radius:8px'));
+  assert.ok(styles.includes('max-width:210px'));
+  assert.ok(styles.includes('.query-semantic-strip[hidden] { display:none; }'));
+  const strip = new Element(); strip.hidden = true;
+  context.renderSemanticChips({querySelector: () => strip}, {
+    generation: {accepted: false}, state: {semantic_contract: {measures: ['revenue']}},
+  });
+  assert.equal(strip.hidden, true, 'a failed query must not show accepted understanding');
 });
 test('Answer keeps a single KPI but never duplicates a result table', () => {
   const preview = new Element(); preview.hidden = true;

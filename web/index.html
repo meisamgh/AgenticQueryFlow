@@ -169,6 +169,7 @@
             <header class="result-head">
               <span class="status-pill"><span data-icon="check"></span> <span class="status-pill-label">Ready</span></span>
             </header>
+            <div class="query-semantic-strip" hidden aria-label="Interpreted query constraints"></div>
             <nav class="response-tabs" role="tablist" aria-label="Response views" hidden>
               <button type="button" role="tab" data-response-tab="answer" aria-selected="true">Answer</button>
               <button type="button" role="tab" data-response-tab="data" aria-selected="false">Data</button>
@@ -176,7 +177,6 @@
             </nav>
             <div class="answer-tab-panel" role="tabpanel">
               <p class="response-note"></p>
-              <div class="query-semantic-strip" hidden aria-label="Interpreted query constraints"></div>
               <p class="presentation-note" hidden></p>
               <div class="chart-section" hidden>
               <header class="chart-head">
@@ -205,21 +205,21 @@
                 <div class="chart-active-view" aria-live="polite"><strong>ACTIVE CHART VIEW</strong><span class="chart-active-label">Current executed result · no display filters</span></div>
                 <details class="chart-filter-panel">
                   <summary>Filters &amp; Parameters <span class="chart-filter-count" hidden></span></summary>
-                  <div class="chart-filter-controls">
-                    <label class="chart-x-control" hidden>X-axis<select class="chart-x-filter"></select></label>
-                    <label class="chart-series-control" hidden>Series / group<select class="chart-series-filter"></select></label>
-                    <label class="chart-category-control" hidden>Category (select multiple)<select class="chart-category-filter" multiple size="4"></select></label>
-                    <label class="chart-metric-control" hidden>Metric<select class="chart-metric-filter"></select></label>
-                    <label class="chart-measures-control" hidden>Measures (select multiple)<select class="chart-measures-filter" multiple size="4"></select></label>
-                    <label class="chart-start-control" hidden>From<select class="chart-start-filter"></select></label>
-                    <label class="chart-end-control" hidden>To<select class="chart-end-filter"></select></label>
-                    <label class="chart-top-control" hidden>Top N<select class="chart-top-filter"><option value="">All</option><option value="5">5</option><option value="10">10</option><option value="20">20</option></select></label>
-                    <label class="chart-legend-control"><input type="checkbox" class="chart-legend-filter" checked> Legend</label>
+                  <div class="chart-filter-controls" aria-label="Display-only chart parameters">
+                    <label class="chart-parameter-chip chart-x-control" hidden><span>X-axis</span><select class="chart-x-filter" aria-label="Chart X-axis"></select></label>
+                    <label class="chart-parameter-chip chart-series-control" hidden><span>Series</span><select class="chart-series-filter" aria-label="Chart series"></select></label>
+                    <details class="chart-parameter-chip chart-choice-chip chart-category-control" hidden><summary><span>Category</span><strong class="chart-category-current">All</strong></summary><div class="chart-choice-menu"><label for="chartCategoryFilter">Select categories</label><select id="chartCategoryFilter" class="chart-category-filter" multiple size="4"></select></div></details>
+                    <label class="chart-parameter-chip chart-metric-control" hidden><span>Metric</span><select class="chart-metric-filter" aria-label="Chart metric"></select></label>
+                    <details class="chart-parameter-chip chart-choice-chip chart-measures-control" hidden><summary><span>Measures</span><strong class="chart-measures-current">Recommended</strong></summary><div class="chart-choice-menu"><label for="chartMeasuresFilter">Select measures</label><select id="chartMeasuresFilter" class="chart-measures-filter" multiple size="4"></select></div></details>
+                    <label class="chart-parameter-chip chart-start-control" hidden><span>From</span><select class="chart-start-filter" aria-label="Display start date"></select></label>
+                    <label class="chart-parameter-chip chart-end-control" hidden><span>To</span><select class="chart-end-filter" aria-label="Display end date"></select></label>
+                    <label class="chart-parameter-chip chart-top-control" hidden><span>Top N</span><select class="chart-top-filter" aria-label="Visible top categories"><option value="">All</option><option value="5">5</option><option value="10">10</option><option value="20">20</option></select></label>
+                    <label class="chart-parameter-chip chart-legend-control"><span>Legend</span><input type="checkbox" class="chart-legend-filter" checked aria-label="Show chart legend"></label>
                     <button type="button" class="chart-apply-filter">Apply to chart</button>
                     <button type="button" class="chart-reset-filter">Reset to recommended</button>
                     <button type="button" class="chart-clear-filter">Clear display filters</button>
                   </div>
-                  <div class="chart-query-parameters"><strong>Change the query</strong><p>For a dimension or value missing from this result, generate a new validated read-only query.</p><label>Field<select class="chart-query-field"></select></label><label>Operator<select class="chart-query-operator"><option value="=">is</option><option value="!=">is not</option><option value=">">greater than</option><option value="<">less than</option></select></label><label>Value<input class="chart-query-value" maxlength="120" autocomplete="off"></label><button type="button" class="chart-apply-query">Apply to query</button></div>
+                  <div class="chart-query-parameters"><strong>Change the query</strong><p>For a dimension or value missing from this result, generate a new validated read-only query.</p><label class="chart-parameter-chip"><span>Field</span><select class="chart-query-field" aria-label="Query filter field"></select></label><label class="chart-parameter-chip"><span>Operator</span><select class="chart-query-operator" aria-label="Query filter operator"><option value="=">is</option><option value="!=">is not</option><option value=">">greater than</option><option value="<">less than</option></select></label><label class="chart-parameter-chip"><span>Value</span><input class="chart-query-value" maxlength="120" autocomplete="off" aria-label="Query filter value"></label><button type="button" class="chart-apply-query">Apply to query</button></div>
                   <p class="chart-filter-note">Chart controls change only the displayed, complete result. Apply to query creates a new SQL result through Queryflow.</p>
                 </details>
                 <div class="chart-suggestions" role="group" aria-label="Suggested charts"></div>
