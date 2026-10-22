@@ -137,7 +137,7 @@ window.QueryflowECharts = (function () {
       series: [],
     };
     if (type === "histogram") {
-      option.xAxis = { ...categoryAxis, data: data.map(row => formatNumber(row.bin_start, false)) };
+      option.xAxis = { ...categoryAxis, data: data.map(row => formatNumber(row[x], false)) };
       option.yAxis.name = "Frequency";
     }
     if (numericX) {
@@ -175,6 +175,7 @@ window.QueryflowECharts = (function () {
     observer?.observe(container);
     return {
       dispose() { window.removeEventListener("resize", resize); observer?.disconnect(); chart.dispose(); },
+      onSelect(callback) { chart.on("click", callback); },
       getDataURL(options) { return chart.getDataURL({ type: "png", pixelRatio: 2,
         backgroundColor: cssVar("--surface", "#fff"), ...options }); },
     };

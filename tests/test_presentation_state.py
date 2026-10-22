@@ -101,7 +101,13 @@ def test_truncated_result_never_produces_a_chart(monkeypatch, registry, tmp_path
     client, _ = _client(monkeypatch, registry, tmp_path, sql=COUNTS_SQL)
 
     incomplete = client.post(
-        "/api/chat", json={**BASE, "session_id": "pres-truncated", "message": "Plot customer counts by country.", "max_rows": 1},
+        "/api/chat",
+        json={
+            **BASE,
+            "session_id": "pres-truncated",
+            "message": "Plot customer counts by country.",
+            "max_rows": 1,
+        },
     )
     assert incomplete.status_code == 200
     body = incomplete.json()
@@ -110,7 +116,9 @@ def test_truncated_result_never_produces_a_chart(monkeypatch, registry, tmp_path
     assert body["presentation_state"]["mode"] == "sql"
 
 
-def test_history_restores_presentation_state_without_rerunning(monkeypatch, registry, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_history_restores_presentation_state_without_rerunning(
+    monkeypatch, registry, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
     store: RunHistoryStore = RunHistoryStore(None)
     client, model = _client(monkeypatch, registry, tmp_path, store=store, sql=COUNTS_SQL)
 
@@ -118,7 +126,6 @@ def test_history_restores_presentation_state_without_rerunning(monkeypatch, regi
         **BASE, "message": "Plot customer counts by country as a bar chart.",
     })
     run_id = plotted.json()["run_id"]
-    chart = plotted.json()
     calls_after_plot = model.calls
 
     saved = store.get(run_id, "pres-state")

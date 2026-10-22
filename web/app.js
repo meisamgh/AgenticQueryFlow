@@ -668,6 +668,183 @@ function isChartMode(screen) {
   return screen === "chart";
 }
 
+/* Queryflow v4: contextual investigations are explicit user actions, never SQL executed
+   from a table cell or a chart event. All follow-ups go through the existing API. */
+async function sendFromAnswer(runId, prompt) {
+  if (runId && runId !== state.activeRunId) await continueRun(runId, false);
+  await send(prompt);
+}
+let activeInsight = null;
+function dismissInsight() {
+  if (activeInsight) { activeInsight._cleanup?.(); activeInsight.remove(); }
+  activeInsight = null;
+}
+function placeInsight(anchor, panel) {
+  dismissInsight();
+  panel.className = "query-insight-popover";
+  panel.setAttribute("role", "dialog");
+  panel.setAttribute("aria-label", "Investigate result");
+  panel.addEventListener("click", event => event.stopPropagation());
+  document.body.append(panel);
+  activeInsight = panel;
+  const bounds = anchor.getBoundingClientRect();
+  const x = Math.max(12, Math.min(bounds.left, innerWidth - panel.offsetWidth - 12));
+  const y = bounds.bottom + panel.offsetHeight + 12 > innerHeight
+    ? Math.max(12, bounds.top - panel.offsetHeight - 8) : bounds.bottom + 8;
+  panel.style.left = x + "px";
+  panel.style.top = y + "px";
+  const escape = event => {
+    if (event.key === "Escape") { dismissInsight(); document.removeEventListener("keydown", escape); }
+  };
+  document.addEventListener("keydown", escape);
+  // Dispose keyboard listener when the next popover is opened.
+  panel._cleanup = () => document.removeEventListener("keydown", escape);
+}
+function insightMenu(anchor, heading, description, items, runId = null) {
+  const panel = document.createElement("div");
+  const title = document.createElement("strong");
+  title.className = "query-insight-title";
+  title.textContent = heading;
+  const caption = document.createElement("p");
+  caption.textContent = description;
+  panel.append(title, caption);
+  items.forEach(({label, prompt}) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "query-insight-action";
+    button.textContent = label;
+    button.addEventListener("click", async () => {
+      dismissInsight();
+      if (state.busy || !state.ready) return;
+      // Deliberate click on an action, routed through existing interpretation and SQL safety.
+      try { await sendFromAnswer(runId, prompt); }
+      catch (error) { showError(error.message); }
+    });
+    panel.append(button);
+  });
+  placeInsight(anchor, panel);
+}
+function editSemanticChip(anchor, dimension, current, runId) {
+  const panel = document.createElement("form");
+  const title = document.createElement("label");
+  title.className = "query-insight-title";
+  title.textContent = "Change " + dimension.toLowerCase();
+  const input = document.createElement("input");
+  input.className = "query-insight-input";
+  input.value = current;
+  input.maxLength = 220;
+  input.required = true;
+  input.setAttribute("aria-label", "New " + dimension.toLowerCase());
+  const note = document.createElement("p");
+  note.textContent = "Applies a conversational correction through validated SQL.";
+  const apply = document.createElement("button");
+  apply.className = "query-insight-primary";
+  apply.type = "submit";
+  apply.textContent = "Apply change";
+  panel.append(title, input, note, apply);
+  panel.addEventListener("submit", async event => {
+    event.preventDefault();
+    if (state.busy || !state.ready || !input.value.trim()) return;
+    const revised = input.value.trim();
+    dismissInsight();
+    const prompt = "Change the " + dimension.toLowerCase() + " in the previous query from " +
+      JSON.stringify(current) + " to " + JSON.stringify(revised) +
+      ". Preserve all other confirmed metrics, filters, and grouping requirements.";
+    try { await sendFromAnswer(runId, prompt); }
+    catch (error) { showError(error.message); }
+  });
+  placeInsight(anchor, panel);
+  input.focus();
+  input.select();
+}
+function renderSemanticChips(fragment, body) {
+  const strip = fragment.querySelector(".query-semantic-strip");
+  if (!strip) return;
+  const contract = body.state?.semantic_contract;
+  if (!contract || body.clarification_required) return;
+  const items = [];
+  if (contract.measures?.length) items.push(["Metric", contract.measures.join(", ")]);
+  if (contract.aggregation) items.push(["Aggregation", contract.aggregation]);
+  if (contract.grain?.length) items.push(["Grouping", contract.grain.join(", ")]);
+  if (contract.filters?.length) {
+    for (const item of contract.filters.slice(0, 3)) {
+      items.push(["Filter", [item.operand || item.column, item.operator || "=", JSON.stringify(item.value)].filter(Boolean).join(" ")]);
+    }
+  }
+  if (!items.length) return;
+  strip.hidden = false;
+  const eyebrow = document.createElement("span");
+  eyebrow.className = "query-semantic-eyebrow";
+  eyebrow.textContent = "UNDERSTOOD AS";
+  strip.append(eyebrow);
+  items.slice(0, 6).forEach(([kind, value]) => {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "query-semantic-chip";
+    chip.title = "Refine " + kind.toLowerCase() + " in the next query";
+    const k = document.createElement("small");
+    k.textContent = kind;
+    const v = document.createElement("span");
+    v.textContent = value.length > 55 ? value.slice(0, 52) + "…" : value;
+    chip.append(k, v);
+    chip.addEventListener("click", () => editSemanticChip(chip, kind, value, body.run_id));
+    strip.append(chip);
+  });
+}
+function attachResultInvestigations(table, body) {
+  const cols = body.generation?.columns || [];
+  const rows = body.generation?.rows || [];
+  const actual = table?.tBodies?.[0];
+  if (!actual || !cols.length) return;
+  Array.from(actual.rows).forEach((tr, r) => {
+    Array.from(tr.cells).forEach((cell, c) => {
+      const value = rows[r]?.[c], column = cols[c];
+      if (value == null || !column) return;
+      cell.classList.add("investigable-cell");
+      cell.tabIndex = 0;
+      cell.title = "Select to investigate this value";
+      const action = () => {
+        const key = JSON.stringify(String(column)), val = JSON.stringify(value);
+        insightMenu(cell, String(column) + ": " + String(value), "Use this observed value as the starting point for a follow-up.", [
+          {label:"Investigate this value",prompt:"Investigate the observed value " + val +
+            " in result column " + key + " from the previous query. Keep the existing analytical context and explain what can be verified."},
+          {label:"Filter to this value",prompt:"Refine the previous query to focus on " + key + " = " + val +
+            ". Verify that this result column maps to an appropriate source dimension; ask for clarification if it is an aggregate or ambiguous alias."},
+          {label:"Compare with other values",prompt:"Compare " + key + " = " + val +
+            " to other values of the same dimension, preserving the previous metric definition and relevant filters."}
+        ], body.run_id);
+      };
+      cell.addEventListener("click", action);
+      cell.addEventListener("keydown", event => {
+        if (event.key === "Enter" || event.key === " ") { event.preventDefault(); action(); }
+      });
+    });
+  });
+}
+function attachChartInvestigations(article, presentation, runId) {
+  const spec = presentation?.chart_spec;
+  if (!article._echart?.onSelect || !spec?.data?.length) return;
+  article._echart.onSelect(point => {
+    const observedX = point.name ?? (Array.isArray(point.value) ? point.value[0] : undefined);
+    const matches = spec.data.filter(row => String(row[spec.x]) === String(observedX)
+      && (!spec.series || !point.seriesName || String(row[spec.series]) === String(point.seriesName)));
+    if (!matches.length) return;
+    const value = matches[0][spec.x];
+    const anchor = article.querySelector(".chart-slot");
+    const dimension = JSON.stringify(spec.x), selected = JSON.stringify(value);
+    const y = JSON.stringify(spec.y);
+    insightMenu(anchor, String(spec.x) + ": " + String(value), "Explore this chart category using the original query.", [
+      {label:"Break down this point", prompt:"For the previous chart, break down the " + y +
+        " measure where " + dimension + " = " + selected +
+        " by a meaningful verified dimension. Preserve existing filters."},
+      {label:"Compare with other periods or groups", prompt:"Compare the previous chart result at " +
+        dimension + " = " + selected + " with relevant neighboring periods or groups, maintaining its metric definition."},
+      {label:"Show contributing records", prompt:"Show the underlying records contributing to the previous chart at " +
+        dimension + " = " + selected + ". Verify the source grain and joins; do not infer individual records from aggregates."}
+    ], runId);
+  });
+}
+
 function renderChartInto(slot, presentation, generation) {
   slot._echart?.dispose?.();
   slot.replaceChildren();
@@ -698,7 +875,7 @@ function setChartInspection(article, which) {
   dataPane.hidden = which !== "data";
 }
 
-function wireChartSection(article, presentation, generation) {
+function wireChartSection(article, presentation, generation, runId) {
   const section = article.querySelector(".chart-section");
   const slot = article.querySelector(".chart-slot");
   if (!section || !slot) return;
@@ -713,6 +890,7 @@ function wireChartSection(article, presentation, generation) {
   article._chartRerender = () => {
     const result = renderChartInto(slot, presentation, generation);
     article._echart = result.echarts;
+    attachChartInvestigations(article, presentation, runId);
   };
   [".sql-panel-pane", ".result-panel-pane"].forEach((selector) => {
     const header = article.querySelector(`${selector} > header`);
@@ -726,6 +904,7 @@ function wireChartSection(article, presentation, generation) {
     header.append(close);
     close.addEventListener("click", () => setChartInspection(article, null));
   });
+  attachChartInvestigations(article, presentation, runId);
   const closeMenu = () => { menu.hidden = true; more.setAttribute("aria-expanded", "false"); };
   more.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -920,6 +1099,13 @@ async function appendAssistant(body, elapsed, options = {}) {
   // Latency, attempts, token accounting, pipeline order and the verified
   // model context live in the inspector's run details — not on the message.
   const meta = fragment.querySelector(".response-meta");
+  const detail = document.createElement("details");
+  detail.className = "response-meta-disclosure";
+  const disclosureTitle = document.createElement("summary");
+  disclosureTitle.textContent = "Execution details";
+  detail.append(disclosureTitle);
+  meta.before(detail);
+  detail.append(meta);
   badges.forEach((value) => {
     const badge = document.createElement("span");
     badge.className = `badge${value === "FAILED" || value === "MODEL UNAVAILABLE" ? " error" : value === "RESTORED" ? " accent" : ""}`;
@@ -936,6 +1122,7 @@ async function appendAssistant(body, elapsed, options = {}) {
   fragment.querySelector(".response-note").textContent = responseMessage;
   const note = fragment.querySelector(".presentation-note");
   if (body.presentation?.note) { note.hidden = false; note.textContent = body.presentation.note; }
+  renderSemanticChips(fragment, body);
 
   // Distinct empty / anomaly states, grounded in the real response.
   if (accepted && generation.row_count === 0) {
@@ -964,6 +1151,8 @@ async function appendAssistant(body, elapsed, options = {}) {
       spec.chart_type.replaceAll("_", " "), ...(spec.warnings || []),
     ].join(" · ");
     fragment.querySelector(".sql-result-split").hidden = true;
+    fragment.querySelector(".sql-panel-pane").hidden = true;
+    fragment.querySelector(".result-panel-pane").hidden = true;
     const chartFoot = document.createElement("div");
     chartFoot.className = "chart-foot";
     const chartLegend = document.createElement("span");
@@ -1007,6 +1196,10 @@ async function appendAssistant(body, elapsed, options = {}) {
 
   const actions = fragment.querySelector(".answer-actions");
   if (accepted && !explanatory) {
+    if (body.run_id && !options.restored) actions.append(actionButton("Branch from here", "git", async () => {
+      try { await continueRun(body.run_id); $("#messageInput").placeholder = "Explore an alternative question from this point…"; }
+      catch (error) { showError(error.message); }
+    }));
     actions.append(
       actionButton("Check correctness", "shield", () => send("Check whether the previous SQL and result are correct.")),
       actionButton("Optimize", "zap", () => send("Optimize the previous SQL without changing its result.")),
@@ -1037,7 +1230,10 @@ async function appendAssistant(body, elapsed, options = {}) {
     const wrap = fragment.querySelector(".table-wrap");
     renderTable(wrap, generation.columns || [], generation.rows || []);
     const table = wrap.querySelector("table");
-    if (table) table.className = "result-grid";
+    if (table) {
+      table.className = "result-grid";
+      attachResultInvestigations(table, body);
+    }
     fragment.querySelector(".row-count").textContent = `${generation.row_count || 0} rows${generation.truncated ? " · truncated" : ""}`;
     wireSqlIdents(fragment, article);
     const versionPanel = fragment.querySelector(".versions-panel");
@@ -1052,7 +1248,7 @@ async function appendAssistant(body, elapsed, options = {}) {
   }
   hydrateIcons(article);
   $("#messages").append(fragment);
-  if (mode === "chart") wireChartSection(article, presentation, generation);
+  if (mode === "chart") wireChartSection(article, presentation, generation, body.run_id);
   if (accepted) { $("#composerChips")?.querySelectorAll(".chip").forEach((chip) => { chip.disabled = false; }); }
   article.scrollIntoView({ behavior: "smooth", block: "end" });
   if (!options.restored) updateInspector(body);
@@ -2228,6 +2424,9 @@ document.addEventListener("DOMContentLoaded", () => {
   target.querySelectorAll("[data-icon]").forEach((slot) => { slot.innerHTML = icon(slot.dataset.icon, 18); });
 });
 
+document.addEventListener("pointerdown", event => {
+  if (activeInsight && !activeInsight.contains(event.target)) dismissInsight();
+});
 $("#historySearch").addEventListener("input", renderHistory);
 $("#clearHistory").addEventListener("click", async () => {
   try {

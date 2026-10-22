@@ -10,7 +10,7 @@ import math
 import re
 from datetime import date, datetime
 from statistics import median
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from semantic_text2sql.models import ChartSpec, ChartType, StrictModel
 
@@ -87,7 +87,7 @@ class VisualizationError(ValueError):
 
 
 def parse_intent(question: str, *, has_previous: bool = False) -> VisualizationIntent:
-    match = next(
+    match: tuple[ChartType | None, str] | None = next(
         ((kind, pattern) for kind, pattern in CHART_PATTERNS if re.search(pattern, question, re.I)),
         None,
     )
@@ -470,12 +470,17 @@ def plan_chart(
     elif requested == "box" and pre_summarized:
         raw = []
         for index, row in enumerate(rows):
-            numbers = [float(row[columns.index(five_names[key])])
+            numbers = [float(row[columns.index(cast(str, five_names[key]))])
                        for key in ("min", "q1", "median", "q3", "max")]
             if numbers != sorted(numbers):
-                raise VisualizationError("Five-number summaries must be ordered min, Q1, median, Q3, max.")
+                raise VisualizationError(
+                    "Five-number summaries must be ordered min, Q1, median, Q3, max."
+                )
             group = str(row[columns.index(x)]) if x != y else f"Summary {index + 1}"
-            raw.append(dict(zip(("min", "q1", "median", "q3", "max"), numbers)) | {"group": group})
+            raw.append(
+                dict(zip(("min", "q1", "median", "q3", "max"), numbers, strict=True))
+                | {"group": group}
+            )
         if len({item["group"] for item in raw}) != len(raw):
             raise VisualizationError("Five-number summary group labels must be unique.")
         x, y = "group", "median"

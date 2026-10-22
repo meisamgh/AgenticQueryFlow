@@ -13,6 +13,7 @@ class Element {
   insertCell() { return this.createTHead(); }
   classList = { add() {} };
   setAttribute(name, value) { this[name] = value; }
+  addEventListener(name, callback) { this.listeners ||= {}; this.listeners[name] = callback; }
 }
 const context = vm.createContext({
   document: { createElement: () => new Element() },
@@ -38,6 +39,13 @@ test('ECharts adapter renders separate named series without inventing zeros', ()
   assert.equal(option.series.length, 2);
   assert.equal(option.series[0].stack, 'total');
   assert.equal(option.series[1].data[1], null);
+});
+test('ECharts uses the verified histogram bin column', () => {
+  const spec = {chart_type: 'histogram', x: 'price_bucket', y: 'count', data: [
+    {price_bucket: 10, count: 2}, {price_bucket: 20, count: 3},
+  ]};
+  const option = context.window.QueryflowECharts.buildOption(spec);
+  assert.deepEqual([...option.xAxis.data], ['10', '20']);
 });
 
 vm.runInContext(source.slice(source.indexOf('function renderTable('), source.indexOf('function downloadCsv(')), context);
@@ -121,9 +129,50 @@ vm.runInContext(source.slice(
 context.EXPLANATION_OPERATIONS_UI = new Set([
   'EXPLAIN', 'EXPLAIN_SQL', 'EXPLAIN_RESULT', 'EXPLAIN_INTERPRETATION', 'EXPLAIN_CONTEXT', 'EXPLAIN_FAILURE',
 ]);
-context.EXPLANATION_OPERATIONS_UI = new Set([
-  'EXPLAIN', 'EXPLAIN_SQL', 'EXPLAIN_RESULT', 'EXPLAIN_INTERPRETATION', 'EXPLAIN_CONTEXT', 'EXPLAIN_FAILURE',
-]);
+test('query understanding chips show only fields from the confirmed semantic contract', () => {
+  const strip = new Element();
+  strip.hidden = true;
+  context.renderSemanticChips({querySelector: () => strip}, {
+    state: { semantic_contract: {
+      measures: ['net_revenue'], grain: ['month'],
+      filters: [{column:'country', operator:'=', value:'DE'}],
+    } },
+  });
+  assert.equal(strip.hidden, false);
+  assert.equal(strip.children.length, 4); // eyebrow + 3 chips
+  assert.equal(strip.children[1].children[0].textContent, 'Metric');
+  assert.equal(strip.children[1].children[1].textContent, 'net_revenue');
+  assert.equal(strip.children[3].children[0].textContent, 'Filter');
+  const empty = new Element(); empty.hidden = true;
+  context.renderSemanticChips({querySelector: () => empty}, {state:null});
+  assert.equal(empty.hidden, true);
+});
+test('chart adapter exposes click events for investigate actions', () => {
+  let handlerName = null, selectedHandler = null;
+  const fakeChart = {
+    setOption() {}, resize() {}, dispose() {},
+    on(name, handler) { handlerName = name; selectedHandler = handler; },
+  };
+  context.window.echarts = {init: () => fakeChart};
+  context.window.addEventListener = () => {};
+  context.window.removeEventListener = () => {};
+  const spec = {chart_type: 'line', x: 'Month', y: 'Revenue',
+    data: [{Month:'Jan', Revenue:4}, {Month:'Feb', Revenue:5}]};
+  const mounted = context.window.QueryflowECharts.render(new Element(), {chart_spec:spec});
+  const onClick = () => {};
+  mounted.onSelect(onClick);
+  assert.equal(handlerName, 'click');
+  assert.equal(selectedHandler, onClick);
+  mounted.dispose();
+});
+test('historical investigation restores its source run before sending', async () => {
+  const calls = [];
+  context.state = {activeRunId: 'latest'};
+  context.continueRun = async id => { calls.push('restore:' + id); context.state.activeRunId = id; };
+  context.send = async message => { calls.push('send:' + message); };
+  await context.sendFromAnswer('earlier', 'Compare these customers');
+  assert.deepEqual(calls, ['restore:earlier', 'send:Compare these customers']);
+});
 test('explicit visualization language is detected; ordinary requests are not', () => {
   assert.equal(context.vizRequested('Plot monthly revenue as a line chart'), true);
   assert.equal(context.vizRequested('make it a bar chart'), true);
