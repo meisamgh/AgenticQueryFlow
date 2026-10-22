@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+import os
+from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 
@@ -666,19 +667,38 @@ class GenerateRequest(StrictModel):
 
 
 class ChatRequest(StrictModel):
+    model_config = ConfigDict(extra="forbid", validate_default=True)
     session_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     message: str = Field(min_length=1, max_length=4_000)
     parent_run_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     evidence: str | None = Field(default=None, max_length=8_000)
-    provider: ModelProvider = "agentrouter"
-    model: str = Field(default=DEFAULT_MODEL, min_length=1, max_length=200)
-    context_provider: ModelProvider | None = None
-    context_model: str | None = Field(default=None, min_length=1, max_length=200)
+    provider: ModelProvider = Field(
+        default_factory=lambda: cast(
+            ModelProvider, os.environ.get("TEXT2SQL_SQL_PROVIDER", "agentrouter")
+        )
+    )
+    model: str = Field(
+        default_factory=lambda: os.environ.get("TEXT2SQL_SQL_MODEL", DEFAULT_MODEL),
+        min_length=1, max_length=200,
+    )
+    context_provider: ModelProvider | None = Field(
+        default_factory=lambda: cast(
+            ModelProvider | None, os.environ.get("TEXT2SQL_CONTEXT_PROVIDER") or None
+        )
+    )
+    context_model: str | None = Field(
+        default_factory=lambda: os.environ.get("TEXT2SQL_CONTEXT_MODEL") or None,
+        min_length=1, max_length=200,
+    )
     execute: bool = True
     max_rows: int = Field(default=100, ge=1, le=500)
     visualization: bool | None = None
-    context_mode: Literal["model1", "retrieval"] = "retrieval"
+    context_mode: Literal["model1", "retrieval"] = Field(
+        default_factory=lambda: cast(
+            Literal["model1", "retrieval"], os.environ.get("TEXT2SQL_CONTEXT_MODE", "retrieval")
+        )
+    )
     feedback_category: (
         Literal[
             "wrong_result",

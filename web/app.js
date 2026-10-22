@@ -3,13 +3,13 @@ const sessionId = localStorage.getItem("queryRoomSession") || crypto.randomUUID(
 localStorage.setItem("queryRoomSession", sessionId);
 document.addEventListener("DOMContentLoaded", () => {
   const el = $("#sessionId");
-  if (el) el.textContent = sessionId;
+  if (el) { el.textContent = sessionId; el.title = `Conversation session: ${sessionId}`; }
 });
 
 const state = {
   busy: false, jobId: null, cancelled: false, currentQuestion: "", ready: false,
   lastBody: null, history: [], saved: [], glossaryByDb: {}, schemaRequest: 0,
-  activeRunId: null, diffCache: new Map(),
+  activeRunId: null, diffCache: new Map(), modelConfig: null,
   restorePending: false,
 };
 let voiceInput = null;
@@ -20,7 +20,6 @@ import("/static/voice.js?v=voice-1").then(async ({VoiceInput}) => {
     onBusy: busy => { $("#sendButton").disabled = busy || state.busy || !state.ready; },
   });
   await voiceInput.initialize();
-  $("#voiceButton").hidden = false;
 }).catch(() => { $("#voiceStatus").textContent = "Voice input could not load. You can still type a question."; });
 
 const recentStorageKey = "queryRoomRecentQueries";
@@ -78,16 +77,19 @@ async function initialize() {
       if (match) option.dataset.dialect = match.dialect;
     });
     await Promise.all([loadDatabaseSchema(), refreshHistory(), loadGlossary($("#databaseSelect").value)]);
-    const models = await api(`/api/models?refresh=${Date.now()}`, { cache: "no-store" });
-    const preferredModel = models.find((item) => item.configured && item.provider === "codecraft")
-      || models.find((item) => item.configured && item.provider === "justdowork")
-      || models.find((item) => item.configured);
-    const preferred = preferredModel && `${preferredModel.provider}|${preferredModel.model}`;
-    fillContextSelect(models);
-    fillSelect("#sqlModelSelect", models, (item) => `${item.provider}|${item.model}`, modelLabel, preferred);
-    state.ready = !!$("#databaseSelect").value && !!preferredModel;
+    const [models, uiConfig] = await Promise.all([
+      api(`/api/models?refresh=${Date.now()}`, { cache: "no-store" }),
+      api("/api/ui-config", { cache: "no-store" }),
+    ]);
+    const configuredSql = models.find(item => item.provider === uiConfig.sql_provider
+      && item.model === uiConfig.sql_model && item.configured);
+    const configuredContext = uiConfig.context_mode !== "model1" || models.some(item =>
+      item.provider === uiConfig.context_provider && item.model === uiConfig.context_model && item.configured);
+    state.modelConfig = uiConfig;
+    state.ready = !!$("#databaseSelect").value && !!configuredSql && configuredContext;
     $("#sendButton").disabled = !state.ready || !!voiceInput?.busy;
-    if (!preferredModel) showError("No model can serve queries right now. Hover an entry in the model list to see why.");
+    if (!configuredSql) showError("The SQL model configured in .env is unavailable. Check TEXT2SQL_SQL_PROVIDER and TEXT2SQL_SQL_MODEL.");
+    else if (!configuredContext) showError("The context model configured in .env is unavailable. Check TEXT2SQL_CONTEXT_PROVIDER and TEXT2SQL_CONTEXT_MODEL.");
     renderSaved();
   } catch (error) {
     setHealth(false);
@@ -100,114 +102,28 @@ function setHealth(online) {
   pill.classList.toggle("online", online === true);
   pill.classList.toggle("offline", online === false);
   pill.lastChild.textContent = online === false ? " Offline" : " Online";
-  $("#connectionStatus").textContent = online === false ? "Connection issue" : "API online";
 }
 
 let schemaRequest = 0;
 let browserTables = [];
 let browserRelationships = [];
-let selectedExploreTable = null;
-
-function setView(view, tableName = null) {
-  const explore = view === "explore";
-  $("#exploreView").hidden = !explore;
-  document.querySelectorAll(".workspace-only").forEach(element => { element.hidden = explore; });
-  document.querySelectorAll(".side-nav a[data-view]").forEach(link => {
-    link.classList.toggle("active", link.dataset.view === view);
-  });
-  if (tableName) {
-    selectedExploreTable = tableName;
-    $("#exploreSearch").value = "";
-  }
-  if (explore) renderExplore();
-  $("#mainColumn").scrollTo({ top: 0, behavior: "instant" });
-}
-
-function renderExplore() {
-  const container = $("#exploreTables");
-  const relations = $("#exploreRelationships");
-  container.replaceChildren();
-  relations.replaceChildren();
-  const dbId = $("#databaseSelect").value;
-  const term = $("#exploreSearch").value.trim().toLowerCase();
-  const tables = browserTables.filter(table => table.name.toLowerCase().includes(term)
-    || table.columns.some(column => column.name.toLowerCase().includes(term)));
-  $("#exploreTitle").textContent = dbId ? `Explore ${dbId}` : "Explore database";
-  $("#exploreSummary").textContent = dbId
-    ? `${browserTables.length} tables · ${browserRelationships.length} relationships${term ? ` · ${tables.length} matching tables` : ""}`
-    : "Select a configured database in Connections to inspect its schema.";
-  if (!tables.length) {
-    const empty = document.createElement("p");
-    empty.className = "inspector-empty";
-    empty.textContent = term ? "No tables or columns match this search." : "No tables are available.";
-    container.append(empty);
-  }
-  tables.forEach(table => {
-    const card = document.createElement("section");
-    card.className = "explore-table-card";
-    if (table.name === selectedExploreTable) card.classList.add("selected");
-    const header = document.createElement("header");
-    const name = document.createElement("h3");
-    name.textContent = table.name;
-    const count = document.createElement("span");
-    count.textContent = `${table.columns.length} columns`;
-    header.append(name, count);
-    const columns = document.createElement("ul");
-    table.columns.forEach(column => {
-      const row = document.createElement("li");
-      const label = document.createElement("strong");
-      label.textContent = column.name;
-      const meta = document.createElement("span");
-      meta.textContent = `${column.type}${column.primary_key ? " · Primary key" : ""}`;
-      row.append(label, meta);
-      columns.append(row);
-    });
-    card.append(header, columns);
-    container.append(card);
-  });
-  const visibleTables = new Set(tables.map(table => table.name));
-  const matchingRelations = browserRelationships.filter(item =>
-    !term || visibleTables.has(item.from_table) || visibleTables.has(item.to_table));
-  if (!matchingRelations.length) {
-    const empty = document.createElement("p");
-    empty.className = "inspector-empty";
-    empty.textContent = term
-      ? "No relationships connect the matching tables. Clear the search to see all relationships."
-      : "No declared or profiled relationships are available for this database.";
-    relations.append(empty);
-  }
-  matchingRelations.forEach(item => {
-    const row = document.createElement("div");
-    row.className = "explore-relationship";
-    const path = document.createElement("strong");
-    path.textContent = `${item.from_table}.${item.from_column} → ${item.to_table}.${item.to_column}`;
-    const source = document.createElement("span");
-    source.textContent = item.source === "declared_foreign_key" ? "Declared foreign key"
-      : `Profile inference${item.cardinality ? ` · ${item.cardinality.replaceAll("_", " ").toLowerCase()}` : ""}`;
-    row.append(path, source);
-    relations.append(row);
-  });
-}
 
 async function loadDatabaseSchema() {
   const request = ++schemaRequest;
   const dbId = $("#databaseSelect").value;
   browserTables = [];
   browserRelationships = [];
-  selectedExploreTable = null;
-  $("#exploreSearch").value = "";
-  if (!dbId) { renderExplore(); renderInspectorSchema(); return; }
+  if (!dbId) { renderInspectorSchema(); return; }
   try {
     const schema = await api(`/api/databases/${encodeURIComponent(dbId)}/schema`);
     if (request !== schemaRequest) return;
     browserTables = schema.tables || [];
     browserRelationships = schema.relationships || [];
-    renderExplore();
     renderInspectorSchema();
   } catch (error) {
     if (request !== schemaRequest) return;
-    $("#exploreSummary").textContent = `Could not load tables: ${error.message}`;
-    renderExplore();
+    renderInspectorSchema();
+    console.warn(`Could not load database schema: ${error.message}`);
   }
 }
 
@@ -232,29 +148,6 @@ function fillSelect(selector, items, valueKey, labelKey, preferred) {
     option.value = "";
     option.textContent = "No configured databases";
     option.disabled = true;
-    select.append(option);
-  }
-}
-
-function modelLabel(item) {
-  const label = item.model;
-  return item.configured ? label : `${label} — unavailable`;
-}
-
-function fillContextSelect(models) {
-  const select = $("#contextModelSelect");
-  select.replaceChildren();
-  const retrieval = document.createElement("option");
-  retrieval.value = "retrieval";
-  retrieval.textContent = "Hybrid retrieval only";
-  retrieval.selected = true;
-  select.append(retrieval);
-  for (const item of models) {
-    const option = document.createElement("option");
-    option.value = `${item.provider}|${item.model}`;
-    option.textContent = modelLabel(item);
-    option.disabled = item.configured === false;
-    if (item.unavailable_reason) option.title = item.unavailable_reason;
     select.append(option);
   }
 }
@@ -444,7 +337,7 @@ const progressLabels = {
   completed: "Finished",
 };
 
-function appendProgress(provider, model, contextMode) {
+function appendProgress(contextMode) {
   $("#emptyState").hidden = true;
   const fragment = $("#progressTemplate").content.cloneNode(true);
   const article = fragment.querySelector("article");
@@ -457,10 +350,9 @@ function appendProgress(provider, model, contextMode) {
     step.textContent = label;
     tracker.append(step);
   });
-  article.querySelector(".progress-detail").textContent = `${provider} · ${model}`;
+  article.querySelector(".progress-detail").textContent = "Using the configured query pipeline";
   hydrateIcons(article);
   $("#messages").append(article);
-  article.scrollIntoView({ behavior: "smooth", block: "end" });
   return article;
 }
 
@@ -528,7 +420,6 @@ function updatePipeline(progress, currentStage, jobStatus, events = [], response
 
 async function send(message, feedbackCategory = null) {
   if (state.busy || voiceInput?.busy || !message.trim()) return;
-  setView("workspace");
   if (!state.ready) {
     showError("A configured database and SQL model are required before asking a question.");
     return;
@@ -536,14 +427,11 @@ async function send(message, feedbackCategory = null) {
   state.busy = true;
   voiceInput?.setQueryBusy(true);
   $("#sendButton").disabled = true;
-  ["#databaseSelect", "#sqlModelSelect", "#contextModelSelect", "#resetButton"].forEach(id => { $(id).disabled = true; });
+  ["#databaseSelect", "#resetButton"].forEach(id => { $(id).disabled = true; });
   appendUser(message.trim());
-  const [provider, model] = $("#sqlModelSelect").value.split("|");
-  const contextSelection = $("#contextModelSelect").value;
-  const contextMode = contextSelection === "retrieval" ? "retrieval" : "model1";
-  const [contextProvider, contextModel] = contextMode === "model1" ? contextSelection.split("|") : [null, null];
+  const contextMode = state.modelConfig?.context_mode || "retrieval";
   const started = performance.now();
-  const progress = appendProgress(provider, model, contextMode);
+  const progress = appendProgress(contextMode);
   state.cancelled = false;
   state.pendingVizRequest = vizRequested(message);
   $("#cancelButton").hidden = false;
@@ -556,11 +444,6 @@ async function send(message, feedbackCategory = null) {
         db_id: $("#databaseSelect").value,
         message: message.trim(),
         parent_run_id: state.activeRunId,
-        provider,
-        model,
-        context_provider: contextMode === "model1" ? contextProvider : null,
-        context_model: contextMode === "model1" ? contextModel : null,
-        context_mode: contextMode,
         execute: true,
         max_rows: 100,
         feedback_category: feedbackCategory,
@@ -581,7 +464,7 @@ async function send(message, feedbackCategory = null) {
     voiceInput?.setQueryBusy(false);
     state.jobId = null;
     $("#sendButton").disabled = !state.ready;
-    ["#databaseSelect", "#sqlModelSelect", "#contextModelSelect", "#resetButton"].forEach(id => { $(id).disabled = false; });
+    ["#databaseSelect", "#resetButton"].forEach(id => { $(id).disabled = false; });
     $("#cancelButton").hidden = true;
     $("#messageInput").focus();
   }
@@ -858,22 +741,63 @@ function renderChartInto(slot, presentation, generation) {
   slot.classList.remove("chart-slot-ec");
   const note = document.createElement("p");
   note.className = "chart-note";
-  note.textContent = "Interactive charts are unavailable. SQL and the exact result table remain below.";
+  note.textContent = "Interactive charts are unavailable. SQL and the exact result table remain in their tabs.";
   slot.append(note);
   return { echarts: null };
 }
 
-/* Independent SQL/data inspection for chart-first responses: at most one
-   panel is open at a time, each closable without touching the chart. */
-function setChartInspection(article, which) {
+/* Response views are local to one message. They never call the query API. */
+let responseTabSequence = 0;
+function setResponseTab(article, view) {
+  const tabs = article.querySelector(".response-tabs");
+  const answerPane = article.querySelector(".answer-tab-panel");
   const split = article.querySelector(".sql-result-split");
   const sqlPane = article.querySelector(".sql-panel-pane");
   const dataPane = article.querySelector(".result-panel-pane");
-  if (!split || !sqlPane || !dataPane) return;
-  split.classList.add("chart-inspect");
-  split.hidden = which === null;
-  sqlPane.hidden = which !== "sql";
-  dataPane.hidden = which !== "data";
+  if (!tabs || tabs.hidden || !answerPane || !split || !sqlPane || !dataPane) return;
+  const button = tabs.querySelector(`[data-response-tab="${view}"]`);
+  if (!button || button.disabled) return;
+  article.dataset.activeResponseTab = view;
+  answerPane.hidden = view !== "answer";
+  split.hidden = view === "answer";
+  sqlPane.hidden = view !== "sql";
+  dataPane.hidden = view !== "data";
+  const versions = article.querySelector(".versions-panel");
+  if (versions) versions.hidden = view !== "sql" || versions.dataset.available !== "true";
+  tabs.querySelectorAll("[data-response-tab]").forEach((tab) => {
+    const active = tab === button;
+    tab.setAttribute("aria-selected", String(active));
+    tab.tabIndex = active ? 0 : -1;
+  });
+  if (view === "answer") window.requestAnimationFrame?.(() => article._echart?.resize?.());
+}
+
+function wireResponseTabs(article, available = {sql: true, data: true}) {
+  const tabs = article.querySelector(".response-tabs");
+  if (!tabs) return;
+  tabs.hidden = false;
+  const group = `response-tabs-${++responseTabSequence}`;
+  tabs.querySelectorAll("[data-response-tab]").forEach((tab) => {
+    const view = tab.dataset.responseTab;
+    tab.id = `${group}-${view}`;
+    tab.disabled = view !== "answer" && !available[view];
+    const panel = article.querySelector(view === "answer" ? ".answer-tab-panel" : `.${view === "sql" ? "sql-panel-pane" : "result-panel-pane"}`);
+    if (panel) {
+      panel.id = `${group}-${view}-panel`;
+      panel.setAttribute("aria-labelledby", tab.id);
+      tab.setAttribute("aria-controls", panel.id);
+    }
+    tab.addEventListener("click", () => setResponseTab(article, view));
+    tab.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      const enabled = [...tabs.querySelectorAll("[data-response-tab]:not(:disabled)")];
+      const next = enabled[(enabled.indexOf(tab) + (event.key === "ArrowRight" ? 1 : enabled.length - 1)) % enabled.length];
+      setResponseTab(article, next.dataset.responseTab);
+      next.focus();
+    });
+  });
+  setResponseTab(article, "answer");
 }
 
 function wireChartSection(article, presentation, generation, runId) {
@@ -883,29 +807,144 @@ function wireChartSection(article, presentation, generation, runId) {
   const kinds = section.querySelector(".chart-kinds");
   const more = section.querySelector(".chart-more");
   const menu = section.querySelector(".chart-menu");
+  const explorer = window.QueryflowChartExplorer;
+  const original = presentation.chart_spec;
+  const panel = section.querySelector(".chart-explorer");
+  const options = explorer?.filters(original);
+  const settingKey = runId ? `queryflow-chart-${runId}` : null;
+  let stored = null;
+  try { stored = settingKey ? JSON.parse(sessionStorage.getItem(settingKey) || "null") : null; }
+  catch { stored = null; }
+  const settings = stored && typeof stored === "object" ? stored : {};
+  const chartPres = { ...presentation, chart_spec: original };
+  function saveSettings() {
+    if (settingKey) {
+      try { sessionStorage.setItem(settingKey, JSON.stringify(settings)); } catch { /* private browsing */ }
+    }
+  }
+  function fillFilter(selector, values, emptyLabel = null) {
+    const select = section.querySelector(selector);
+    select.replaceChildren();
+    if (emptyLabel) {
+      const empty = document.createElement("option");
+      empty.value = "";
+      empty.textContent = emptyLabel;
+      select.append(empty);
+    }
+    values.forEach(value => {
+      const option = document.createElement("option");
+      option.value = String(value);
+      option.textContent = String(value);
+      select.append(option);
+    });
+  }
+  function renderCurrent() {
+    const next = explorer?.apply(original, settings) || original;
+    if (!next.data.length) {
+      toast("No result rows match these display filters.");
+      return;
+    }
+    if (explorer?.isTime(next) && settings.zoom && next.data.length > 25) {
+      next.zoom_start = settings.zoom.start;
+      next.zoom_end = settings.zoom.end;
+    }
+    chartPres.chart_spec = next;
+    section.querySelector(".chart-sub").textContent = next.chart_type.replaceAll("_", " ");
+    article._echart = renderChartInto(slot, chartPres, generation).echarts;
+    article._echart?.onZoom?.(range => {
+      settings.zoom = range;
+      saveSettings();
+    });
+    attachChartInvestigations(article, chartPres, runId);
+    const zoomActions = section.querySelector(".chart-zoom-actions");
+    zoomActions.hidden = !explorer?.isTime(next) || new Set(next.data.map(row => String(row[next.x]))).size <= 25;
+    const suggestions = section.querySelector(".chart-suggestions");
+    suggestions.replaceChildren();
+    if (explorer) {
+      const label = document.createElement("span");
+      label.textContent = "Suggested charts";
+      suggestions.append(label);
+      explorer.choices(next).forEach(type => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "chart-kind";
+        button.textContent = type.replaceAll("_", " ");
+        button.classList.toggle("active", type === next.chart_type);
+        button.setAttribute("aria-pressed", String(type === next.chart_type));
+        button.addEventListener("click", () => {
+          settings.chartType = type;
+          saveSettings();
+          renderCurrent();
+        });
+        suggestions.append(button);
+      });
+    }
+    const active = [settings.categories?.length ? settings.categories.join(",") : null,
+      settings.metric && settings.metric !== original.y ? settings.metric : null,
+      settings.start, settings.end, settings.topN].filter(Boolean).length;
+    const count = section.querySelector(".chart-filter-count");
+    count.hidden = active === 0;
+    count.textContent = active ? String(active) : "";
+  }
   article._echart = null;
   article._chartType = presentation.chart_type;
   kinds.hidden = true;
-  article._echart = (renderChartInto(slot, presentation, generation)).echarts;
+  if (explorer && options && panel) {
+    panel.hidden = false;
+    fillFilter(".chart-category-filter", options.categories);
+    fillFilter(".chart-metric-filter", options.metric);
+    fillFilter(".chart-start-filter", options.dates, "First date");
+    fillFilter(".chart-end-filter", options.dates, "Last date");
+    section.querySelector(".chart-category-control").hidden = !options.categories.length;
+    section.querySelector(".chart-metric-control").hidden = options.metric.length < 2;
+    section.querySelector(".chart-start-control").hidden = !options.dates.length;
+    section.querySelector(".chart-end-control").hidden = !options.dates.length;
+    section.querySelector(".chart-top-control").hidden = explorer.isTime(original) || Boolean(original.series)
+      || new Set(original.data.map(row => String(row[original.x]))).size !== original.data.length;
+    const inputs = { metric: ".chart-metric-filter",
+      start: ".chart-start-filter", end: ".chart-end-filter", topN: ".chart-top-filter" };
+    const syncInputs = () => Object.entries(inputs).forEach(([key, selector]) => {
+      const select = section.querySelector(selector);
+      select.value = settings[key] ?? (key === "metric" ? original.y : "");
+      if (!select.value && key === "metric") select.value = original.y;
+    });
+    const syncCategories = () => {
+      const selected = new Set(settings.categories || []);
+      [...section.querySelector(".chart-category-filter").options].forEach(option => {
+        option.selected = selected.has(option.value);
+      });
+    };
+    const reset = () => {
+      Object.keys(settings).forEach(key => delete settings[key]);
+      saveSettings();
+      syncInputs();
+      syncCategories();
+      renderCurrent();
+    };
+    section.querySelector(".chart-apply-filter").addEventListener("click", () => {
+      Object.entries(inputs).forEach(([key, selector]) => {
+        const value = section.querySelector(selector).value;
+        settings[key] = key === "topN" ? (value ? Number(value) : null) : value || null;
+      });
+      settings.categories = [...section.querySelector(".chart-category-filter").selectedOptions]
+        .map(option => option.value);
+      delete settings.zoom;
+      saveSettings();
+      renderCurrent();
+    });
+    section.querySelector(".chart-reset-filter").addEventListener("click", reset);
+    section.querySelector(".chart-clear-filter").addEventListener("click", reset);
+    section.querySelector(".chart-reset-zoom").addEventListener("click", () => {
+      delete settings.zoom;
+      saveSettings();
+      article._echart?.resetZoom?.();
+    });
+    syncInputs();
+    syncCategories();
+  }
+  renderCurrent();
   /* Theme switches recolor the shared token palette, so live charts repaint. */
-  article._chartRerender = () => {
-    const result = renderChartInto(slot, presentation, generation);
-    article._echart = result.echarts;
-    attachChartInvestigations(article, presentation, runId);
-  };
-  [".sql-panel-pane", ".result-panel-pane"].forEach((selector) => {
-    const header = article.querySelector(`${selector} > header`);
-    if (!header) return;
-    const close = document.createElement("button");
-    close.type = "button";
-    close.className = "icon-button chart-inspect-close";
-    close.title = "Close panel";
-    close.setAttribute("aria-label", "Close panel");
-    close.innerHTML = icon("x", 14);
-    header.append(close);
-    close.addEventListener("click", () => setChartInspection(article, null));
-  });
-  attachChartInvestigations(article, presentation, runId);
+  article._chartRerender = renderCurrent;
   const closeMenu = () => { menu.hidden = true; more.setAttribute("aria-expanded", "false"); };
   more.addEventListener("click", (event) => {
     event.stopPropagation();
@@ -919,15 +958,15 @@ function wireChartSection(article, presentation, generation, runId) {
       closeMenu();
       const action = item.dataset.chartAction;
       if (action === "view-sql") {
-        setChartInspection(article, "sql");
+        setResponseTab(article, "sql");
       } else if (action === "view-data") {
-        setChartInspection(article, "data");
+        setResponseTab(article, "data");
       } else if (action === "download") {
         exportChartPng(article);
       } else if (action === "expand") {
-        openChartFullscreen(article, presentation, generation);
+        openChartFullscreen(article, chartPres, generation);
       } else if (action === "inspect") {
-        revealInspector();
+        revealInspector("validation");
         const validation = $("#validationSection");
         if (validation) { validation.open = true; validation.scrollIntoView({ behavior: "smooth", block: "start" }); }
       }
@@ -1005,9 +1044,9 @@ function closeChartFullscreen() {
   });
 }
 
-function revealInspector() {
-  if (window.innerWidth <= 1020) document.body.classList.add("inspector-open");
-  else $("#appShell").classList.remove("inspector-hidden");
+function revealInspector(tab = "understanding") {
+  selectInspectorTab(tab);
+  setInspectorOpen(true);
 }
 
 function mergeRunChanges(changes) {
@@ -1077,46 +1116,45 @@ function recoveryTimelineSteps(recovery, events = []) {
   return steps;
 }
 
+function renderAnswerPreview(fragment, body, mode) {
+  const preview = fragment.querySelector(".answer-preview");
+  const generation = body.generation || {};
+  const columns = generation.columns || [];
+  const rows = generation.rows || [];
+  if (!preview || mode === "chart" || mode === "explanation" || body.clarification_required
+      || !generation.accepted || !columns.length || !rows.length) return;
+  preview.hidden = false;
+  if (columns.length === 1 && rows.length === 1) {
+    preview.classList.add("answer-kpi");
+    const label = document.createElement("span");
+    label.textContent = columns[0];
+    const value = document.createElement("strong");
+    value.textContent = rows[0][0] == null ? "NULL" : String(rows[0][0]);
+    preview.append(label, value);
+    return;
+  }
+  preview.classList.add("answer-table-preview");
+  const heading = document.createElement("div");
+  heading.className = "answer-preview-heading";
+  heading.textContent = `Result preview · ${Math.min(rows.length, 5)} of ${generation.row_count ?? rows.length} rows`;
+  const wrap = document.createElement("div");
+  wrap.className = "table-wrap";
+  renderTable(wrap, columns, rows.slice(0, 5));
+  const table = wrap.querySelector("table");
+  if (table) {
+    table.className = "result-grid";
+    attachResultInvestigations(table, body);
+  }
+  preview.append(heading, wrap);
+}
+
 async function appendAssistant(body, elapsed, options = {}) {
   const fragment = $("#assistantTemplate").content.cloneNode(true);
   const article = fragment.querySelector("article");
   const generation = body.generation || {};
   const accepted = generation.accepted === true;
   const attempts = generation.attempts || [];
-  const usage = body.token_usage || generation.token_usage || {};
-  const tokenTotal = usage.input_tokens == null && usage.output_tokens == null
-    ? null
-    : (usage.input_tokens || 0) + (usage.output_tokens || 0);
-  const timings = body.timings_ms || {};
-  const optimization = generation.optimization || null;
   const { explanatory, modelUnavailable, status } = responseStatus(body, attempts);
-  const badges = [];
-  if (status === "FAILED" || modelUnavailable) badges.push(status === "FAILED" ? "FAILED" : "MODEL UNAVAILABLE");
-  if (optimization
-    && (optimization.status === "changed_result" || optimization.status === "equivalence_unproven")) {
-    badges.push("OPTIMIZATION SKIPPED");
-  }
-  if (options.restored) badges.push(`SAVED ${new Date(options.run.created_at * 1000).toLocaleString()}`);
-  // Latency, attempts, token accounting, pipeline order and the verified
-  // model context live in the inspector's run details — not on the message.
-  const meta = fragment.querySelector(".response-meta");
-  const detail = document.createElement("details");
-  detail.className = "response-meta-disclosure";
-  const disclosureTitle = document.createElement("summary");
-  disclosureTitle.textContent = "Execution details";
-  detail.append(disclosureTitle);
-  meta.before(detail);
-  detail.append(meta);
-  badges.forEach((value) => {
-    const badge = document.createElement("span");
-    badge.className = `badge${value === "FAILED" || value === "MODEL UNAVAILABLE" ? " error" : value === "RESTORED" ? " accent" : ""}`;
-    badge.textContent = value;
-    meta.append(badge);
-  });
-  if (badges.length) meta.hidden = false;
-  fragment.querySelector(".response-heading h3").textContent = modelUnavailable ? "Model unavailable"
-    : body.operation === "VISUALIZE" ? "Visualization"
-    : explanatory ? "Explanation" : accepted ? "Answer" : "Query issue";
   updateStatusPill(fragment, body, accepted, status);
 
   const responseMessage = body.explanation || body.presentation?.summary || body.message || "";
@@ -1133,8 +1171,7 @@ async function appendAssistant(body, elapsed, options = {}) {
     renderCallout(fragment, "error", "alert", body.human_review?.reason || body.message || "The query could not be completed.");
   }
 
-  // Intent-adaptive rendering: ordinary requests show SQL + data (Mode A),
-  // explicit visualization requests show a chart-first response (Mode B).
+  // The Answer tab adapts to intent; SQL and Data use the same executed response.
   const viz = options.viz ?? state.pendingVizRequest === true;
   state.pendingVizRequest = null;
   const mode = presentationMode(body, { viz });
@@ -1143,6 +1180,7 @@ async function appendAssistant(body, elapsed, options = {}) {
   const chartDataComplete = body.presentation_state?.data_complete !== false
     && !generation.truncated
     && (!(presentation?.chart_spec) || presentation.chart_spec.source_row_count === 0
+      || (presentation.chart_spec.transformation && presentation.chart_spec.transformation !== "none")
       || presentation.chart_spec.data.length >= Math.min(presentation.chart_spec.source_row_count, 500));
   if (mode === "chart" && chartDataComplete) {
     chartSection.hidden = false;
@@ -1151,9 +1189,6 @@ async function appendAssistant(body, elapsed, options = {}) {
     fragment.querySelector(".chart-sub").textContent = [
       spec.chart_type.replaceAll("_", " "), ...(spec.warnings || []),
     ].join(" · ");
-    fragment.querySelector(".sql-result-split").hidden = true;
-    fragment.querySelector(".sql-panel-pane").hidden = true;
-    fragment.querySelector(".result-panel-pane").hidden = true;
     const chartFoot = document.createElement("div");
     chartFoot.className = "chart-foot";
     const chartLegend = document.createElement("span");
@@ -1174,10 +1209,11 @@ async function appendAssistant(body, elapsed, options = {}) {
   } else if (mode === "chart_unavailable") {
     chartSection.remove();
     renderCallout(fragment, "warn", "alert", presentation?.chart_reason
-      || body.message || "This result cannot support the requested chart. SQL and data are shown below.");
+      || body.message || "This result cannot support the requested chart. SQL and data are available in their tabs.");
   } else {
     chartSection.remove();
   }
+  renderAnswerPreview(fragment, body, mode === "chart" && !chartDataComplete ? "sql" : mode);
 
   const sqlNotAvailable = explanatory || modelUnavailable || body.clarification_required;
   const sqlText = generation.sql || "";
@@ -1228,7 +1264,7 @@ async function appendAssistant(body, elapsed, options = {}) {
     fragment.querySelector(".csv-button").addEventListener("click", () => {
       downloadCsv(generation.columns || [], generation.rows || []);
     });
-    const wrap = fragment.querySelector(".table-wrap");
+    const wrap = fragment.querySelector(".result-panel-pane .table-wrap");
     renderTable(wrap, generation.columns || [], generation.rows || []);
     const table = wrap.querySelector("table");
     if (table) {
@@ -1241,6 +1277,7 @@ async function appendAssistant(body, elapsed, options = {}) {
     const previous = latestAcceptedPreviousSql(body, options.restored ? options.run : null);
     if (sqlText && previous) {
       versionPanel.hidden = false;
+      versionPanel.dataset.available = "true";
       versionPanel.querySelector("summary").onclick = () => { void loadVersionPanel(versionPanel, previous, sqlText); };
     }
   }
@@ -1250,8 +1287,9 @@ async function appendAssistant(body, elapsed, options = {}) {
   hydrateIcons(article);
   $("#messages").append(fragment);
   if (mode === "chart") wireChartSection(article, presentation, generation, body.run_id);
-  if (accepted) { $("#composerChips")?.querySelectorAll(".chip").forEach((chip) => { chip.disabled = false; }); }
-  article.scrollIntoView({ behavior: "smooth", block: "end" });
+  if (accepted && !explanatory && !body.clarification_required) {
+    wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length)});
+  }
   if (!options.restored) updateInspector(body);
   return article;
 }
@@ -1454,24 +1492,93 @@ function updateInspector(body) {
   if (!rows.length) {
     understanding.append(emptyNote("Run a query to see how it was understood."));
   } else {
-    rows.forEach(([key, value]) => {
-      const row = document.createElement("div");
-      row.className = "uq-row";
-      const k = document.createElement("span");
-      k.className = "k";
-      k.textContent = key;
-      const v = document.createElement("span");
-      v.className = "v";
-      v.textContent = value;
-      row.append(k, v);
-      understanding.append(row);
+    const kicker = document.createElement("div");
+    kicker.className = "inspect-kicker";
+    kicker.textContent = "QUERY UNDERSTANDING · CURRENT RESPONSE";
+    understanding.append(kicker);
+    const contract = body.state?.semantic_contract || {};
+    const dateFilter = (contract.filters || []).find(item =>
+      /(?:date|time|year|month|period)/i.test(String(item.operand || item.column || "")));
+    const formatFilter = item => `${item.operand || item.column || "Value"} ${item.operator || "="} ${item.value ?? "?"}`;
+    const chartPeriods = chartSpec?.time_format !== "raw" && chartSpec?.x
+      ? [...new Set((chartSpec.data || []).map(row => String(row[chartSpec.x])))].sort()
+      : [];
+    const period = dateFilter ? formatFilter(dateFilter)
+      : chartPeriods.length ? `Observed ${chartPeriods[0]}${chartPeriods.length > 1 ? `–${chartPeriods.at(-1)}` : ""}`
+        : "Not specified";
+    const tiles = [
+      ["Measure", contract.measures?.join(", ") || chartSpec?.y_label || contract.outputs?.join(", ") || "Not specified"],
+      ["Period", period],
+      ["Dimension", contract.grain?.join(", ") || chartSpec?.x_label || "Not specified"],
+      ["Filter", contract.filters?.length ? contract.filters.map(formatFilter).join("; ") : "None specified"],
+    ];
+    const grid = document.createElement("div");
+    grid.className = "inspect-grid";
+    tiles.forEach(([key, value]) => {
+      const card = document.createElement("div");
+      card.className = "inspect-tile";
+      const label = document.createElement("span");
+      label.className = "inspect-tile-label";
+      label.textContent = key;
+      const content = document.createElement("span");
+      content.className = "inspect-tile-value";
+      content.textContent = value;
+      card.append(label, content);
+      grid.append(card);
     });
-    const note = document.createElement("p");
-    note.className = "uq-note";
-    note.textContent = body.conversation_interpretation?.source === "model"
-      ? "The resolver's interpretation is shown for inspection. Model confidence does not prove business correctness."
-      : "This view shows the request and available context; execution alone does not verify the intended business meaning.";
-    understanding.append(note);
+    understanding.append(grid);
+    const modelContext = body.generation?.model_context || {};
+    const contextTables = Object.keys(modelContext.tables || modelContext.execution_context?.tables || {});
+    if (contextTables.length) {
+      const label = document.createElement("div");
+      label.className = "inspect-label";
+      label.textContent = "Selected SQL reference";
+      understanding.append(label);
+      const node = document.createElement("div");
+      node.className = "inspect-reference";
+      const title = document.createElement("strong");
+      title.textContent = contextTables.join(" · ");
+      const detail = document.createElement("code");
+      detail.textContent = contextTables.map(name => {
+        const selectedColumns = (modelContext.tables || modelContext.execution_context?.tables || {})[name]?.columns || {};
+        const columns = Array.isArray(selectedColumns) ? selectedColumns : Object.keys(selectedColumns);
+        return `${name}: ${columns.length ? columns.join(" · ") : "selected table"}`;
+      }).join("\n");
+      node.append(title, detail);
+      understanding.append(node);
+    }
+    const presentation = document.createElement("div");
+    presentation.className = "inspect-presentation";
+    const presentationLabel = document.createElement("div");
+    presentationLabel.className = "inspect-label";
+    presentationLabel.textContent = "Presentation";
+    const presentationValue = document.createElement("div");
+    presentationValue.className = "inspect-presentation-value";
+    presentationValue.textContent = chartSpec ? "Chart requested by the user"
+      : body.generation?.accepted ? "SQL and executed data" : "No accepted result";
+    presentation.append(presentationLabel, presentationValue);
+    understanding.append(presentation);
+    const extra = rows.filter(([key]) => !["Metric", "Grouping / grain", "Filters", "Metric columns"].includes(key));
+    if (extra.length) {
+      const more = document.createElement("details");
+      more.className = "inspect-more";
+      const summary = document.createElement("summary");
+      summary.textContent = "More context";
+      more.append(summary);
+      extra.forEach(([key, value]) => {
+        const row = document.createElement("div");
+        row.className = "uq-row";
+        const label = document.createElement("span");
+        label.className = "k";
+        label.textContent = key;
+        const content = document.createElement("span");
+        content.className = "v";
+        content.textContent = value;
+        row.append(label, content);
+        more.append(row);
+      });
+      understanding.append(more);
+    }
   }
   renderInspectorSchema();
   renderInspectorRecovery(body);
@@ -1527,26 +1634,8 @@ function renderInspectorRunDetails(body) {
 }
 
 function prioritizeInspector(body) {
-  const sections = {
-    understanding: $("#understandingSection"),
-    schema: $("#schemaSection"),
-    recovery: $("#recoverySection"),
-    validation: $("#validationSection"),
-  };
-  if (!sections.understanding || !sections.validation) return;
-  const bodyEl = sections.understanding.parentElement;
   const recoveryActive = body.generation?.recovery?.activated === true;
-  const chartMode = Boolean(body.presentation?.chart_spec);
-  if (!recoveryActive && !chartMode && !body.generation?.recovery) {
-    bodyEl.append(sections.schema, sections.understanding, sections.validation, sections.recovery);
-    return;
-  }
-  const order = recoveryActive
-    ? [sections.recovery, sections.understanding, sections.validation, sections.schema]
-    : chartMode
-      ? [sections.understanding, sections.schema, sections.validation, sections.recovery]
-      : [sections.understanding, sections.validation, sections.schema, sections.recovery];
-  order.forEach((section) => { if (section) { section.open = section === order[0]; bodyEl.append(section); } });
+  selectInspectorTab(recoveryActive ? "recovery" : "understanding");
 }
 
 function emptyNote(text) {
@@ -1558,9 +1647,7 @@ function emptyNote(text) {
 
 function renderInspectorSchema() {
   const graphBox = $("#schemaGraph");
-  const chips = $("#schemaChips");
   const detail = $("#schemaDetail");
-  chips.replaceChildren();
   detail.replaceChildren();
   const generation = state.lastBody?.generation;
   const context = generation?.model_context || {};
@@ -1572,70 +1659,45 @@ function renderInspectorSchema() {
     return;
   }
   if (names.length) {
-    graphBox.append(schemaGraphSvg(names, context.relationships || []));
+    const shownRelationships = new Set();
     names.forEach((name) => {
-      const chip = document.createElement("button");
-      chip.type = "button";
-      chip.className = "schema-chip";
-      chip.innerHTML = `${icon("table", 12)}<span>${name}</span>`;
-      chip.addEventListener("click", () => showSchemaDetail(detail, { table: name }));
-      chips.append(chip);
+      const table = rawTables[name] || {};
+      const card = document.createElement("button");
+      card.type = "button";
+      card.className = "inspect-schema-node";
+      const title = document.createElement("strong");
+      title.textContent = name;
+      const columns = document.createElement("code");
+      const selected = Array.isArray(table.columns)
+        ? table.columns.map(column => [column, ""])
+        : Object.entries(table.columns || {});
+      columns.textContent = selected.map(([column, metadata]) => {
+        const kind = typeof metadata === "object" ? metadata.type || metadata.database_type || "" : "";
+        const role = (table.primary_key || []).includes(column) ? " · PRIMARY KEY" : "";
+        return `${column}${kind ? ` · ${kind}` : ""}${role}`;
+      }).join("\n") || "Selected table";
+      card.append(title, columns);
+      card.addEventListener("click", () => showSchemaDetail(detail, { table: name }));
+      graphBox.append(card);
+      (context.relationships || []).forEach((relationship, index) => {
+        if (shownRelationships.has(index)) return;
+        const left = String(relationship.left || "");
+        const right = String(relationship.right || "");
+        if (left.split(".")[0] !== name && right.split(".")[0] !== name) return;
+        const join = document.createElement("div");
+        join.className = "inspect-schema-join";
+        const cardinality = relationship.cardinality
+          ? ` · ${relationship.cardinality.replaceAll("_", " ").toLowerCase()}` : "";
+        const source = relationship.state === "VERIFIED_FK" ? " · declared FK"
+          : relationship.state ? " · inferred relationship" : "";
+        join.textContent = `${left} → ${right}${cardinality}${source}`;
+        graphBox.append(join);
+        shownRelationships.add(index);
+      });
     });
   } else {
     graphBox.append(emptyNote("Run a query to see the verified tables it used."));
   }
-}
-
-function schemaGraphSvg(tableNames, relationships) {
-  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
-  svg.setAttribute("class", "schema-graph-svg");
-  const radius = 46;
-  const center = radius * (tableNames.length > 1 ? 2.1 : 1.4);
-  const width = center * 2;
-  const height = center * 2;
-  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
-  const positions = tableNames.map((name, index) => {
-    const angle = (Math.PI * 2 * index) / Math.max(tableNames.length, 1) - Math.PI / 2;
-    return { name, x: center + radius * 2 * Math.cos(angle), y: center + radius * 2 * Math.sin(angle) };
-  });
-  const byName = Object.fromEntries(positions.map((pos) => [pos.name, pos]));
-  const parsed = relationships.map((relationship) => {
-    const [leftTable] = String(relationship.left || "").split(".");
-    const [rightTable] = String(relationship.right || "").split(".");
-    return { leftTable, rightTable, left: relationship.left, right: relationship.right, fanout: relationship.fanout_risk };
-  }).filter((edge) => byName[edge.leftTable] && byName[edge.rightTable]);
-  parsed.forEach((edge) => {
-    const line = document.createElementNS("http://www.w3.org/2000/svg", "line");
-    line.setAttribute("x1", byName[edge.leftTable].x);
-    line.setAttribute("y1", byName[edge.leftTable].y);
-    line.setAttribute("x2", byName[edge.rightTable].x);
-    line.setAttribute("y2", byName[edge.rightTable].y);
-    line.setAttribute("class", `graph-edge${isDeclared(edge.leftTable, edge.rightTable) ? " graph-edge-declared" : ""}`);
-    svg.append(line);
-  });
-  positions.forEach((pos) => {
-    const circle = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-    circle.setAttribute("cx", pos.x);
-    circle.setAttribute("cy", pos.y);
-    circle.setAttribute("r", 26);
-    circle.setAttribute("class", "graph-node");
-    svg.append(circle);
-    const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
-    label.setAttribute("x", pos.x);
-    label.setAttribute("y", pos.y + 4);
-    label.setAttribute("text-anchor", "middle");
-    label.setAttribute("class", "graph-label");
-    label.textContent = pos.name;
-    svg.append(label);
-  });
-  return svg;
-}
-
-function isDeclared(fromTable, toTable) {
-  return browserRelationships.some((item) =>
-    ((item.from_table === fromTable && item.to_table === toTable)
-      || (item.from_table === toTable && item.to_table === fromTable))
-    && item.source === "declared_foreign_key");
 }
 
 async function loadGlossary(dbId) {
@@ -1718,6 +1780,10 @@ function renderInspectorRecovery(body) {
   const box = $("#recoveryMini");
   const recovery = body.generation?.recovery;
   box.replaceChildren();
+  const kicker = document.createElement("div");
+  kicker.className = "inspect-kicker";
+  kicker.textContent = "INVESTIGATION · VERIFIED EVIDENCE";
+  box.append(kicker);
   if (!recovery || !recovery.activated) {
     box.append(emptyNote("The recovery agent only activates on anomalies."));
     return;
@@ -1754,6 +1820,10 @@ function renderInspectorRecovery(body) {
 function renderInspectorPerformance(body) {
   const box = $("#validationContent");
   box.replaceChildren();
+  const kicker = document.createElement("div");
+  kicker.className = "inspect-kicker";
+  kicker.textContent = "EXECUTION · MEASURED DETAILS";
+  box.append(kicker);
   const generation = body.generation || {};
   const timings = body.timings_ms || {};
   const usage = body.token_usage || generation.token_usage || {};
@@ -1778,8 +1848,8 @@ function wireSqlIdents(fragment, article) {
     span.addEventListener("click", () => {
       const detail = $("#schemaDetail");
       showSchemaDetail(detail, span.dataset.table ? { table: span.dataset.table } : { column: span.dataset.column });
-      if (window.innerWidth <= 1020) document.body.classList.add("inspector-open");
-      $("#schemaContent").scrollIntoView({ behavior: "smooth", block: "center" });
+      revealInspector("schema");
+      $("#schemaContent").scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
   });
 }
@@ -2079,20 +2149,14 @@ async function refreshHistory() {
 function renderHistory() {
   const container = $("#conversationHistory");
   container.replaceChildren();
-  const term = $("#historySearch").value.trim().toLowerCase();
-  const matches = state.history.filter((run) =>
-    !term
-    || (run.original_message || "").toLowerCase().includes(term)
-    || (run.resolved_question || "").toLowerCase().includes(term)
-    || (run.sql || "").toLowerCase().includes(term));
   const groups = new Map();
-  for (const run of matches) {
+  for (const run of state.history) {
     const id = run.conversation_id || run.run_id;
     if (!groups.has(id)) groups.set(id, run);
   }
   const visible = [...groups.values()];
   if (!visible.length) {
-    container.append(emptyNote(term ? "No history matches this search." : "Completed queries appear here."));
+    container.append(emptyNote("Completed queries appear here."));
     return;
   }
   for (const run of visible) {
@@ -2125,7 +2189,6 @@ function renderHistory() {
 
 async function openRun(run) {
   if (state.busy || voiceInput?.busy) return;
-  setView("workspace");
   $("#emptyState").hidden = true;
   state.activeRunId = run.run_id;
   renderHistory();
@@ -2305,68 +2368,50 @@ $("#themeToggle")?.addEventListener("click", () => {
 $("#themeToggleTop")?.addEventListener("click", () => $("#themeToggle").click());
 applyThemeButtons();
 
-$("#inspectorToggle")?.addEventListener("click", toggleInspector);
-$("#inspectorClose")?.addEventListener("click", toggleInspector);
+const INSPECTOR_SECTIONS = {
+  understanding: "#understandingSection",
+  schema: "#schemaSection",
+  recovery: "#recoverySection",
+  validation: "#validationSection",
+};
 
-function toggleInspector() {
-  if (window.innerWidth <= 1020) {
-    document.body.classList.toggle("inspector-open");
-    $("#inspectorToggle").classList.toggle("active");
-    document.body.classList.contains("inspector-open")
-      ? document.body.insertAdjacentHTML("beforeend", '<button class="inspector-drawer-backdrop" id="inspectorBackdrop" aria-label="Close inspector"></button>')
-      : $("#inspectorBackdrop")?.remove();
-    $("#inspectorBackdrop")?.addEventListener("click", toggleInspector);
-    return;
-  }
-  const shell = $("#appShell");
-  const hidden = shell.classList.toggle("inspector-hidden");
-  $("#inspectorToggle").classList.toggle("active", hidden);
-  $("#inspectorToggle").setAttribute("aria-expanded", String(!hidden));
-  localStorage.setItem("queryStudioInspector", hidden ? "hidden" : "shown");
-  if (hidden) shell.style.removeProperty("grid-template-columns");
-  else applyInspectorWidth();
-}
-
-function applyInspectorWidth() {
-  const stored = Number(localStorage.getItem("queryStudioInspectorWidth") || 0);
-  if (stored >= 240) document.documentElement.style.setProperty("--inspector-w", `${stored}px`);
-}
-
-(function setupResizer() {
-  document.addEventListener("DOMContentLoaded", () => {
-    applyInspectorWidth();
-    if (localStorage.getItem("queryStudioInspector") !== "shown") {
-      $("#appShell").classList.add("inspector-hidden");
-      $("#inspectorToggle").classList.add("active");
+function selectInspectorTab(tab) {
+  const selected = INSPECTOR_SECTIONS[tab] ? tab : "understanding";
+  Object.entries(INSPECTOR_SECTIONS).forEach(([name, selector]) => {
+    const section = $(selector);
+    if (section) {
+      section.hidden = name !== selected;
+      if (name === selected) section.open = true;
     }
-    const resizer = $("#inspectorResizer");
-    if (!resizer) return;
-    let dragging = false;
-    resizer.addEventListener("pointerdown", (event) => {
-      dragging = true;
-      resizer.classList.add("dragging");
-      resizer.setPointerCapture(event.pointerId);
-    });
-    resizer.addEventListener("pointermove", (event) => {
-      if (!dragging) return;
-      const width = Math.min(560, Math.max(240, window.innerWidth - event.clientX));
-      document.documentElement.style.setProperty("--inspector-w", `${width}px`);
-      localStorage.setItem("queryStudioInspectorWidth", String(width));
-    });
-    resizer.addEventListener("pointerup", () => {
-      dragging = false;
-      resizer.classList.remove("dragging");
-    });
-    resizer.addEventListener("keydown", (event) => {
-      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      const current = parseInt(getComputedStyle(document.documentElement).getPropertyValue("--inspector-w"), 10) || 340;
-      const next = Math.min(560, Math.max(240, current + (event.key === "ArrowLeft" ? 24 : -24)));
-      document.documentElement.style.setProperty("--inspector-w", `${next}px`);
-      localStorage.setItem("queryStudioInspectorWidth", String(next));
-    });
-    if (window.innerWidth <= 1020) $("#appShell").classList.remove("inspector-hidden");
   });
-})();
+  document.querySelectorAll("[data-inspector-tab]").forEach((button) => {
+    button.setAttribute("aria-selected", String(button.dataset.inspectorTab === selected));
+  });
+}
+
+function setInspectorOpen(open) {
+  document.body.classList.toggle("inspector-open", open);
+  $("#inspectorBackdrop").hidden = !open;
+  $("#inspectorPane").setAttribute("aria-hidden", String(!open));
+  $("#inspectorToggle").setAttribute("aria-expanded", String(open));
+  if (open) $("#inspectorClose").focus();
+  else $("#inspectorToggle").focus();
+}
+
+$("#inspectorToggle")?.addEventListener("click", () => {
+  setInspectorOpen(!document.body.classList.contains("inspector-open"));
+});
+$("#inspectorClose")?.addEventListener("click", () => setInspectorOpen(false));
+$("#inspectorBackdrop")?.addEventListener("click", () => setInspectorOpen(false));
+document.querySelectorAll("[data-inspector-tab]").forEach((button) => {
+  button.addEventListener("click", () => selectInspectorTab(button.dataset.inspectorTab));
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && document.body.classList.contains("inspector-open")) {
+    setInspectorOpen(false);
+  }
+});
+selectInspectorTab("understanding");
 
 $("#cancelButton").addEventListener("click", async () => {
   if (state.cancelled) return;
@@ -2380,12 +2425,6 @@ $("#cancelButton").addEventListener("click", async () => {
   } finally {
     $("#cancelButton").disabled = false;
   }
-});
-
-$("#composerChips")?.querySelectorAll(".chip").forEach((chip) => {
-  chip.addEventListener("click", () => {
-    send(chip.dataset.question);
-  });
 });
 
 $("#chatForm").addEventListener("submit", (event) => {
@@ -2404,31 +2443,9 @@ $("#messageInput").addEventListener("keydown", (event) => {
   }
 });
 
-const HERO_EXAMPLES = [
-  ["table", "Show the top customers by spending"],
-  ["clock", "Compare this month with the previous one"],
-  ["network", "Join two tables step by step"],
-  ["zap", "Plot monthly revenue as a line chart"],
-];
-document.addEventListener("DOMContentLoaded", () => {
-  const target = $("#heroExamples");
-  target.replaceChildren();
-  HERO_EXAMPLES.forEach(([iconName, text]) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "example";
-    button.innerHTML = `<span data-icon="${iconName}"></span><span></span>`;
-    button.lastElementChild.textContent = text;
-    button.addEventListener("click", () => send(text));
-    target.append(button);
-  });
-  target.querySelectorAll("[data-icon]").forEach((slot) => { slot.innerHTML = icon(slot.dataset.icon, 18); });
-});
-
 document.addEventListener("pointerdown", event => {
   if (activeInsight && !activeInsight.contains(event.target)) dismissInsight();
 });
-$("#historySearch").addEventListener("input", renderHistory);
 $("#clearHistory").addEventListener("click", async () => {
   try {
     await api(`/api/history?session_id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
@@ -2451,7 +2468,6 @@ $("#resetButton").addEventListener("click", async () => {
     $("#emptyState").hidden = false;
     $("#threadIntro").hidden = true;
     $("#threadBreadcrumb").textContent = "Live database";
-    $("#composerChips")?.querySelectorAll(".chip").forEach((chip) => { chip.disabled = true; });
     $("#messageInput").focus();
   } catch (error) { showError(error.message); }
 });
@@ -2464,19 +2480,10 @@ $("#databaseSelect").addEventListener("change", async () => {
   await loadDatabaseSchema();
   await loadGlossary($("#databaseSelect").value);
 });
-$("#exploreSearch").addEventListener("input", renderExplore);
 document.querySelectorAll(".side-nav a[data-view]").forEach(link => {
   link.addEventListener("click", event => {
     event.preventDefault();
-    if (link.dataset.view === "connections") {
-      setView("workspace");
-      $("#connectionCard").scrollIntoView({ behavior: "smooth", block: "nearest" });
-      document.querySelectorAll(".side-nav a[data-view]").forEach(item => {
-        item.classList.toggle("active", item === link);
-      });
-    } else {
-      setView(link.dataset.view);
-    }
+    $("#messageInput").focus();
   });
 });
 

@@ -103,6 +103,24 @@ def test_database_catalog_reports_both_dialects(monkeypatch) -> None:  # type: i
     ]
 
 
+def test_ui_config_reads_safe_model_defaults_from_environment(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("TEXT2SQL_SQL_PROVIDER", "agentrouter")
+    monkeypatch.setenv("TEXT2SQL_SQL_MODEL", "gpt-5.6-sol")
+    monkeypatch.setenv("TEXT2SQL_CONTEXT_MODE", "model1")
+    monkeypatch.setenv("TEXT2SQL_CONTEXT_PROVIDER", "groq")
+    monkeypatch.setenv("TEXT2SQL_CONTEXT_MODEL", "qwen/qwen3.8-27b")
+    response = TestClient(create_app()).get("/api/ui-config")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "sql_provider": "agentrouter",
+        "sql_model": "gpt-5.6-sol",
+        "context_mode": "model1",
+        "context_provider": "groq",
+        "context_model": "qwen/qwen3.8-27b",
+    }
+
+
 def test_analytics_capabilities_are_compact_and_do_not_expose_credentials() -> None:
     response = TestClient(create_app()).get("/api/databases/books/analytics-capabilities")
 
@@ -348,8 +366,8 @@ def test_web_chat_application_is_served() -> None:
     assert page.status_code == 200
     assert "What would you like to know?" in page.text
     assert 'id="chatForm"' in page.text
-    assert 'id="contextModelSelect"' in page.text
-    assert 'id="sqlModelSelect"' in page.text
+    assert 'id="contextModelSelect"' not in page.text
+    assert 'id="sqlModelSelect"' not in page.text
     assert 'id="contextModeSelect"' not in page.text
     assert 'id="suggestions"' not in page.text
     assert "How many records are in each category?" not in page.text
@@ -364,7 +382,9 @@ def test_web_chat_application_is_served() -> None:
     assert script.status_code == 200
     assert 'api("/api/chat"' in script.text
     assert "renderTokenAccounting" in script.text
-    assert "const label = item.model;" in script.text
+    assert 'api("/api/ui-config", { cache: "no-store" })' in script.text
+    assert page.text.index('id="databaseSelect"') < page.text.index('id="chatForm"')
+    assert page.text.index('id="connectionCard"') < page.text.index('id="chatForm"')
     assert "`${item.provider} · ${item.model}`" not in script.text
     assert '"OPTIMIZATION_NOT_FASTER"' in script.text
     assert 'class="semantic-status"' not in page.text
@@ -452,6 +472,28 @@ def test_retrieval_is_the_api_default() -> None:
     )
 
     assert request.context_mode == "retrieval"
+
+
+def test_chat_request_uses_environment_models_unless_explicitly_overridden(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("TEXT2SQL_SQL_PROVIDER", "groq")
+    monkeypatch.setenv("TEXT2SQL_SQL_MODEL", "qwen/qwen3.8-27b")
+    monkeypatch.setenv("TEXT2SQL_CONTEXT_MODE", "model1")
+    monkeypatch.setenv("TEXT2SQL_CONTEXT_PROVIDER", "agentrouter")
+    monkeypatch.setenv("TEXT2SQL_CONTEXT_MODEL", "gpt-5.6-sol")
+
+    default = ChatRequest(session_id="env-models", db_id="books", message="Count the books")
+    assert (default.provider, default.model) == ("groq", "qwen/qwen3.8-27b")
+    assert (default.context_mode, default.context_provider, default.context_model) == (
+        "model1", "agentrouter", "gpt-5.6-sol"
+    )
+
+    explicit = ChatRequest(
+        session_id="explicit-models", db_id="books", message="Count the books",
+        provider="agentrouter", model="gpt-5.6-sol", context_mode="retrieval",
+    )
+    assert (explicit.provider, explicit.model, explicit.context_mode) == (
+        "agentrouter", "gpt-5.6-sol", "retrieval"
+    )
 
 
 def test_chat_job_reports_progress_and_completion() -> None:

@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from semantic_text2sql.api import create_app
 from semantic_text2sql.voice import (
     MAX_AUDIO_BYTES,
+    GroqVoiceTranscriber,
     QwenVoiceTranscriber,
     VoiceInputError,
     VoiceProviderError,
@@ -74,6 +75,54 @@ def test_voice_calls_qwen_once_and_returns_editable_transcript_with_usage() -> N
     assert response.json()["duration_seconds"] == 0.1
     assert response.headers["cache-control"] == "no-store"
     assert len(captured) == 1
+
+
+def test_groq_voice_uses_multipart_transcription_and_preserves_editable_text() -> None:
+    audio = recording()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/openai/v1/audio/transcriptions"
+        assert request.headers["authorization"] == "Bearer groq-test-key"
+        assert "multipart/form-data" in request.headers["content-type"]
+        assert b'whisper-large-v3-turbo' in request.content
+        assert audio in request.content
+        return httpx.Response(200, json={"text": "How many EUR customers are there?"})
+
+    transcriber = GroqVoiceTranscriber(
+        "groq-test-key", transport=httpx.MockTransport(handler)
+    )
+    response = TestClient(create_app(voice_transcriber=transcriber)).post(
+        "/api/voice/transcribe", content=audio, headers={"Content-Type": "audio/wav"}
+    )
+    assert response.status_code == 200
+    assert response.json()["provider"] == "groq"
+    assert response.json()["text"] == "How many EUR customers are there?"
+    assert response.json()["token_usage"]["input_tokens"] is None
+    assert response.json()["token_usage"]["output_tokens"] is None
+
+
+def test_groq_is_selected_only_when_qwen_audio_is_unconfigured(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.delenv("QWEN_AUDIO_API_KEY", raising=False)
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.delenv("QWEN_AUDIO_BASE_URL", raising=False)
+    monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "groq-test-key")
+    response = TestClient(create_app()).get("/api/voice")
+    assert response.json()["configured"] is True
+    assert response.json()["provider"] == "groq"
+    assert "groq-test-key" not in response.text
+
+
+def test_groq_provider_error_is_sanitized() -> None:
+    transcriber = GroqVoiceTranscriber(
+        "groq-test-key",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(401, json={"error": "private account detail"})
+        ),
+    )
+    with pytest.raises(VoiceProviderError) as error:
+        asyncio.run(transcriber.transcribe(recording()))
+    assert "private account detail" not in str(error.value)
 
 
 def test_voice_configuration_exposes_no_credentials() -> None:

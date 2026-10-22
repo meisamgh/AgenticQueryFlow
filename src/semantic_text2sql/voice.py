@@ -18,6 +18,7 @@ from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded
 MAX_AUDIO_SECONDS = 60
 MAX_AUDIO_BYTES = 2 * 1024 * 1024
 QWEN_AUDIO_MODEL = "qwen3.8-omni-flash"
+GROQ_AUDIO_MODEL = "whisper-large-v3-turbo"
 
 
 class VoiceInputError(ValueError):
@@ -32,7 +33,7 @@ class VoiceProviderError(RuntimeError):
 
 class TranscriptionResult(BaseModel):
     text: str
-    provider: Literal["qwen"] = "qwen"
+    provider: Literal["qwen", "groq"] = "qwen"
     model: str
     duration_seconds: float
     latency_ms: int
@@ -64,6 +65,7 @@ def validate_audio(audio: bytes) -> float:
 
 
 class QwenVoiceTranscriber:
+    provider = "qwen"
     def __init__(
         self,
         api_key: str | None,
@@ -187,4 +189,84 @@ class QwenVoiceTranscriber:
             duration_seconds=round(duration, 2),
             latency_ms=round((perf_counter() - started) * 1_000),
             token_usage=token_usage,
+        )
+
+
+class GroqVoiceTranscriber:
+    """Use the already-configured Groq key when no Qwen audio workspace is configured."""
+
+    provider = "groq"
+
+    def __init__(
+        self,
+        api_key: str | None,
+        *,
+        model: str = GROQ_AUDIO_MODEL,
+        timeout: float = 60.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.api_key = (api_key or "").strip()
+        self.model = model
+        self.timeout = min(120.0, max(1.0, timeout))
+        self.transport = transport
+
+    @classmethod
+    def from_environment(cls) -> GroqVoiceTranscriber:
+        return cls(
+            os.environ.get("GROQ_API_KEY"),
+            model=os.environ.get("GROQ_AUDIO_MODEL") or GROQ_AUDIO_MODEL,
+            timeout=float(os.environ.get("GROQ_AUDIO_TIMEOUT_SECONDS", "60")),
+        )
+
+    def unavailable_reason(self) -> str | None:
+        if not self.api_key:
+            return "Voice input needs a Qwen audio workspace or GROQ_API_KEY."
+        return None
+
+    async def transcribe(self, audio: bytes) -> TranscriptionResult:
+        if reason := self.unavailable_reason():
+            raise VoiceProviderError(reason, 503)
+        duration = validate_audio(audio)
+        started = perf_counter()
+        budget = RequestBudget(self.timeout, max_model_calls=1, max_database_calls=0)
+        try:
+            async with httpx.AsyncClient(
+                base_url="https://api.groq.com/openai/v1/",
+                timeout=self.timeout,
+                transport=self.transport,
+            ) as client:
+                response = await budget.wait(
+                    client.post(
+                        "audio/transcriptions",
+                        headers={"Authorization": f"Bearer {self.api_key}"},
+                        data={"model": self.model, "response_format": "json"},
+                        files={"file": ("question.wav", audio, "audio/wav")},
+                    ),
+                    kind="model",
+                )
+            response.raise_for_status()
+            text = response.json()["text"]
+            if not isinstance(text, str):
+                raise ValueError("Missing transcript")
+        except httpx.HTTPStatusError as exc:
+            status = exc.response.status_code
+            if status in {401, 403}:
+                raise VoiceProviderError("Groq rejected the audio credentials.") from exc
+            if status == 429:
+                raise VoiceProviderError(
+                    "Voice transcription is busy or its quota was reached. Try again later.", 429
+                ) from exc
+            raise VoiceProviderError(
+                f"Groq could not transcribe this recording (HTTP {status}). Try again."
+            ) from exc
+        except (httpx.TimeoutException, RequestBudgetExceeded) as exc:
+            raise VoiceProviderError("Voice transcription timed out. Try again.", 504) from exc
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            raise VoiceProviderError("Groq returned no usable transcript. Try again.") from exc
+        return TranscriptionResult(
+            text=text.strip(),
+            provider="groq",
+            model=self.model,
+            duration_seconds=round(duration, 2),
+            latency_ms=round((perf_counter() - started) * 1_000),
         )

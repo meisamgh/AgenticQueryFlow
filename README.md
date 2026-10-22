@@ -59,7 +59,7 @@ For an ordinary successful result, the selected model first proposes `bar`, `lin
 columns, numeric values, date axis and row grain; invalid choices become `none`, not another
 guessed chart. A second model call then explains the result using that validated choice. The UI
 renders only actual returned rows and never runs model-generated chart code. SQL and the exact
-result table remain available beside the answer.
+result table remain available in the SQL and Data tabs.
 
 Both calls share the request-wide model-call budget and have a 15-second timeout each. Their token
 usage and outcomes appear separately in the call ledger. A model failure or exhausted budget leaves
@@ -69,13 +69,23 @@ take precedence over this presentation path.
 
 ### Client workspace
 
-- Browse and search database tables and columns before asking a question.
-- Record a voice question with Qwen3.8-Omni-Flash, review its transcript, and send it as text.
+- Inspect selected tables and columns in the Query Inspector after asking a question.
+- Record a voice question with configured Qwen audio or the Groq Whisper fallback, review its transcript, and send it as text.
+- Choose the database in the top bar and see connection status and session ID there. SQL and context
+  model routing is configured in `.env`; the question composer has no model selectors.
+- Open the drawer-style inspector for context, schema, recovery evidence and execution details.
+- The Context inspector follows the flat Queryflow prototype layout while showing only current
+  response facts; the Schema tab shows selected tables, columns and verified relationships.
 - Reopen saved conversations with their SQL, result previews, attempts, context and chart proposals.
 - Type corrections in the main composer and inspect SQL versions, filter changes and structural comparisons.
 - Expand recovery history to inspect recorded tool observations, evidence IDs and REPAIR / INFORM / ESCALATE decisions.
-- View the result table, formatted SQL, selected context and validation issues separately.
+- Use per-message Answer, Data and SQL tabs. Answer opens by default; switching tabs reuses the
+  existing response without generating or executing another query. SQL keeps highlighting, copy
+  and version details; Data shows the executed rows and CSV export.
 - See a model-selected chart and plain-language answer when the returned data supports them.
+- For a complete chart result, switch among compatible suggested charts, change a displayed
+  metric/category/date range, or show Top N without another SQL call. Long chronological series
+  have zoom controls; a zoom or display filter never changes the underlying query result.
 - Follow live backend stages and a timestamped activity log, including recovery schema/value
   checks and read-only probes. Timings are observations, not predicted completion percentages.
 - Cancel a running request; model/database selection stays locked until it finishes.
@@ -239,11 +249,13 @@ curl http://127.0.0.1:8000/api/health
 
 ## Voice questions
 
-Click the microphone beside the question box, speak, then click stop. Qwen transcribes
+Click the microphone beside the question box, speak, then click stop. The configured audio provider transcribes
 the recording into editable text. Review the transcript and press Send to ask the database.
 Existing text is preserved; recording never submits a query automatically.
 
-Configure the audio model separately in `.env`:
+The app uses Qwen audio when configured. Otherwise it uses the existing `GROQ_API_KEY`
+with Groq's `whisper-large-v3-turbo` transcription endpoint. To choose Qwen instead,
+configure its audio workspace separately in `.env`:
 
 ```dotenv
 QWEN_AUDIO_API_KEY=your-audio-api-key
@@ -255,10 +267,12 @@ Use your workspace's actual Chat Completions URL and a key from the same region;
 see the [Qwen-Omni setup guide](https://www.alibabacloud.com/help/en/model-studio/qwen-omni).
 `DASHSCOPE_API_KEY` and `DASHSCOPE_BASE_URL` also work. The SQL provider is selected separately.
 Recordings are limited to 60 seconds and converted to mono 16-kHz WAV in the browser.
-Audio is sent through the server to Qwen for transcription, without being saved by this app.
+Audio is sent through the server to the selected provider for transcription, without being saved by this app.
 The browser needs microphone permission and localhost or HTTPS. Discard cancels recording
-or transcription. Transcription tokens are reported separately below the composer and by
-`POST /api/voice/transcribe`; `GET /api/voice` reports configuration availability.
+or transcription. When the provider supplies token usage, it is reported separately below the
+composer and by `POST /api/voice/transcribe`; `GET /api/voice` reports configuration availability.
+If Qwen audio is not configured, `GROQ_API_KEY` enables the
+[Groq Whisper transcription endpoint](https://console.groq.com/docs/speech-to-text) automatically.
 
 ## Database configuration
 
@@ -298,8 +312,11 @@ Important settings:
 | `TEXT2SQL_RETRIEVAL_COLUMNS` | Approximate columns per table | `5` |
 | `TEXT2SQL_SCHEMA_RERANKER_ENABLED` | Enable LightGBM column reranking | `true` |
 | `TEXT2SQL_HISTORY_ENABLED` | Enable strongly matched historical examples | `false` |
-| `TEXT2SQL_CONTEXT_MODEL` | Optional context-model override | selected model |
-| `TEXT2SQL_SQL_MODEL` | Optional SQL-model override | selected model |
+| `TEXT2SQL_SQL_PROVIDER` | SQL provider used by default for chat requests | `agentrouter` |
+| `TEXT2SQL_SQL_MODEL` | SQL model used by default for chat requests | `gpt-5.6-sol` |
+| `TEXT2SQL_CONTEXT_MODE` | `model1` or `retrieval` for chat requests | `retrieval` |
+| `TEXT2SQL_CONTEXT_PROVIDER` | Provider for Model 1 when enabled | unset |
+| `TEXT2SQL_CONTEXT_MODEL` | Model for Model 1 when enabled | unset |
 | `TEXT2SQL_REQUEST_TIMEOUT_SECONDS` | Shared end-to-end request deadline | `180` |
 | `TEXT2SQL_REQUEST_MAX_MODEL_CALLS` | Maximum model-call budget per request | `6` |
 | `TEXT2SQL_REQUEST_MAX_DATABASE_CALLS` | Maximum database-call budget per request | `24` |
@@ -412,7 +429,7 @@ src/semantic_text2sql/
   run_history.py       durable, scoped conversation turns and bounded result snapshots
   sql_diffs.py         SQL version comparisons and observed filter changes
   recovery_events.py   typed presentation events from actual recovery observations
-  voice.py             bounded Qwen3.8-Omni-Flash speech transcription
+  voice.py             bounded Qwen/Groq speech transcription
   hybrid_retrieval.py  BM25, embeddings, values, RRF and ML reranking
   context.py           deterministic grounding and context assembly
   llm.py               provider adapters and generation prompts

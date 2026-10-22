@@ -233,7 +233,12 @@ class TextToSQLService:
         planner_usage = TokenUsage()
         planner_call_used = False
         if context_mode == "model1" and not optimization_required:
-            planner_provider = context_provider or provider
+            configured_context_provider = os.environ.get("TEXT2SQL_CONTEXT_PROVIDER")
+            planner_provider = context_provider or (
+                cast(ModelProvider, configured_context_provider)
+                if configured_context_provider in self.context_completers
+                else provider
+            )
             planner_model = context_model or os.environ.get("TEXT2SQL_CONTEXT_MODEL") or model
             try:
                 selection, planner_usage = await budget.wait(
@@ -305,7 +310,7 @@ class TextToSQLService:
                 item for item in (retrieval_evidence, visualization_requirement) if item
             ) or None,
             provider=provider,
-            model=os.environ.get("TEXT2SQL_SQL_MODEL") or model,
+            model=model,
             dialect=dialect,
             execute=execute,
             max_rows=max_rows,

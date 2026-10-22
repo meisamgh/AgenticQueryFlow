@@ -11,6 +11,7 @@ window.QueryflowECharts = (function () {
     "line", "multi_line", "step_line", "area", "stacked_area", "bar",
     "horizontal_bar", "grouped_bar", "stacked_bar", "scatter", "bubble",
     "histogram", "box", "heatmap", "pie", "donut", "treemap", "calendar_heatmap",
+    "percent_stacked_bar",
   ]);
 
   function cssVar(name, fallback) {
@@ -119,10 +120,13 @@ window.QueryflowECharts = (function () {
         series: [{ type: "boxplot", data: data.map(box =>
           [box.min, box.q1, box.median, box.q3, box.max]) }] };
     }
-    const category = unique(data.map(row => row[x]));
+    const temporal = spec.time_format !== "raw" && data.every(row => Number.isFinite(Date.parse(
+      `${canonicalDate(row[x])}T00:00:00Z`)));
+    const category = unique(data.map(row => row[x])).sort((a, b) => temporal
+      ? Date.parse(`${canonicalDate(a)}T00:00:00Z`) - Date.parse(`${canonicalDate(b)}T00:00:00Z`) : 0);
     const horizontal = type === "horizontal_bar";
     const numericX = ["scatter", "bubble"].includes(type);
-    const grouped = ["multi_line", "stacked_area", "grouped_bar", "stacked_bar"].includes(type);
+    const grouped = ["multi_line", "stacked_area", "grouped_bar", "stacked_bar", "percent_stacked_bar"].includes(type);
     const lineType = ["line", "multi_line", "step_line", "area", "stacked_area"].includes(type);
     const valueAxis = { type: "value", axisLabel: { formatter: format, color: muted },
       splitLine: { lineStyle: { color: border, type: "dashed" } } };
@@ -132,7 +136,11 @@ window.QueryflowECharts = (function () {
       grid: { left: 35, right: 35, top: 35, bottom: 55, containLabel: true },
       xAxis: horizontal ? valueAxis : numericX ? valueAxis : categoryAxis,
       yAxis: horizontal ? categoryAxis : { ...valueAxis, name: spec.y_label },
-      dataZoom: category.length > 25 && !numericX ? [{ type: "inside" }, { type: "slider", bottom: 8 }] : [],
+      dataZoom: temporal && category.length > 25 && !numericX
+        ? [{ type: "slider", xAxisIndex: 0, bottom: 12, height: 22, filterMode: "filter",
+          start: spec.zoom_start ?? 0, end: spec.zoom_end ?? 100 },
+        { type: "inside", xAxisIndex: 0, filterMode: "filter",
+          start: spec.zoom_start ?? 0, end: spec.zoom_end ?? 100 }] : [],
       legend: { show: grouped, type: "scroll", top: 0, textStyle: { color: muted } },
       series: [],
     };
@@ -148,9 +156,13 @@ window.QueryflowECharts = (function () {
       option.series = unique(data.map(row => row[group])).map(name => {
         const points = new Map(data.filter(row => label(row[group]) === name)
           .map(row => [label(row[x]), row[y]]));
-        return { name, type: lineType ? "line" : "bar", stack: type.startsWith("stacked") ? "total" : undefined,
+        const totals = type === "percent_stacked_bar" ? new Map(category.map(value => [value,
+          data.filter(row => label(row[x]) === value).reduce((sum, row) => sum + Number(row[y]), 0)])) : null;
+        return { name, type: lineType ? "line" : "bar", stack: type.startsWith("stacked") || type === "percent_stacked_bar" ? "total" : undefined,
           areaStyle: type === "stacked_area" ? {} : undefined,
-          connectNulls: false, data: category.map(value => points.has(value) ? points.get(value) : null) };
+          connectNulls: false, data: category.map(value => points.has(value)
+            ? (totals ? (totals.get(value) > 0 ? Number(points.get(value)) / totals.get(value) * 100 : null) : points.get(value))
+            : null) };
       });
     } else {
       option.series = [{ name: spec.y_label, type: lineType ? "line" : "bar",
@@ -159,6 +171,11 @@ window.QueryflowECharts = (function () {
         connectNulls: false,
         data: data.map(row => row[y]) }];
     }
+    if (type === "percent_stacked_bar") {
+      option.yAxis.name = "Share (%)";
+      option.yAxis.max = 100;
+    }
+    if (option.dataZoom.length) option.grid.bottom = 68;
     return option;
   }
 
@@ -176,6 +193,12 @@ window.QueryflowECharts = (function () {
     return {
       dispose() { window.removeEventListener("resize", resize); observer?.disconnect(); chart.dispose(); },
       onSelect(callback) { chart.on("click", callback); },
+      onZoom(callback) { chart.on("datazoom", () => {
+        const zoom = chart.getOption()?.dataZoom?.[0];
+        if (zoom) callback({ start: zoom.start, end: zoom.end });
+      }); },
+      resetZoom() { chart.dispatchAction({ type: "dataZoom", start: 0, end: 100 }); },
+      resize() { chart.resize(); },
       getDataURL(options) { return chart.getDataURL({ type: "png", pixelRatio: 2,
         backgroundColor: cssVar("--surface", "#fff"), ...options }); },
     };

@@ -4,6 +4,154 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const vm = require('node:vm');
 const source = fs.readFileSync(`${__dirname}/../web/app.js`, 'utf8');
+const styles = fs.readFileSync(`${__dirname}/../web/styles.css`, 'utf8');
+const markup = fs.readFileSync(`${__dirname}/../web/index.html`, 'utf8');
+const explorerContext = vm.createContext({window: {}});
+vm.runInContext(fs.readFileSync(`${__dirname}/../web/chart_explorer.js`, 'utf8'), explorerContext);
+const explorer = explorerContext.window.QueryflowChartExplorer;
+test('database and connection live in the header; composer keeps voice controls but no model selectors', () => {
+  const composer = markup.split('<form class="composer"')[1].split('</form>')[0];
+  const header = markup.split('<header class="topbar">')[1].split('</header>')[0];
+  for (const id of ['databaseSelect', 'connectionCard', 'healthStatus', 'sessionId']) {
+    assert.ok(header.includes(`id="${id}"`), `${id} is missing from the header`);
+    assert.ok(!composer.includes(`id="${id}"`), `${id} should not remain in the composer`);
+  }
+  for (const id of ['voiceButton', 'sendButton']) {
+    assert.ok(composer.includes(`id="${id}"`), `${id} is missing from the composer`);
+  }
+  assert.ok(!composer.includes('sqlModelSelect'));
+  assert.ok(!composer.includes('contextModelSelect'));
+  assert.ok(!markup.includes('id="composerChips"'));
+  assert.ok(!markup.includes('id="heroExamples"'));
+  assert.ok(!markup.includes('Enter to send'));
+});
+test('browser checks exact environment model pair and sends no model overrides', () => {
+  const initialize = source.slice(source.indexOf('async function initialize('), source.indexOf('function setHealth('));
+  assert.ok(initialize.includes('item.provider === uiConfig.sql_provider'));
+  assert.ok(initialize.includes('item.model === uiConfig.sql_model'));
+  assert.ok(!initialize.includes('preferredModel'));
+  const sender = source.slice(source.indexOf('async function send('), source.indexOf('function showError('));
+  assert.ok(sender.includes('api("/api/chat/jobs"'));
+  assert.ok(!sender.includes('"#sqlModelSelect"'));
+  assert.ok(!sender.includes('"#contextModelSelect"'));
+  assert.ok(!sender.includes('context_provider:'));
+  assert.ok(!sender.includes('context_model:'));
+});
+test('conversation history has no heading or search control', () => {
+  assert.ok(!markup.includes('YOUR CONVERSATIONS'));
+  assert.ok(!markup.includes('id="historySearch"'));
+  assert.ok(!source.includes('$("#historySearch")'));
+  assert.ok(markup.includes('id="conversationHistory"'));
+});
+test('inspector has separate context, schema, recovery and details tabs', () => {
+  for (const tab of ['understanding', 'schema', 'recovery', 'validation']) {
+    assert.ok(markup.includes(`data-inspector-tab="${tab}"`));
+  }
+  assert.ok(markup.includes('id="inspectorBackdrop"'));
+});
+test('context inspector follows the flat prototype layout using live response facts', () => {
+  assert.ok(markup.includes('<span>Context inspector</span>'));
+  assert.ok(styles.includes('.inspector-section > summary { display: none; }'));
+  assert.ok(styles.includes('.inspect-kicker'));
+  const renderer = source.slice(source.indexOf('function updateInspector('), source.indexOf('function renderInspectorRunDetails('));
+  assert.ok(renderer.includes('QUERY UNDERSTANDING · CURRENT RESPONSE'));
+  assert.ok(renderer.includes('body.generation?.model_context'));
+  assert.ok(renderer.includes('Selected SQL reference'));
+  for (const label of ['Measure', 'Period', 'Dimension', 'Filter']) {
+    assert.ok(renderer.includes(`['${label}'`) || renderer.includes(`["${label}"`));
+  }
+  assert.ok(markup.includes('Recovery trace'));
+  assert.ok(!renderer.includes('Example reference'));
+  assert.ok(source.includes('card.className = "inspect-schema-node"'));
+  assert.ok(source.includes('join.className = "inspect-schema-join"'));
+  assert.ok(!source.includes('schemaGraphSvg('));
+});
+test('inspector context cards are built from response rows, not prototype values', () => {
+  assert.ok(source.includes('grid.className = "inspect-grid"'));
+  assert.ok(source.includes('body.state?.semantic_contract'));
+  assert.ok(source.includes('chartSpec?.y_label'));
+  assert.ok(styles.includes('.inspect-tile-value'));
+  assert.ok(!source.includes('Example reference · Check actual schema'));
+});
+test('successful response template orders Answer, Data and SQL', () => {
+  const template = markup.split('<template id="assistantTemplate">')[1].split('</template>')[0];
+  for (const tab of ['answer', 'sql', 'data']) assert.ok(template.includes(`data-response-tab="${tab}"`));
+  assert.ok(template.indexOf('data-response-tab="answer"') < template.indexOf('data-response-tab="data"'));
+  assert.ok(template.indexOf('data-response-tab="data"') < template.indexOf('data-response-tab="sql"'));
+  assert.ok(template.includes('class="answer-tab-panel"'));
+  assert.ok(template.includes('class="sql-result-split" hidden'));
+  assert.ok(template.includes('class="panel-card sql-panel-pane" role="tabpanel" hidden'));
+  assert.ok(template.includes('class="panel-card result-panel-pane" role="tabpanel" hidden'));
+  assert.ok(template.indexOf('class="chart-section"') > template.indexOf('class="answer-tab-panel"'));
+  const answerRenderer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function generationQuestion('));
+  assert.ok(answerRenderer.includes('wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length)})'));
+  assert.ok(!answerRenderer.includes('options.restored ? "sql"'));
+});
+const tabsContext = vm.createContext({window: {requestAnimationFrame: callback => callback()}});
+vm.runInContext(source.slice(source.indexOf('/* Response views are local'), source.indexOf('function wireChartSection(')), tabsContext);
+test('response tabs are independent, keep the chart and never execute a query', () => {
+  let resized = 0;
+  tabsContext.api = () => { throw Error('tab switching called the API'); };
+  tabsContext.send = () => { throw Error('tab switching sent a question'); };
+  const makeArticle = () => {
+    const buttons = Object.fromEntries(['answer', 'sql', 'data'].map(view => [view, {
+      dataset: {responseTab: view}, disabled: false, attributes: {},
+      setAttribute(name, value) { this.attributes[name] = value; },
+      addEventListener(name, callback) { this.listeners ||= {}; this.listeners[name] = callback; },
+      focus() {},
+    }]));
+    const tabs = {
+      hidden: true,
+      querySelector(selector) { return buttons[selector.match(/data-response-tab="(.*?)"/)?.[1]]; },
+      querySelectorAll() { return Object.values(buttons); },
+    };
+    const answer = {hidden: false, setAttribute() {}};
+    const split = {hidden: true};
+    const sql = {hidden: true, setAttribute() {}};
+    const data = {hidden: true, setAttribute() {}};
+    const versions = {hidden: true, dataset: {available: 'true'}};
+    const nodes = {'.response-tabs': tabs, '.answer-tab-panel': answer,
+      '.sql-result-split': split, '.sql-panel-pane': sql, '.result-panel-pane': data,
+      '.versions-panel': versions};
+    const article = {dataset: {}, _echart: {resize() { resized++; }},
+      querySelector(selector) { return nodes[selector]; }};
+    return {article, buttons, tabs, answer, split, sql, data, versions};
+  };
+  const first = makeArticle(), second = makeArticle();
+  tabsContext.wireResponseTabs(first.article);
+  tabsContext.wireResponseTabs(second.article);
+  assert.equal(first.article.dataset.activeResponseTab, 'answer');
+  first.buttons.sql.listeners.click();
+  assert.equal(first.article.dataset.activeResponseTab, 'sql');
+  assert.equal(first.answer.hidden, true);
+  assert.equal(first.split.hidden, false);
+  assert.equal(first.sql.hidden, false);
+  assert.equal(first.data.hidden, true);
+  assert.equal(first.versions.hidden, false);
+  assert.equal(second.article.dataset.activeResponseTab, 'answer');
+  first.buttons.data.listeners.click();
+  assert.equal(first.data.hidden, false);
+  assert.equal(first.sql.hidden, true);
+  first.buttons.answer.listeners.click();
+  assert.equal(first.answer.hidden, false);
+  assert.equal(first.split.hidden, true);
+  assert.ok(resized >= 3);
+});
+test('a running question does not auto-scroll progress or the final answer', () => {
+  const progress = source.slice(source.indexOf('function appendProgress('), source.indexOf('function wait('));
+  const answer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function generationQuestion('));
+  assert.ok(!progress.includes('scrollIntoView'));
+  assert.ok(!answer.includes('scrollIntoView'));
+  assert.ok(!styles.includes('.thread-scroll { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; }'));
+});
+test('Queryflow colors follow the supplied light and dark reference palettes', () => {
+  for (const color of [
+    '--bg: #fafaf8', '--surface: #ffffff', '--text: #20212b',
+    '--accent: #6e60e6', '--nav: #191b27', '--sql-bg: #1d2130',
+    '--success: #20946c', '--danger: #d45d65', '--warning: #c1803a',
+    '--surface: #242633', '--border: #363747',
+  ]) assert.ok(styles.includes(color), `Missing reference token ${color}`);
+});
 class Element {
   constructor() { this.children = []; }
   append(...children) { this.children.push(...children); }
@@ -46,6 +194,60 @@ test('ECharts uses the verified histogram bin column', () => {
   ]};
   const option = context.window.QueryflowECharts.buildOption(spec);
   assert.deepEqual([...option.xAxis.data], ['10', '20']);
+});
+test('eight-column complete results offer compatible chart alternatives and metrics', () => {
+  const rows = ['2026-01', '2026-02'].flatMap((Month, index) => ['DE', 'FR'].map((Country, group) => ({
+    Month, Country, Revenue: 100 + index + group, Cost: 30 + index, Profit: 70 + group,
+    Orders: 10 + index, Customers: 8 + group, AvgOrderValue: 12 + index,
+  })));
+  const spec = {chart_type: 'multi_line', x: 'Month', y: 'Revenue', series: 'Country',
+    time_format: 'month', source_columns: Object.keys(rows[0]), data: rows};
+  const choices = [...explorer.choices(spec)];
+  assert.ok(choices.includes('multi_line'));
+  assert.ok(choices.includes('stacked_area'));
+  assert.ok([...explorer.filters(spec).metric].includes('Profit'));
+  const filtered = explorer.apply(spec, {categories: ['DE'], metric: 'Profit', chartType: 'line'});
+  assert.equal(filtered.data.length, 2);
+  assert.equal(filtered.y, 'Profit');
+  assert.equal(filtered.chart_type, 'line');
+  assert.equal(spec.data.length, 4, 'display filter must not mutate the executed result');
+});
+test('stacked charts require a complete nonnegative series grid', () => {
+  const base = {chart_type: 'grouped_bar', x: 'Country', y: 'Revenue', series: 'Product',
+    time_format: 'raw', data: [
+      {Country: 'DE', Product: 'A', Revenue: 1}, {Country: 'DE', Product: 'B', Revenue: 2},
+      {Country: 'FR', Product: 'A', Revenue: 3},
+    ]};
+  assert.ok(![...explorer.choices(base)].includes('stacked_bar'));
+  assert.ok(![...explorer.choices({...base, data: [...base.data,
+    {Country: 'FR', Product: 'B', Revenue: -1} ]})].includes('stacked_bar'));
+  assert.ok([...explorer.choices({...base, data: [...base.data,
+    {Country: 'FR', Product: 'B', Revenue: 4} ]})].includes('stacked_bar'));
+});
+test('time zoom counts unique chronological points and excludes ordinary categories', () => {
+  const make = (count, time) => ({chart_type: time ? 'line' : 'bar', x: 'Period', y: 'Value',
+    time_format: time ? 'day' : 'raw', data: Array.from({length: count}, (_, index) => ({
+      Period: time ? new Date(Date.UTC(2026, 0, index + 1)).toISOString().slice(0, 10) : `Group ${index}`,
+      Value: index + 1,
+    }))});
+  assert.equal(context.window.QueryflowECharts.buildOption(make(25, true)).dataZoom.length, 0);
+  assert.equal(context.window.QueryflowECharts.buildOption(make(26, true)).dataZoom.length, 2);
+  assert.equal(context.window.QueryflowECharts.buildOption(make(30, false)).dataZoom.length, 0);
+  const multi = make(26, true);
+  multi.chart_type = 'multi_line'; multi.series = 'Country';
+  multi.data = multi.data.flatMap(row => [{...row, Country: 'DE'}, {...row, Country: 'FR'}]);
+  assert.equal(context.window.QueryflowECharts.buildOption(multi).dataZoom.length, 2);
+  const zoomed = explorer.apply(make(26, true), {start: '2026-01-10', end: '2026-01-20'});
+  assert.equal(zoomed.data.length, 11);
+});
+test('chart UI stays within the response; visual controls do not call query APIs', () => {
+  assert.ok(markup.includes('class="chart-suggestions"'));
+  assert.ok(markup.includes('class="chart-filter-panel"'));
+  assert.ok(markup.includes('class="chart-category-filter" multiple'));
+  assert.ok(markup.includes('class="chart-reset-zoom"'));
+  const chartWiring = source.slice(source.indexOf('function wireChartSection('), source.indexOf('function toast('));
+  assert.ok(!chartWiring.includes('await api('));
+  assert.ok(!chartWiring.includes('send('));
 });
 
 vm.runInContext(source.slice(source.indexOf('function renderTable('), source.indexOf('function downloadCsv(')), context);

@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=qf4-2" />
+    <link rel="stylesheet" href="/static/styles.css?v=qf4-9" />
     <script>
       // Apply the stored theme before first paint to avoid a flash.
       try {
@@ -41,15 +41,8 @@
         <div class="side-label">WORKSPACE</div>
         <nav class="side-nav" aria-label="Views">
           <a class="active" href="#composerZone" data-view="workspace"><span data-icon="message"></span><span>Conversations</span></a>
-          <a href="#exploreView" data-view="explore"><span data-icon="table"></span><span>Schema explorer</span></a>
-          <a href="#connectionCard" data-view="connections"><span data-icon="network"></span><span>Execution insights</span></a>
         </nav>
 
-        <div class="side-label">YOUR CONVERSATIONS</div>
-        <div class="history-search">
-          <span data-icon="search"></span>
-          <input id="historySearch" type="search" placeholder="Search history…" aria-label="Search conversation history" />
-        </div>
         <section class="side-section" aria-label="Conversation history">
           <div class="section-head">
             <span>Recent</span>
@@ -63,20 +56,6 @@
         </section>
 
         <div class="side-footer">
-          <section class="connection-card" id="connectionCard" aria-label="Model connection settings">
-            <div class="connection-heading">
-              <span class="db-logo" data-icon="database"></span>
-              <div class="db-caption-block">
-                <strong class="db-name">Connection</strong>
-                <span class="health-pill" id="healthStatus"><i></i><span>Connecting</span></span>
-              </div>
-            </div>
-            <label for="sqlModelSelect">SQL generator</label>
-            <select id="sqlModelSelect"></select>
-            <label for="contextModelSelect">Context method</label>
-            <select id="contextModelSelect"></select>
-            <code id="sessionId" title="Conversation session"></code>
-          </section>
           <button class="theme-switch" id="themeToggle" type="button">
             <span data-icon="moon"></span> Toggle appearance
           </button>
@@ -90,9 +69,15 @@
             <strong id="threadBreadcrumb">Live database</strong>
           </div>
           <div class="top-actions">
-            <span class="header-status" id="connectionStatus">Connecting…</span>
+            <label class="header-database" for="databaseSelect"><span>Database</span><select id="databaseSelect" class="selected-db" aria-label="Database"></select></label>
+            <section class="connection-card header-connection" id="connectionCard" aria-label="Connection status">
+              <div class="connection-heading">
+                <span class="health-pill" id="healthStatus"><i></i><strong>Connection</strong><span>Connecting</span></span>
+              </div>
+              <code id="sessionId" title="Conversation session"></code>
+            </section>
             <button class="headbtn" id="themeToggleTop" type="button" aria-label="Toggle light or dark theme" data-icon-slot="sun-moon"><span data-icon="moon"></span></button>
-            <button class="headbtn" id="inspectorToggle" type="button" aria-label="Toggle inspector" aria-expanded="true">
+            <button class="headbtn" id="inspectorToggle" type="button" aria-label="Toggle inspector" aria-expanded="false">
               <span data-icon="panel"></span><span class="headbtn-label">Inspector</span>
             </button>
           </div>
@@ -110,66 +95,45 @@
               <div class="welcome-mark" data-icon="sparkles"></div>
               <div class="intro-eyebrow">WELCOME TO QUERYFLOW</div>
               <h2>What would you like to know?</h2>
-              <p>Ask in plain language — get generated SQL with the exact results, or a chart only when you request one.</p>
-              <div class="example-cards" id="heroExamples"></div>
+              <p>Ask in plain language. Queryflow will show the SQL and results, or a chart when you request one.</p>
             </section>
 
             <section id="messages" class="messages"></section>
           </div>
 
-          <section id="exploreView" class="explore-view" hidden aria-labelledby="exploreTitle">
-            <header class="explore-head">
-              <div><div class="intro-eyebrow">DATABASE EXPLORER</div><h2 id="exploreTitle">Explore database</h2><p>Physical schema only — profile inferences are labeled separately.</p></div>
-            </header>
-            <div class="explore-toolbar">
-              <div id="exploreSummary" role="status">Loading database schema…</div>
-              <input id="exploreSearch" type="search" placeholder="Search tables or columns…" aria-label="Search tables or columns" />
-            </div>
-            <div id="exploreTables" class="explore-tables"></div>
-            <section class="explore-relationships-block">
-              <h3>Relationships</h3>
-              <p>Declared foreign keys come from the live schema; profile inferences are labeled.</p>
-              <div id="exploreRelationships" class="explore-relationships"></div>
-            </section>
-          </section>
         </div>
 
         <div class="composer-zone workspace-only" id="composerZone">
           <div class="composer-inner">
             <form class="composer" id="chatForm">
               <textarea id="messageInput" rows="1" placeholder="Ask a question, request a plot, or refine the previous answer…" aria-label="Question" required></textarea>
-              <div class="chipset" id="composerChips">
-                <button type="button" class="chip" data-question="Check whether the previous SQL and result are correct." disabled>Check correctness</button>
-                <button type="button" class="chip" data-question="Optimize the previous SQL without changing its result." disabled>Optimize query</button>
-                <button type="button" class="chip" data-question="Explain the last result and the SQL behind it in plain language." disabled>Explain this SQL</button>
-                <button type="button" class="chip" data-question="Plot the previous result." disabled>Plot these results</button>
-                <button type="button" class="chip" data-question="Make it a bar chart." disabled>Make it a bar chart</button>
-              </div>
               <div class="composer-bottom">
-                <select id="databaseSelect" class="selected-db" aria-label="Database"></select>
                 <span class="composer-actions">
-                  <button type="button" id="voiceButton" class="ghost-button" aria-label="Record a question" title="Loading voice input…" hidden>
+                  <button type="button" id="voiceButton" class="ghost-button" aria-label="Record a question" title="Loading voice input…" disabled>
                     <span data-icon="mic"></span>
                   </button>
                   <button type="button" id="voiceCancelButton" class="ghost-button danger" hidden>Discard</button>
                   <button type="button" id="cancelButton" class="ghost-button danger" hidden><span data-icon="square"></span> Cancel</button>
                 </span>
-                <span class="composer-hint">Enter to send · Shift + Enter for a new line</span>
                 <button type="submit" id="sendButton" class="submit" aria-label="Run query"><span data-icon="send"></span></button>
               </div>
             </form>
             <p id="voiceStatus" class="voice-status" role="status" aria-live="polite"></p>
-            <p class="bottom-caption">Read-only execution · Generated SQL is validated before it runs · Recovery evidence is never fabricated</p>
           </div>
         </div>
       </main>
 
-      <aside class="inspector" id="inspectorPane" aria-label="Query inspector">
-        <div class="inspector-resizer" id="inspectorResizer" role="separator" aria-orientation="vertical" aria-label="Resize inspector" tabindex="0"></div>
+      <aside class="inspector" id="inspectorPane" aria-label="Contextual inspector" aria-hidden="true">
         <header class="inspector-header">
-          <span data-icon="panel"></span> Inspector
+          <span>Context inspector</span>
           <button class="icon-button" id="inspectorClose" type="button" title="Collapse inspector"><span data-icon="x"></span></button>
         </header>
+        <nav class="inspector-tabs" role="tablist" aria-label="Inspector views">
+          <button type="button" role="tab" data-inspector-tab="understanding" aria-selected="true">Context</button>
+          <button type="button" role="tab" data-inspector-tab="schema" aria-selected="false">Schema</button>
+          <button type="button" role="tab" data-inspector-tab="recovery" aria-selected="false">Recovery trace</button>
+          <button type="button" role="tab" data-inspector-tab="validation" aria-selected="false">Details</button>
+        </nav>
         <div class="inspector-body">
           <details class="inspector-section" id="understandingSection" open>
             <summary><span data-icon="message"></span> Query understanding</summary>
@@ -178,22 +142,23 @@
           <details class="inspector-section" id="schemaSection" open>
             <summary><span data-icon="network"></span> Selected schema</summary>
             <div class="inspector-content" id="schemaContent">
+              <div class="inspect-kicker">RELEVANT SCHEMA · VERIFIED CONTEXT</div>
               <div class="schema-graph" id="schemaGraph"><p class="inspector-empty">The verified tables used by the current query appear here.</p></div>
-              <div class="schema-chips" id="schemaChips"></div>
               <div id="schemaDetail"></div>
             </div>
           </details>
           <details class="inspector-section" id="recoverySection">
             <summary><span data-icon="binoculars"></span> Recovery evidence</summary>
-            <div class="inspector-content" id="recoveryMini"><p class="inspector-empty">The recovery agent only activates on anomalies.</p></div>
+            <div class="inspector-content" id="recoveryMini"><div class="inspect-kicker">INVESTIGATION · VERIFIED EVIDENCE</div><p class="inspector-empty">The recovery agent only activates on anomalies.</p></div>
           </details>
           <details class="inspector-section" id="validationSection">
             <summary><span data-icon="shield"></span> Validation &amp; performance</summary>
-            <div class="inspector-content" id="validationContent"><p class="inspector-empty">Attempts, timings and token usage appear after a run.</p></div>
+            <div class="inspector-content" id="validationContent"><div class="inspect-kicker">EXECUTION · MEASURED DETAILS</div><p class="inspector-empty">Attempts, timings and token usage appear after a run.</p></div>
           </details>
         </div>
       </aside>
     </div>
+    <button class="inspector-drawer-backdrop" id="inspectorBackdrop" type="button" aria-label="Close inspector" hidden></button>
     <div id="layers"></div>
 
     <template id="assistantTemplate">
@@ -202,14 +167,18 @@
         <div class="answer">
           <section class="response-card">
             <header class="result-head">
-              <span class="result-title response-heading"><h3>Answer</h3></span>
               <span class="status-pill"><span data-icon="check"></span> <span class="status-pill-label">Ready</span></span>
             </header>
-            <div class="badges response-meta" hidden></div>
-            <p class="response-note"></p>
-            <div class="query-semantic-strip" hidden aria-label="Interpreted query constraints"></div>
-            <p class="presentation-note" hidden></p>
-            <div class="chart-section" hidden>
+            <nav class="response-tabs" role="tablist" aria-label="Response views" hidden>
+              <button type="button" role="tab" data-response-tab="answer" aria-selected="true">Answer</button>
+              <button type="button" role="tab" data-response-tab="data" aria-selected="false">Data</button>
+              <button type="button" role="tab" data-response-tab="sql" aria-selected="false">SQL</button>
+            </nav>
+            <div class="answer-tab-panel" role="tabpanel">
+              <p class="response-note"></p>
+              <div class="query-semantic-strip" hidden aria-label="Interpreted query constraints"></div>
+              <p class="presentation-note" hidden></p>
+              <div class="chart-section" hidden>
               <header class="chart-head">
                 <div class="chart-head-left">
                   <div class="chart-kicker">REQUESTED VISUALIZATION</div>
@@ -232,13 +201,33 @@
                   </div>
                 </div>
               </header>
+              <div class="chart-explorer" hidden>
+                <details class="chart-filter-panel">
+                  <summary>Filters &amp; Parameters <span class="chart-filter-count" hidden></span></summary>
+                  <div class="chart-filter-controls">
+                    <label class="chart-category-control" hidden>Category (select multiple)<select class="chart-category-filter" multiple size="4"></select></label>
+                    <label class="chart-metric-control" hidden>Metric<select class="chart-metric-filter"></select></label>
+                    <label class="chart-start-control" hidden>From<select class="chart-start-filter"></select></label>
+                    <label class="chart-end-control" hidden>To<select class="chart-end-filter"></select></label>
+                    <label class="chart-top-control" hidden>Top N<select class="chart-top-filter"><option value="">All</option><option value="5">5</option><option value="10">10</option><option value="20">20</option></select></label>
+                    <button type="button" class="chart-apply-filter">Apply Filters</button>
+                    <button type="button" class="chart-reset-filter">Reset Filters</button>
+                    <button type="button" class="chart-clear-filter">Clear All</button>
+                  </div>
+                  <p class="chart-filter-note">Display-only filters use the complete executed result. For additional data or a different aggregation, ask a follow-up question.</p>
+                </details>
+                <div class="chart-suggestions" role="group" aria-label="Suggested charts"></div>
+              </div>
               <div class="chart-slot"></div>
+              <div class="chart-zoom-actions" hidden><button type="button" class="chart-reset-zoom">Reset zoom</button></div>
+              </div>
+
+              <div class="callout error" hidden><span class="callout-icon" data-icon="alert"></span><div class="callout-text"></div></div>
+              <div class="answer-preview" hidden></div>
             </div>
 
-            <div class="callout error" hidden><span class="callout-icon" data-icon="alert"></span><div class="callout-text"></div></div>
-
-            <div class="sql-result-split">
-              <section class="panel-card sql-panel-pane">
+            <div class="sql-result-split" hidden>
+              <section class="panel-card sql-panel-pane" role="tabpanel" hidden>
                 <header>
                   <span data-icon="zap"></span><strong>Generated SQL</strong><small class="sql-validity"></small>
                   <div class="panel-actions">
@@ -249,7 +238,7 @@
                 </header>
                 <div class="sql-editor"><pre><code class="language-sql"></code></pre></div>
               </section>
-              <section class="panel-card result-panel-pane">
+              <section class="panel-card result-panel-pane" role="tabpanel" hidden>
                 <header>
                   <span data-icon="table"></span><strong>Result</strong><small class="row-count"></small>
                   <div class="panel-actions">
@@ -309,7 +298,8 @@
 
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
     <script src="/static/icons.js?v=3"></script>
-    <script src="/static/echarts_view.js?v=9"></script>
-    <script src="/static/app.js?v=qf4-2"></script>
+    <script src="/static/echarts_view.js?v=10"></script>
+    <script src="/static/chart_explorer.js?v=1"></script>
+    <script src="/static/app.js?v=qf4-11"></script>
   </body>
 </html>

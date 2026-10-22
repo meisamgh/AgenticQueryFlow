@@ -47,6 +47,7 @@ from semantic_text2sql.llm import (
     RoutingSQLModel,
 )
 from semantic_text2sql.models import (
+    DEFAULT_MODEL,
     Attempt,
     CallLedgerEntry,
     ChatRequest,
@@ -94,6 +95,7 @@ from semantic_text2sql.visualization import (
 from semantic_text2sql.voice import (
     MAX_AUDIO_BYTES,
     MAX_AUDIO_SECONDS,
+    GroqVoiceTranscriber,
     QwenVoiceTranscriber,
     TranscriptionResult,
     VoiceInputError,
@@ -106,11 +108,19 @@ logger = logging.getLogger(__name__)
 def create_app(
     agent: TextToSQLAgent | None = None,
     conversation_completers: dict[str, Any] | None = None,
-    voice_transcriber: QwenVoiceTranscriber | None = None,
+    voice_transcriber: QwenVoiceTranscriber | GroqVoiceTranscriber | None = None,
     run_history: RunHistoryStore | None = None,
 ) -> FastAPI:
     enforce_model_catalog = agent is None
-    voice = voice_transcriber or QwenVoiceTranscriber.from_environment()
+    if voice_transcriber is not None:
+        voice = voice_transcriber
+    else:
+        qwen_voice = QwenVoiceTranscriber.from_environment()
+        voice = (
+            qwen_voice
+            if qwen_voice.unavailable_reason() is None
+            else GroqVoiceTranscriber.from_environment()
+        )
     runs = run_history or RunHistoryStore.from_environment()
     postgres_databases = postgres_databases_from_environment()
     postgres = PostgresRegistry(postgres_databases) if postgres_databases else None
@@ -267,12 +277,24 @@ def create_app(
         response.headers["Cache-Control"] = "no-store"
         return configured_model_options()
 
+    @app.get("/api/ui-config")
+    async def ui_config(response: Response) -> dict[str, str | None]:
+        response.headers["Cache-Control"] = "no-store"
+        return {
+            "sql_provider": os.environ.get("TEXT2SQL_SQL_PROVIDER") or "agentrouter",
+            "sql_model": os.environ.get("TEXT2SQL_SQL_MODEL") or DEFAULT_MODEL,
+            "context_mode": os.environ.get("TEXT2SQL_CONTEXT_MODE") or "retrieval",
+            "context_provider": os.environ.get("TEXT2SQL_CONTEXT_PROVIDER") or None,
+            "context_model": os.environ.get("TEXT2SQL_CONTEXT_MODEL") or None,
+        }
+
     @app.get("/api/voice")
     async def voice_configuration(response: Response) -> dict[str, Any]:
         response.headers["Cache-Control"] = "no-store"
         reason = voice.unavailable_reason()
         return {
             "configured": reason is None,
+            "provider": voice.provider,
             "model": voice.model,
             "max_duration_seconds": MAX_AUDIO_SECONDS,
             "unavailable_reason": reason,
