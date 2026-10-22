@@ -15,6 +15,7 @@ from semantic_text2sql.analytics_planner import (
     refine_plan_with_model,
 )
 from semantic_text2sql.conversation import ConversationState
+from semantic_text2sql.runtime import RequestBudget
 from semantic_text2sql.visualization import parse_intent
 
 
@@ -94,6 +95,16 @@ def test_filter_addition_preserves_earlier_metric_and_entities() -> None:
     assert plan.preserve_existing["metric_definition"] is True
 
 
+def test_filter_to_value_is_never_treated_as_plain_plot_reuse() -> None:
+    plan = plan_analytics(
+        "Now filter it to Germany and plot it.",
+        viz_intent=parse_intent("Now filter it to Germany and plot it.", has_previous=True),
+        previous=_previous(columns=["country", "total_consumption"]), db_id="books",
+    )
+    assert any(change.operation == "ADD_FILTER" for change in plan.semantic_changes)
+    assert plan.preserve_existing["filters"] is False
+
+
 def test_remove_word_maps_to_remove_filter() -> None:
     plan = plan_analytics(
         "Hide France from this chart.",
@@ -131,6 +142,24 @@ def test_plain_plot_request_existing_data_reuses_result() -> None:
 
     assert plan.operation == "VISUALIZE_EXISTING"
     assert plan.depends_on_previous is True
+
+
+def test_optional_planner_respects_shared_model_call_budget() -> None:
+    class ShouldNotCall:
+        async def complete(self, *, model: str, prompt: str) -> str:
+            raise AssertionError("model call should be denied by request budget")
+
+    draft = plan_analytics(
+        "Plot it.", viz_intent=parse_intent("Plot it.", has_previous=True),
+        previous=_previous(), db_id="books",
+    )
+    budget = RequestBudget(10, max_model_calls=0, max_database_calls=0)
+    result, _, _ = asyncio.run(refine_plan_with_model(
+        ShouldNotCall(), provider="agentrouter", model="test", message="Plot it.",
+        previous=_previous(), plan=draft, budget=budget,
+    ))
+    assert result.source == "fallback"
+    assert budget.model_calls == 0
 
 
 def test_explaining_a_chart_is_not_an_analytical_change() -> None:

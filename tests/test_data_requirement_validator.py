@@ -62,6 +62,39 @@ def test_scenario_b_complete_monthly_rows_are_reused_without_sql() -> None:
     assert not requirement.additivity_note
 
 
+def test_metric_and_filter_changes_require_new_sql() -> None:
+    for operation in (
+        "ADD_FILTER", "REMOVE_FILTER", "REPLACE_FILTER", "CHANGE_METRIC", "COMPARE_WITH"
+    ):
+        plan = _plan()
+        plan.semantic_changes = [SemanticChange(operation=operation, target="country")]
+        result = validate_reusability(
+            plan, stored_columns=["month", "total_consumption"],
+            stored_rows=[["202501", 100]], stored_row_count=1,
+            stored_truncated=False,
+        )
+        assert result.decision == "requery_database", operation
+
+
+def test_missing_requested_metric_cannot_reuse_aggregate() -> None:
+    result = validate_reusability(
+        _plan(metrics=["profit"]),
+        stored_columns=["month", "revenue"],
+        stored_rows=[["202501", 100]], stored_row_count=1,
+        stored_truncated=False,
+    )
+    assert result.decision == "requery_database"
+
+
+def test_incomplete_saved_snapshot_cannot_be_reused() -> None:
+    result = validate_reusability(
+        _plan(), stored_columns=["month", "revenue"],
+        stored_rows=[["202501", 100]], stored_row_count=2,
+        stored_truncated=False,
+    )
+    assert result.decision == "need_clarification"
+
+
 def test_scenario_c_missing_country_dimension_requeries_and_preserves_state() -> None:
     requirement = validate_reusability(
         _plan(dimensions=["country"]),

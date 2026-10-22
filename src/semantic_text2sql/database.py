@@ -149,12 +149,13 @@ class DatabaseRegistry:
         *,
         max_rows: int,
         timeout_seconds: float = 5.0,
+        parameters: tuple[Any, ...] = (),
     ) -> tuple[list[str], list[list[Any]], bool]:
         deadline = monotonic() + timeout_seconds
         with closing(self.connect(db_id)) as connection:
             connection.set_progress_handler(lambda: 1 if monotonic() > deadline else 0, 1_000)
             try:
-                cursor = connection.execute(sql)
+                cursor = connection.execute(sql, parameters)
                 rows = cursor.fetchmany(max_rows + 1)
             except sqlite3.Error as exc:
                 raise DatabaseError("SQL_EXECUTION_FAILED", str(exc)) from exc

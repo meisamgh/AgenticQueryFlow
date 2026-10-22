@@ -10,7 +10,7 @@ const state = {
   busy: false, jobId: null, cancelled: false, currentQuestion: "", ready: false,
   lastBody: null, history: [], saved: [], glossaryByDb: {}, schemaRequest: 0,
   activeRunId: null, diffCache: new Map(), modelConfig: null,
-  restorePending: false, pendingBranch: false,
+  restorePending: false,
 };
 let voiceInput = null;
 import("/static/voice.js?v=voice-1").then(async ({VoiceInput}) => {
@@ -23,7 +23,6 @@ import("/static/voice.js?v=voice-1").then(async ({VoiceInput}) => {
 }).catch(() => { $("#voiceStatus").textContent = "Voice input could not load. You can still type a question."; });
 
 const recentStorageKey = "queryRoomRecentQueries";
-const savedStorageKey = "queryRoomSaved";
 const postSafetyOptimizationCodes = new Set([
   "OPTIMIZATION_NOT_FASTER",
   "OPTIMIZATION_CHANGED_RESULT",
@@ -90,7 +89,6 @@ async function initialize() {
     $("#sendButton").disabled = !state.ready || !!voiceInput?.busy;
     if (!configuredSql) showError("The SQL model configured in .env is unavailable. Check TEXT2SQL_SQL_PROVIDER and TEXT2SQL_SQL_MODEL.");
     else if (!configuredContext) showError("The context model configured in .env is unavailable. Check TEXT2SQL_CONTEXT_PROVIDER and TEXT2SQL_CONTEXT_MODEL.");
-    renderSaved();
   } catch (error) {
     setHealth(false);
     showError(error.message);
@@ -444,7 +442,6 @@ async function send(message, feedbackCategory = null) {
         db_id: $("#databaseSelect").value,
         message: message.trim(),
         parent_run_id: state.activeRunId,
-        branch_from_parent: state.pendingBranch,
         execute: true,
         max_rows: 100,
         feedback_category: feedbackCategory,
@@ -455,7 +452,6 @@ async function send(message, feedbackCategory = null) {
     const body = await waitForJob(created.job_id, progress);
     progress.remove();
     state.activeRunId = body.history_saved ? body.run_id : null;
-    if (body.history_saved) state.pendingBranch = false;
     await appendAssistant(body, (performance.now() - started) / 1000);
     void refreshHistory();
   } catch (error) {
@@ -924,7 +920,7 @@ function wireDataScope(article, generation) {
       if (index < 0) return true;
       return allowedValues(filter).includes(String(row[index]));
     }));
-    return filtered.length ? filtered : rows;
+    return filtered;
   }
   function filterNoteText() {
     return clientFilters.map(filter => {
@@ -935,6 +931,7 @@ function wireDataScope(article, generation) {
   }
   function setClientFilters(filters) {
     clientFilters = filters;
+    if (filters.length && !generation.truncated) scope = "visible";
     /* One shared controller: the ECharts view updates through the same row
        filters; the Data tab re-renders; Source Data stays the original rows. */
     article._setChartViewRowFilters?.(filters);
@@ -942,13 +939,15 @@ function wireDataScope(article, generation) {
   }
   let scope = "source";
   function renderScope() {
-    const visible = scope === "visible" && article._visibleChartSpec;
+    const visible = scope === "visible" && !generation.truncated
+      && (article._visibleChartSpec || clientFilters.length);
     const spec = article._visibleChartSpec;
-    const shownColumns = visible && spec.transformation && spec.transformation !== "none"
+    const shownColumns = visible && spec?.transformation && spec.transformation !== "none"
       ? Object.keys(spec.data[0] || {}) : columns;
     /* Source Data is the original executed result, never a filtered copy. */
     const rows = visible
-      ? spec.data.map(row => shownColumns.map(column => row[column] ?? null))
+      ? spec ? spec.data.map(row => shownColumns.map(column => row[column] ?? null))
+        : applyClientFilters(sourceRows)
       : sourceRows;
     wrap.replaceChildren();
     renderTable(wrap, shownColumns, rows);
@@ -960,11 +959,13 @@ function wireDataScope(article, generation) {
       ? ` · row filter: ${filterNoteText()} (display only)`
       : "";
     note.textContent = visible
-      ? `${rows.length} visible chart rows · X: ${spec.x} · Y: ${(spec.y_measures || [spec.y]).join(", ")}${filterNote}`
+      ? spec
+        ? `${rows.length} visible chart rows · X: ${spec.x} · Y: ${(spec.y_measures || [spec.y]).join(", ")}${filterNote}`
+        : `${rows.length} visible rows · display filter: ${filterNoteText()} · SQL unchanged`
       : `${sourceRows.length} of ${generation.row_count ?? sourceRows.length} returned rows (source result, unfiltered)${generation.truncated ? " · preview only; source result truncated" : " · complete within the executed row limit"}`;
     sourceTab.setAttribute("aria-selected", String(!visible));
     visibleTab.setAttribute("aria-selected", String(Boolean(visible)));
-    visibleTab.disabled = !spec;
+    visibleTab.disabled = !spec && !clientFilters.length;
   }
   sourceTab.addEventListener("click", () => { scope = "source"; renderScope(); });
   visibleTab.addEventListener("click", () => { scope = "visible"; renderScope(); });
@@ -1029,7 +1030,8 @@ function wireChartSection(article, presentation, generation, runId) {
       section.querySelector(".chart-active-label").textContent = "No visible chart rows · display filters only; SQL unchanged";
       return;
     }
-    if (explorer?.isTime(next) && settings.zoom && next.data.length > 25) {
+    if (explorer?.isTime(next) && settings.zoom
+        && new Set(next.data.map(row => String(row[next.x]))).size > 25) {
       next.zoom_start = settings.zoom.start;
       next.zoom_end = settings.zoom.end;
     }
@@ -1146,6 +1148,7 @@ function wireChartSection(article, presentation, generation, runId) {
       renderCurrent();
     },
   };
+  article._setChartViewRowFilters = filters => article._chartViewState.setRowFilters(filters);
   if (explorer && options && panel) {
     panel.hidden = false;
     fillFilter(".chart-category-filter", options.categories);
@@ -1543,19 +1546,16 @@ async function appendAssistant(body, elapsed, options = {}) {
   fragment.querySelector(".result-panel-pane").hidden = sqlNotAvailable || explanatory;
 
   const actions = fragment.querySelector(".answer-actions");
-  if (accepted && !explanatory) {
-    if (body.run_id && !options.restored) actions.append(actionButton("Branch from here", "git", async () => {
-      try {
-        await continueRun(body.run_id);
-        state.pendingBranch = true;
-        $("#messageInput").placeholder = "Explore an alternative question from this point…";
-      }
-      catch (error) { showError(error.message); }
-    }));
-    actions.append(
-      actionButton("Check correctness", "shield", () => send("Check whether the previous SQL and result are correct.")),
-      actionButton("Optimize", "zap", () => send("Optimize the previous SQL without changing its result.")),
-      actionButton("Save question", "bookmark", () => toggleSaved(generationQuestion(body, generation), article)),
+  if (accepted && !explanatory && !sqlNotAvailable) {
+    const sqlActions = fragment.querySelector(".sql-actions");
+    const runId = body.run_id || options.run?.run_id || null;
+    sqlActions.append(
+      actionButton("Check correctness", "shield", () =>
+        sendFromAnswer(runId, "Check whether the previous SQL and result are correct.")
+          .catch(error => showError(error.message))),
+      actionButton("Optimize", "zap", () =>
+        sendFromAnswer(runId, "Optimize the previous SQL without changing its result.")
+          .catch(error => showError(error.message))),
     );
   }
   if (options.restored && options.run) {
@@ -1568,6 +1568,7 @@ async function appendAssistant(body, elapsed, options = {}) {
     snapshot.textContent = `Saved snapshot · ${Math.min(options.run.rows_preview.length, 20)} preview rows of ${options.run.row_count} returned${options.run.truncated ? " (original result truncated)" : ""}. Opening history did not run the query.`;
     actions.before(snapshot);
   }
+  actions.hidden = !actions.children.length;
 
   renderHumanReview(fragment, body.human_review, responseMessage);
   if (!sqlNotAvailable) {
@@ -1612,10 +1613,6 @@ async function appendAssistant(body, elapsed, options = {}) {
   }
   if (!options.restored) updateInspector(body);
   return article;
-}
-
-function generationQuestion(body, generation) {
-  return generation.question || body.resolved_question || body.conversation_interpretation?.resolved_instruction || "";
 }
 
 function actionButton(label, iconName, onClick) {
@@ -2332,7 +2329,7 @@ function suggestionValueMenu(anchor, item, values, article, runId) {
       go.disabled = true;
       itemValueOptions(item, term)
         .then(payload => {
-          placeInsight(anchor, suggestionValueMenu(anchor, item, payload.values.slice(0, 25), article, runId));
+          suggestionValueMenu(anchor, item, payload.values.slice(0, 25), article, runId);
         })
         .catch(error => { showError(error.message); go.disabled = false; });
     });
@@ -2358,6 +2355,12 @@ function suggestionValueMenu(anchor, item, values, article, runId) {
     });
     panel.append(button);
   });
+  if (!values.length) {
+    const empty = document.createElement("p");
+    empty.className = "query-insight-empty";
+    empty.textContent = "No matching values found. Try another search.";
+    panel.append(empty);
+  }
   if (article._clearClientFilter && article._hasClientFilter?.()) {
     const clear = document.createElement("button");
     clear.type = "button";
@@ -2742,7 +2745,6 @@ function renderHistory() {
 
 async function openRun(run) {
   if (state.busy || voiceInput?.busy) return;
-  state.pendingBranch = false;
   $("#emptyState").hidden = true;
   state.activeRunId = run.run_id;
   renderHistory();
@@ -2768,7 +2770,6 @@ async function continueRun(runId, focus = true) {
   const savedState = await api(`/api/history/${encodeURIComponent(runId)}/continue?session_id=${encodeURIComponent(sessionId)}`, {method: "POST"});
   state.activeRunId = runId;
   state.restorePending = false;
-  state.pendingBranch = false;
   $("#databaseSelect").value = savedState.db_id;
   renderHistory();
   if (focus) {
@@ -2843,61 +2844,6 @@ function restoredRunToResponse(record) {
       recovery: record.recovery || null,
     },
   };
-}
-
-/* ---------- Saved questions ---------- */
-
-function getSaved() {
-  try { return JSON.parse(localStorage.getItem(savedStorageKey) || "[]"); }
-  catch { return []; }
-}
-
-function toggleSaved(question, article) {
-  const saved = getSaved();
-  const exists = saved.includes(question);
-  const next = exists ? saved.filter(item => item !== question) : [question, ...saved].slice(0, 20);
-  localStorage.setItem(savedStorageKey, JSON.stringify(next));
-  renderSaved();
-  if (article) {
-    const button = article.querySelector(".save-button");
-    if (button) button.title = exists ? "Save this question" : "Saved";
-  }
-}
-
-function renderSaved() {
-  const container = $("#savedQuestions");
-  container.replaceChildren();
-  const saved = getSaved();
-  if (!saved.length) {
-    container.append(emptySaveNote());
-    return;
-  }
-  saved.forEach(question => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "run-item";
-    const iconWrap = document.createElement("span");
-    iconWrap.innerHTML = icon("bookmark", 14);
-    const main = document.createElement("div");
-    main.className = "run-main";
-    const title = document.createElement("span");
-    title.className = "run-title";
-    title.textContent = question;
-    main.append(title);
-    button.append(iconWrap, main);
-    button.addEventListener("click", () => {
-      $("#messageInput").value = question;
-      $("#messageInput").focus();
-    });
-    container.append(button);
-  });
-}
-
-function emptySaveNote() {
-  const p = document.createElement("p");
-  p.className = "list-empty";
-  p.textContent = "Star a result to keep the question here.";
-  return p;
 }
 
 /* ---------- Theme, inspector, keyboard ---------- */
@@ -3008,7 +2954,6 @@ $("#clearHistory").addEventListener("click", async () => {
   state.history = [];
   state.activeRunId = null;
   state.restorePending = false;
-  state.pendingBranch = false;
   renderHistory();
 });
 
@@ -3021,7 +2966,6 @@ $("#resetButton").addEventListener("click", async () => {
     $("#messages").replaceChildren();
     state.activeRunId = null;
     state.restorePending = false;
-    state.pendingBranch = false;
     $("#emptyState").hidden = false;
     $("#threadIntro").hidden = true;
     $("#threadBreadcrumb").textContent = "Live database";
@@ -3034,7 +2978,6 @@ initialize();
 $("#databaseSelect").addEventListener("change", async () => {
   state.activeRunId = null;
   state.restorePending = false;
-  state.pendingBranch = false;
   await loadDatabaseSchema();
   await loadGlossary($("#databaseSelect").value);
 });

@@ -30,6 +30,7 @@ from semantic_text2sql.models import (
 from semantic_text2sql.models import (
     RecommendedChart as RecommendedChart,
 )
+from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded
 from semantic_text2sql.visualization import (
     VisualizationError,
     VisualizationIntent,
@@ -577,6 +578,7 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     rows: list[list[Any]],
     truncated: bool = False,
     timeout_seconds: float = 12.0,
+    budget: RequestBudget | None = None,
 ) -> tuple[ChartRecommendations | None, TokenUsage, int]:
     """One bounded model call proposing charts for an executed result.
 
@@ -599,12 +601,16 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     try:
         complete = getattr(completer, "complete_detailed", None)
         if callable(complete):
+            operation = complete(model=model, prompt=prompt)
             raw, usage = await asyncio.wait_for(
-                complete(model=model, prompt=prompt), timeout=timeout_seconds
+                budget.wait(operation, kind="model") if budget else operation,
+                timeout=timeout_seconds,
             )
         else:
+            operation = completer.complete(model=model, prompt=prompt)
             raw = await asyncio.wait_for(
-                completer.complete(model=model, prompt=prompt), timeout=timeout_seconds
+                budget.wait(operation, kind="model") if budget else operation,
+                timeout=timeout_seconds,
             )
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw).strip(), flags=re.IGNORECASE)
         parsed = LLMChartProposals.model_validate(json.loads(text))
@@ -617,6 +623,7 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
         OSError,
         TimeoutError,
         asyncio.exceptions.TimeoutError,
+        RequestBudgetExceeded,
     ):
         return None, usage, round((perf_counter() - started) * 1000)
 

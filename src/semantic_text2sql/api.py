@@ -7,7 +7,7 @@ import logging
 import os
 from datetime import UTC, datetime
 from pathlib import Path
-from time import perf_counter
+from time import monotonic, perf_counter
 from typing import Any, cast
 from uuid import uuid4
 
@@ -113,6 +113,7 @@ from semantic_text2sql.visualization import (
     sql_output_requirement,
 )
 from semantic_text2sql.visualization_recommender import (
+    materialize_recommendation,
     merge_recommendations,
     recommend_charts,
     refine_charts_with_model,
@@ -497,7 +498,7 @@ def create_app(
             "relationships": relationships,
         }
 
-    filter_values_cache: dict[tuple[str, str, str, str], tuple[list[str], bool]] = {}
+    filter_values_cache: dict[tuple[str, str, str, str], tuple[float, list[str], bool]] = {}
 
     @app.get("/api/databases/{db_id}/filter-values", response_model=FilterValuesResponse)
     async def filter_values(
@@ -509,9 +510,8 @@ def create_app(
         be a verified non-key, non-sensitive textual/date column of the live
         schema, and per-column semantic metadata may not mark it sensitive.
         High-cardinality fields use a bounded server-side ``search`` instead of
-        presenting the first values as the complete domain. Keys stay cached
-        per (db, table, column, search); the cache is a bounded, process-local
-        map that is refreshed whenever the schema query changes results.
+        presenting the first values as the complete domain. Values are cached
+        for at most one minute in a bounded, process-local map.
         """
         import re as _re
 
@@ -575,26 +575,33 @@ def create_app(
                 status_code=403,
                 detail="This field is not available for value discovery.",
             )
-        cache_key = (db_id, table, column, search_term.casefold())
+        cache_key = (db_id, table, column, search_term)
         cached = filter_values_cache.get(cache_key)
-        if cached is not None:
-            cached_values, cached_more = cached
+        if cached is not None and monotonic() - cached[0] < 60:
+            _, cached_values, cached_more = cached
             return FilterValuesResponse(
                 db_id=db_id, table=table, column=column, search=search_term or None,
                 values=cached_values, more_available=cached_more, cached=True,
             )
         if search_term:
-            escaped = search_term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-            predicate = f'"{column}" LIKE \'%{escaped}%\' ESCAPE \'\\\\\''
+            # Treat the user's text literally; it is never SQL or a LIKE pattern.
+            placeholder = "?" if schema.dialect == "sqlite" else "%s"
+            predicate = (
+                f'instr(lower(CAST("{column}" AS TEXT)), lower({placeholder})) > 0'
+                if schema.dialect == "sqlite"
+                else f'strpos(lower(CAST("{column}" AS TEXT)), lower({placeholder})) > 0'
+            )
             sql = (
                 f'SELECT DISTINCT CAST("{column}" AS TEXT) FROM "{table}" '
                 f'WHERE "{column}" IS NOT NULL AND {predicate} ORDER BY 1 LIMIT 101'
             )
+            parameters: tuple[str, ...] = (search_term,)
         else:
             sql = (
                 f'SELECT DISTINCT CAST("{column}" AS TEXT) FROM "{table}" '
                 f'WHERE "{column}" IS NOT NULL ORDER BY 1 LIMIT 101'
             )
+            parameters = ()
         try:
             _, rows, _ = await asyncio.to_thread(
                 database.execute,
@@ -602,12 +609,15 @@ def create_app(
                 sql,
                 max_rows=101,
                 timeout_seconds=2.0,
+                parameters=parameters,
             )
         except DatabaseError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         values: list[str] = [str(row[0]) for row in rows if row and row[0] is not None]
         more_available = len(values) > 100
-        filter_values_cache[cache_key] = (values[:100], more_available)
+        if len(filter_values_cache) >= 256:
+            filter_values_cache.clear()
+        filter_values_cache[cache_key] = (monotonic(), values[:100], more_available)
         return FilterValuesResponse(
             db_id=db_id, table=table, column=column, search=search_term or None,
             values=values[:100], more_available=more_available, cached=False,
@@ -769,6 +779,15 @@ def create_app(
                 ),
             )
         started = perf_counter()
+        analytics_usage = TokenUsage()
+        analytics_ledger: list[CallLedgerEntry] = []
+        visualization_usage = TokenUsage()
+        governed_metric_evidence: str | None = None
+        request_budget = RequestBudget(
+            timeout_seconds=float(os.environ.get("TEXT2SQL_REQUEST_TIMEOUT_SECONDS", "180")),
+            max_model_calls=int(os.environ.get("TEXT2SQL_REQUEST_MAX_MODEL_CALLS", "6")),
+            max_database_calls=int(os.environ.get("TEXT2SQL_REQUEST_MAX_DATABASE_CALLS", "24")),
+        )
         set_session_stage(request.session_id, "conversation")
         previous = conversations.get(request.session_id)
         has_matching_state = previous is not None and previous.db_id == request.db_id
@@ -848,14 +867,29 @@ def create_app(
                     known_fields = {name.casefold() for name in source.columns or []}
                     known_fields |= {name.casefold() for name in previous.last_columns}
                     deterministic_plan = proposal
-                    proposal, _refine_usage, _refine_ms = await refine_plan_with_model(
+                    model_calls_before = request_budget.model_calls
+                    proposal, refine_usage, refine_ms = await refine_plan_with_model(
                         turn_completers[request.provider],
                         provider=request.provider,
                         model=request.model,
                         message=request.message,
                         previous=previous,
                         plan=proposal,
+                        budget=request_budget,
                     )
+                    analytics_usage = _add_usage(analytics_usage, refine_usage)
+                    if request_budget.model_calls > model_calls_before:
+                        analytics_ledger.append(CallLedgerEntry(
+                            component="analytics_planner",
+                            kind="MODEL",
+                            status="SUCCEEDED" if proposal.source == "model" else "FAILED",
+                            provider=request.provider,
+                            requested_model=request.model,
+                            effective_model=request.model,
+                            input_tokens=refine_usage.input_tokens,
+                            output_tokens=refine_usage.output_tokens,
+                            latency_ms=refine_ms,
+                        ))
                     invented_derived = (
                         proposal.source == "model"
                         and bool(
@@ -886,6 +920,17 @@ def create_app(
                 requirement = None
                 requery_requested = False
                 if proposal is not None:
+                    approved_requested = [
+                        approved_metrics[metric_id]
+                        for metric_id in proposal.requested_analysis.derived_measures
+                        if metric_id in approved_metrics
+                    ]
+                    if approved_requested:
+                        governed_metric_evidence = "Approved metric definitions:\n" + "\n".join(
+                            f"{metric.id}: {metric.formula}; source={metric.source_relation}; "
+                            f"required_fields={', '.join(metric.required_fields)}"
+                            for metric in approved_requested
+                        )
                     requirement = validate_reusability(
                         proposal,
                         stored_columns=source.columns,
@@ -894,10 +939,7 @@ def create_app(
                         stored_truncated=source.truncated,
                         approved_metrics=approved_metrics or None,
                     )
-                    if (
-                        requirement.decision == "requery_database"
-                        and proposal.semantic_changes
-                    ):
+                    if requirement.decision == "requery_database":
                         requery_requested = True
                 if planner_enabled():
                     metrics_ledger().record(
@@ -932,6 +974,8 @@ def create_app(
                                 "analytics_planning": analytics_planning_ms,
                                 "total": round((perf_counter() - started) * 1000),
                             },
+                            token_usage=analytics_usage,
+                            call_ledger=analytics_ledger,
                         )
                     try:
                         spec = plan_chart(
@@ -978,6 +1022,8 @@ def create_app(
                             "analytics_planning": analytics_planning_ms,
                             "total": round((perf_counter() - started) * 1000),
                         },
+                        token_usage=analytics_usage,
+                        call_ledger=analytics_ledger,
                     )
                 # Fall through: the gate asked for new data, so the proposed
                 # semantic changes route through the accepted text-to-SQL
@@ -1220,16 +1266,13 @@ def create_app(
                     "total": round((perf_counter() - started) * 1_000),
                 },
             )
-        request_budget = RequestBudget(
-            timeout_seconds=float(os.environ.get("TEXT2SQL_REQUEST_TIMEOUT_SECONDS", "180")),
-            max_model_calls=int(os.environ.get("TEXT2SQL_REQUEST_MAX_MODEL_CALLS", "6")),
-            max_database_calls=int(os.environ.get("TEXT2SQL_REQUEST_MAX_DATABASE_CALLS", "24")),
-        )
         execution = await question_service.execute_question(
             request_budget=request_budget,
             question=pending.resolved_question,
             db_id=request.db_id,
-            evidence=request.evidence,
+            evidence="\n\n".join(
+                item for item in (request.evidence, governed_metric_evidence) if item
+            ) or None,
             visualization_requirement=sql_output_requirement(viz_intent),
             provider=request.provider,
             model=request.model,
@@ -1440,6 +1483,7 @@ def create_app(
                 chart_recommendations = None
             if viz_recommender_llm_enabled():
                 try:
+                    model_calls_before = request_budget.model_calls
                     model_recommended, viz_usage, viz_ms = await refine_charts_with_model(
                         turn_completers.get(request.provider),
                         provider=request.provider,
@@ -1447,6 +1491,7 @@ def create_app(
                         question=pending.resolved_question,
                         columns=generated.columns,
                         rows=generated.rows,
+                        budget=request_budget,
                     )
                     client_ledger = [
                         CallLedgerEntry(
@@ -1460,13 +1505,44 @@ def create_app(
                             output_tokens=viz_usage.output_tokens,
                             latency_ms=viz_ms,
                         )
-                    ]
+                    ] if request_budget.model_calls > model_calls_before else []
                     chart_recommendations = merge_recommendations(
                         model_recommended, chart_recommendations
                     )
+                    visualization_usage = _add_usage(visualization_usage, viz_usage)
                     presentation_ledger.extend(client_ledger)
                 except Exception:
                     logger.warning("LLM chart recommendation failed", exc_info=True)
+            if (
+                presentation is not None
+                and viz_intent.requested
+                and not viz_intent.explicit_type
+                and not viz_intent.x
+                and not viz_intent.y
+                and chart_recommendations is not None
+            ):
+                try:
+                    winning_spec = materialize_recommendation(
+                        chart_recommendations.primary_chart,
+                        question=pending.resolved_question,
+                        columns=generated.columns,
+                        rows=generated.rows,
+                        truncated=False,
+                    )
+                    presentation = presentation.model_copy(update={
+                        "chart_spec": winning_spec,
+                        "chart_type": winning_spec.chart_type,
+                        "x": winning_spec.x,
+                        "y": winning_spec.y,
+                        "title": winning_spec.title,
+                        "x_label": winning_spec.x_label,
+                        "y_label": winning_spec.y_label,
+                        "number_format": winning_spec.number_format,
+                        "time_format": winning_spec.time_format,
+                        "chart_reason": "",
+                    })
+                except VisualizationError:
+                    logger.warning("Primary chart recommendation could not be materialized")
             database = (
                 sqlite
                 if request.db_id in sqlite.list_ids()
@@ -1508,10 +1584,16 @@ def create_app(
                 "SQLGlot read-only safety validation",
             ],
             token_usage=_add_usage(
-                conversation_usage,
-                _add_usage(presentation_usage, _add_usage(planner_usage, generated.token_usage)),
+                _add_usage(conversation_usage, analytics_usage),
+                _add_usage(
+                    presentation_usage,
+                    _add_usage(
+                        visualization_usage, _add_usage(planner_usage, generated.token_usage)
+                    ),
+                ),
             ),
             call_ledger=[
+                *analytics_ledger,
                 *conversation_ledger,
                 *generated.telemetry.call_ledger,
                 *presentation_ledger,

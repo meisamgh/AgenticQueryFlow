@@ -117,6 +117,12 @@ def validate_reusability(
             reuse_dimensions=reuse_dimensions or [],
         )
 
+    if plan.clarify or plan.unresolved_terms:
+        return outcome(
+            "need_clarification",
+            plan.clarification_question or "Please clarify the requested analytical change.",
+        )
+
     if not wants_chart and not dimensions and not grain and not metrics:
         return outcome("unsupported", "No analytical request could be extracted.")
 
@@ -135,6 +141,11 @@ def validate_reusability(
         return outcome(
             "need_clarification",
             "The saved result was truncated, so the complete data cannot be reused safely.",
+        )
+    if stored_row_count != len(stored_rows):
+        return outcome(
+            "need_clarification",
+            "The saved result is incomplete; ask the original question again with this change.",
         )
 
     non_additive = [name for name in metrics if _non_additive_metric(name)]
@@ -164,11 +175,38 @@ def validate_reusability(
             ),
         )
 
+    # A stored aggregate does not prove a new filter, metric or comparison.
+    # Treat these as SQL changes unless an explicit display-only action has
+    # been checked against complete result rows elsewhere.
+    sql_changes = {
+        "ADD_FILTER", "REMOVE_FILTER", "REPLACE_FILTER", "CHANGE_METRIC",
+        "CHANGE_AGGREGATION", "ADD_MEASURE", "COMPARE_WITH",
+    }
+    changed = [item.operation for item in plan.semantic_changes if item.operation in sql_changes]
+    if changed:
+        return outcome(
+            "requery_database",
+            "The request changes the underlying analysis ("
+            + ", ".join(changed)
+            + "); generate and validate new SQL.",
+            additivity_note=additivity_note,
+        )
+    available_metrics = {col.casefold() for col in stored_columns}
+    missing_metrics = [name for name in metrics if name.casefold() not in available_metrics]
+    if missing_metrics:
+        return outcome(
+            "requery_database",
+            "The stored result does not contain the requested metric(s): "
+            + ", ".join(missing_metrics)
+            + ".",
+            additivity_note=additivity_note,
+        )
+
     # Any requested grouping that is absent from the stored rows forces new SQL.
     # A finance "stored as month | country" example: "now by region" has no
     # region column, so no amount of client-side work can fabricate it.
     missing_dimensions = [name for name in dimensions if name not in stored_columns]
-    if    missing_dimensions: 
+    if missing_dimensions:
         return outcome(
             "requery_database",
             "The stored result lacks the requested dimension(s): "

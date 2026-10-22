@@ -8,6 +8,8 @@ from fastapi.testclient import TestClient
 
 from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.api import create_app
+from semantic_text2sql.models import SchemaInfo
+from semantic_text2sql.postgres import PostgresRegistry
 
 
 class FixedSQLModel:
@@ -42,6 +44,56 @@ def test_filter_values_returns_bounded_distinct_values(
                                                                      "column": "country"})
     assert second.status_code == 200
     assert second.json()["cached"] is True
+
+
+def test_filter_search_treats_quotes_and_wildcards_as_literal_text(
+    registry, monkeypatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    client = _client(registry, monkeypatch, tmp_path)
+    endpoint = "/api/databases/shop/filter-values"
+    base = {"table": "customers", "column": "country"}
+    for search, expected in (
+        ("Ger", ["Germany"]),
+        ("' OR 1=1 --", []),
+        ("%", []),
+        ("_", []),
+    ):
+        response = client.get(endpoint, params={**base, "search": search})
+        assert response.status_code == 200
+        assert response.json()["values"] == expected
+
+
+def test_postgres_filter_search_passes_literal_as_bound_parameter(
+    registry, monkeypatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv(
+        "TEXT2SQL_POSTGRES_DATABASES", '{"finance":"postgresql://unused/finance"}'
+    )
+    schema = SchemaInfo.model_validate({
+        "db_id": "finance", "dialect": "postgres",
+        "tables": [{
+            "name": "customers", "create_sql": "CREATE TABLE customers (country text)",
+            "columns": [{"name": "country", "data_type": "text", "primary_key": False}],
+        }],
+    })
+    observed: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(PostgresRegistry, "inspect", lambda self, db_id: schema)
+
+    def execute(self, db_id, sql, *, max_rows, timeout_seconds, parameters=()):  # type: ignore[no-untyped-def]
+        observed.append((sql, parameters))
+        return ["country"], [], False
+
+    monkeypatch.setattr(PostgresRegistry, "execute", execute)
+    client = _client(registry, monkeypatch, tmp_path)
+    search = "' OR 1=1 -- %_"
+    response = client.get("/api/databases/finance/filter-values", params={
+        "table": "customers", "column": "country", "search": search,
+    })
+    assert response.status_code == 200
+    sql, parameters = observed[0]
+    assert "strpo" in sql and "%s" in sql
+    assert search not in sql
+    assert parameters == (search,)
 
 
 def test_filter_values_rejects_unsafe_fields(
@@ -101,3 +153,46 @@ def test_measures_never_appear_as_client_filters(
     body = response.json()
     filters = body["suggested_filters"]
     assert "customer_count" not in {item["field"] for item in filters["client_filters"]}
+
+
+def test_chart_followup_reuses_complete_rows_but_filter_change_requeries(
+    registry, monkeypatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    client = _client(registry, monkeypatch, tmp_path)
+    base = {
+        "session_id": "chart-followup-session", "db_id": "shop",
+        "provider": "agentrouter", "model": "test-model",
+    }
+    first = client.post("/api/chat", json={**base, "message": "Customer counts by country."})
+    assert first.status_code == 200
+    assert first.json()["generation"]["accepted"] is True
+
+    reuse = client.post("/api/chat", json={**base, "message": "Plot it."})
+    assert reuse.status_code == 200
+    assert reuse.json()["operation"] == "VISUALIZE"
+    assert "without running SQL again" in reuse.json()["message"]
+
+    changed = client.post(
+        "/api/chat", json={**base, "message": "Now plot it only for Germany."}
+    )
+    assert changed.status_code == 200
+    assert "without running SQL again" not in changed.json()["message"]
+    assert changed.json()["generation"] is not None
+
+
+def test_chart_primary_recommendation_matches_displayed_chart(
+    registry, monkeypatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    client = _client(registry, monkeypatch, tmp_path)
+    response = client.post("/api/chat", json={
+        "session_id": "chart-primary-session", "db_id": "shop",
+        "provider": "agentrouter", "model": "test-model",
+        "message": "Plot customer counts by country.",
+    })
+    assert response.status_code == 200
+    body = response.json()
+    primary = body["chart_recommendations"]["primary_chart"]
+    displayed = body["presentation"]["chart_spec"]
+    assert displayed["chart_type"] == primary["chart_type"]
+    assert displayed["x"] == primary["x"]
+    assert displayed["y"] == primary["y"]

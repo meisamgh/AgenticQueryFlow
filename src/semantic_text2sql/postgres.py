@@ -166,12 +166,16 @@ class PostgresRegistry:
         *,
         max_rows: int,
         timeout_seconds: float = 5.0,
+        parameters: tuple[Any, ...] = (),
     ) -> tuple[list[str], list[list[Any]], bool]:
         try:
             with self.connect(db_id) as connection, connection.cursor() as cursor:
                 timeout_ms = max(1, min(round(timeout_seconds * 1_000), 5_000))
                 cursor.execute("SET LOCAL statement_timeout = %s", (timeout_ms,))
-                cursor.execute(sql)
+                if parameters:
+                    cursor.execute(sql, parameters)
+                else:
+                    cursor.execute(sql)
                 rows = cursor.fetchmany(max_rows + 1)
                 columns = [item.name for item in cursor.description or ()]
         except (psycopg.Error, DatabaseError) as exc:

@@ -25,6 +25,13 @@ test('database and connection live in the header; composer keeps voice controls 
   assert.ok(!markup.includes('id="heroExamples"'));
   assert.ok(!markup.includes('Enter to send'));
 });
+test('suggested row filters share chart state and zero matches stay empty', () => {
+  assert.ok(source.includes('article._setChartViewRowFilters = filters => article._chartViewState.setRowFilters(filters)'));
+  assert.ok(source.includes('return filtered;'));
+  assert.ok(!source.includes('return filtered.length ? filtered : rows;'));
+  assert.ok(source.includes('suggestionValueMenu(anchor, item, payload.values.slice(0, 25), article, runId);'));
+  assert.ok(!source.includes('placeInsight(anchor, suggestionValueMenu('));
+});
 test('browser checks exact environment model pair and sends no model overrides', () => {
   const initialize = source.slice(source.indexOf('async function initialize('), source.indexOf('function setHealth('));
   assert.ok(initialize.includes('item.provider === uiConfig.sql_provider'));
@@ -43,12 +50,26 @@ test('conversation history has no heading or search control', () => {
   assert.ok(!source.includes('$("#historySearch")'));
   assert.ok(markup.includes('id="conversationHistory"'));
 });
-test('semantic chips edit through the live query path and branch creates new lineage', () => {
+test('semantic chips edit through the live query path without a branch action', () => {
   assert.ok(source.includes('function editSemanticChip('));
   assert.ok(source.includes('sendFromAnswer(runId, prompt)'));
-  assert.ok(source.includes('state.pendingBranch = true'));
-  assert.ok(source.includes('branch_from_parent: state.pendingBranch'));
+  assert.ok(!source.includes('state.pendingBranch'));
+  assert.ok(!source.includes('branch_from_parent:'));
   assert.ok(!markup.includes('Schema explorer'));
+});
+test('correctness and optimization actions live in the SQL panel only', () => {
+  const sqlPane = markup.split('<section class="panel-card sql-panel-pane"')[1].split('</section>')[0];
+  assert.ok(sqlPane.includes('class="sql-actions"'));
+  const render = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function actionButton('));
+  assert.ok(render.includes('const sqlActions = fragment.querySelector(".sql-actions")'));
+  assert.ok(render.includes('actionButton("Check correctness"'));
+  assert.ok(render.includes('actionButton("Optimize"'));
+  assert.ok(render.includes('sendFromAnswer(runId, "Check whether'));
+  assert.ok(render.includes('sendFromAnswer(runId, "Optimize the previous'));
+  assert.ok(!render.includes('actionButton("Branch from here"'));
+  assert.ok(!render.includes('actionButton("Save question"'));
+  assert.ok(!markup.includes('id="savedQuestions"'));
+  assert.ok(!markup.includes('class="icon-button save-button"'));
 });
 test('single-value answer uses a readable label and exact grouped number', () => {
   const helpers = source.slice(source.indexOf('function readableResultLabel('), source.indexOf('function renderAnswerPreview('));
@@ -103,7 +124,7 @@ test('successful response template orders Answer, Data and SQL', () => {
   assert.ok(template.includes('class="panel-card sql-panel-pane" role="tabpanel" hidden'));
   assert.ok(template.includes('class="panel-card result-panel-pane" role="tabpanel" hidden'));
   assert.ok(template.indexOf('class="chart-section"') > template.indexOf('class="answer-tab-panel"'));
-  const answerRenderer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function generationQuestion('));
+  const answerRenderer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function actionButton('));
   assert.ok(answerRenderer.includes('wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length)})'));
   assert.ok(!answerRenderer.includes('options.restored ? "sql"'));
 });
@@ -159,7 +180,7 @@ test('response tabs are independent, keep the chart and never execute a query', 
 });
 test('a running question does not auto-scroll progress or the final answer', () => {
   const progress = source.slice(source.indexOf('function appendProgress('), source.indexOf('function wait('));
-  const answer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function generationQuestion('));
+  const answer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function actionButton('));
   assert.ok(!progress.includes('scrollIntoView'));
   assert.ok(!answer.includes('scrollIntoView'));
   assert.ok(!styles.includes('.thread-scroll { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; }'));
@@ -282,6 +303,52 @@ test('time zoom counts unique chronological points and excludes ordinary categor
   assert.equal(context.window.QueryflowECharts.buildOption(multi).dataZoom.length, 2);
   const zoomed = explorer.apply(make(26, true), {start: '2026-01-10', end: '2026-01-20'});
   assert.equal(zoomed.data.length, 11);
+});
+test('two-finger pinch zooms eligible time series without blocking ordinary touch scrolling', () => {
+  const listeners = new Map(), removed = [];
+  const classes = new Set();
+  const container = {
+    classList: {add: name => classes.add(name), remove: name => classes.delete(name)},
+    addEventListener: (name, callback) => listeners.set(name, callback),
+    removeEventListener: name => removed.push(name),
+    getBoundingClientRect: () => ({left: 0, width: 300}),
+  };
+  let zoom = {start: 0, end: 100}, zoomHandler;
+  const chart = {
+    setOption() {}, resize() {}, dispose() {},
+    getOption: () => ({dataZoom: [zoom]}),
+    dispatchAction(action) { zoom = {start: action.start, end: action.end}; zoomHandler?.(); },
+    on(name, callback) { if (name === 'datazoom') zoomHandler = callback; },
+  };
+  context.window.echarts = {init: () => chart};
+  context.window.addEventListener = () => {};
+  context.window.removeEventListener = () => {};
+  const spec = {chart_type: 'line', x: 'Date', y: 'Value', time_format: 'day',
+    data: Array.from({length: 26}, (_, i) => ({
+      Date: new Date(Date.UTC(2026, 0, i + 1)).toISOString().slice(0, 10), Value: i,
+    }))};
+  const mounted = context.window.QueryflowECharts.render(container, {chart_spec: spec});
+  let observedZoom;
+  mounted.onZoom(value => { observedZoom = value; });
+  assert.ok(classes.has('chart-slot-pinch'));
+  let prevented = false;
+  listeners.get('touchmove')({touches: [{clientX: 50, clientY: 0}, {clientX: 250, clientY: 0}],
+    preventDefault() { prevented = true; }, stopPropagation() {}});
+  assert.equal(prevented, false, 'single-finger or unstarted gestures must not be intercepted');
+  listeners.get('touchstart')({touches: [{clientX: 100, clientY: 0}, {clientX: 200, clientY: 0}]});
+  listeners.get('touchmove')({touches: [{clientX: 50, clientY: 0}, {clientX: 250, clientY: 0}],
+    preventDefault() { prevented = true; }, stopPropagation() {}});
+  assert.equal(prevented, true);
+  assert.equal(Math.round(observedZoom.start), 25);
+  assert.equal(Math.round(observedZoom.end), 75);
+  listeners.get('touchend')({touches: []});
+  mounted.dispose();
+  assert.equal(classes.has('chart-slot-pinch'), false);
+  assert.deepEqual(removed.sort(), ['touchcancel', 'touchend', 'touchmove', 'touchstart']);
+  const shortListeners = new Map();
+  const shortContainer = {...container, addEventListener: (name, callback) => shortListeners.set(name, callback)};
+  context.window.QueryflowECharts.render(shortContainer, {chart_spec: {...spec, data: spec.data.slice(0, 25)}}).dispose();
+  assert.equal(shortListeners.size, 0, 'short series retain normal touch behavior');
 });
 test('chart UI stays within the response; visual controls do not call query APIs', () => {
   assert.ok(markup.includes('class="chart-suggestions"'));
@@ -446,7 +513,7 @@ test('recovery diagnosis is shown once when it matches the answer text', () => {
   assert.equal(sameDisplayText(diagnosis, diagnosis), true);
   assert.equal(sameDisplayText(diagnosis, `  ${diagnosis.slice(0, -1)}  `), true);
   assert.equal(sameDisplayText(diagnosis, 'The customer has no transactions.'), false);
-  const answer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function generationQuestion('));
+  const answer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function actionButton('));
   assert.ok(answer.includes('!sameDisplayText(responseMessage, diagnosis)'));
   assert.ok(answer.includes('!sameDisplayText(body.human_review?.reason, diagnosis)'));
   assert.ok(answer.includes('!body.human_review && !sameDisplayText(responseMessage, failure)'));

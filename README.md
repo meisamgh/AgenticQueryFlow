@@ -77,10 +77,14 @@ question, accepted SQL, stored columns/rows/grain) produces a **deterministic an
 grouping, time grain and stored-grain capability, whether the stored result can be reused as-is,
 needs new validated SQL, or needs clarification. Aggregates never grow finer grain client-side and
 non-additive metrics (averages, ratios, distinct counts) are always recomputed in SQL.
+Filter, metric, aggregation and comparison changes also require new SQL. Missing requested
+metrics or incomplete saved rows cannot silently become a reused chart.
 
 **Governed derived metrics** (for example Profit Margin, Average Order Value) are recognized only
 when their definition is approved in the semantic catalog; the plan carries their lineage as an
-`ADD_MEASURE` change and the gate forces recomputation through validated SQL. Formulas without
+`ADD_MEASURE` change and the gate forces recomputation through validated SQL. The approved formula,
+source relation and required fields are passed as generation evidence on this path; this is not
+a formal proof that the resulting SQL is formula-equivalent. Formulas without
 an approved definition are never invented — unverified formula requests fall to clarification.
 
 When the deterministic rules leave the request ambiguous (`plan_needs_refinement`), an optional
@@ -90,6 +94,8 @@ the deterministic draft plan, and returns a typed JSON plan proposal that is re-
 Pydantic, checked against verified schema (`plan_fields_known`) and against the approved metric
 catalog. Any invalid, timed-out, schema-inventing or unauthorized output falls back to the
 deterministic plan. Obvious chart mechanics (reuse, chart-type changes) never reach the model.
+Optional planner and recommender calls use the request-wide model-call and deadline budget, with
+their reported tokens included in response accounting.
 
 Executed results also get ranked chart recommendations. The deterministic recommender scores
 candidate charts against real rows and column roles/units; an optional **flag-gated LLM
@@ -98,6 +104,8 @@ visualization recommender** (`refine_charts_with_model`) adds business-aware pro
 re-validated through the same deterministic chart planner (`plan_chart`); fabricated columns,
 unrenderable combinations and invalid JSON are dropped, and the deterministic ranking stays
 authoritative on failure.
+For a plot request without explicitly chosen axes or chart type, the validated primary
+recommendation controls the displayed chart. Explicit user choices are preserved.
 
 Planner decisions (source, operation, reusability decision, latency) are recorded per turn in a
 bounded local ledger exposed at `GET /api/analytics-metrics`; decisions are metrics only, never row
@@ -107,6 +115,9 @@ Filter value discovery (`GET /api/databases/{db_id}/filter-values`) is fail-clos
 exist in the live schema as a non-key text/date column, must not be marked sensitive by verified
 profile metadata, and high-cardinality fields are answered with a bounded server-side `search`
 rather than presenting the first values as the complete domain.
+Search input is bound as a SQL parameter and treated literally, including quotes and `%`/`_`.
+The process-local cache is capped at 256 searches with a 60-second lifetime; it is not a
+multi-user authorization boundary.
 
 ### Client workspace
 
@@ -122,11 +133,15 @@ rather than presenting the first values as the complete domain.
 - Expand recovery history to inspect recorded tool observations, evidence IDs and REPAIR / INFORM / ESCALATE decisions.
 - Use per-message Answer, Data and SQL tabs. Answer opens by default; switching tabs reuses the
   existing response without generating or executing another query. SQL keeps highlighting, copy
-  and version details; Data shows the executed rows and CSV export.
+  and version details, with Check correctness and Optimize actions for that specific SQL run;
+  Data shows the executed rows and CSV export. The separate saved-question and branch buttons
+  have been removed; conversation history remains available.
 - See a model-selected chart and plain-language answer when the returned data supports them.
 - For a complete chart result, switch among compatible suggested charts, change a displayed
   metric/category/date range, or show Top N without another SQL call. Long chronological series
   have zoom controls; a zoom or display filter never changes the underlying query result.
+- Suggested filters over complete saved rows update the visible chart and Data view together.
+  Zero matches show an empty view, while Source Data and the accepted SQL remain unchanged.
 - Follow live backend stages and a timestamped activity log, including recovery schema/value
   checks and read-only probes. Timings are observations, not predicted completion percentages.
 - Cancel a running request; model/database selection stays locked until it finishes.

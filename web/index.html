@@ -50,10 +50,6 @@
           </div>
           <div class="run-list" id="conversationHistory" role="list"></div>
         </section>
-        <section class="side-section" aria-label="Saved questions">
-          <div class="section-head"><span>Saved</span></div>
-          <div class="run-list" id="savedQuestions" role="list"></div>
-        </section>
 
         <div class="side-footer">
           <button class="theme-switch" id="themeToggle" type="button">
@@ -237,12 +233,12 @@
                 <header>
                   <span data-icon="zap"></span><strong>Generated SQL</strong><small class="sql-validity"></small>
                   <div class="panel-actions">
-                    <button class="icon-button save-button" type="button" title="Save this question" data-icon="bookmark"></button>
                     <button class="icon-button copy-button" type="button" title="Copy SQL" data-icon="copy"></button>
                     <button class="icon-button expand-button" type="button" title="Expand SQL" data-icon="maximize"></button>
                   </div>
                 </header>
                 <div class="sql-editor"><pre><code class="language-sql"></code></pre></div>
+                <div class="sql-actions" role="group" aria-label="SQL actions"></div>
               </section>
               <section class="panel-card result-panel-pane" role="tabpanel" hidden>
                 <header>

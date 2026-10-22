@@ -195,12 +195,62 @@ window.QueryflowECharts = (function () {
     if (!option) return null;
     const chart = window.echarts.init(container, null, { renderer: "canvas" });
     chart.setOption(option);
+    const pinchEnabled = option.dataZoom.length > 0;
+    let pinch = null;
+    const distance = touches => Math.hypot(
+      touches[0].clientX - touches[1].clientX,
+      touches[0].clientY - touches[1].clientY,
+    );
+    const touchStart = event => {
+      if (event.touches.length !== 2) return;
+      const initialDistance = distance(event.touches);
+      if (initialDistance < 8) return;
+      const zoom = chart.getOption()?.dataZoom?.[0] || option.dataZoom[0];
+      const bounds = container.getBoundingClientRect();
+      const midpoint = (event.touches[0].clientX + event.touches[1].clientX) / 2;
+      pinch = {
+        distance: initialDistance,
+        start: Number(zoom.start ?? 0), end: Number(zoom.end ?? 100),
+        anchor: Math.max(0, Math.min(1, (midpoint - bounds.left) / Math.max(1, bounds.width))),
+      };
+    };
+    const touchMove = event => {
+      if (!pinch || event.touches.length !== 2) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const currentDistance = distance(event.touches);
+      if (currentDistance < 8) return;
+      const originalSpan = pinch.end - pinch.start;
+      const span = Math.max(5, Math.min(100, originalSpan * pinch.distance / currentDistance));
+      const center = pinch.start + pinch.anchor * originalSpan;
+      const start = Math.max(0, Math.min(100 - span, center - pinch.anchor * span));
+      chart.dispatchAction({ type: "dataZoom", start, end: start + span });
+    };
+    const touchEnd = event => { if (event.touches.length < 2) pinch = null; };
+    if (pinchEnabled) {
+      container.classList?.add?.("chart-slot-pinch");
+      container.addEventListener("touchstart", touchStart, { passive: true, capture: true });
+      container.addEventListener("touchmove", touchMove, { passive: false, capture: true });
+      container.addEventListener("touchend", touchEnd, { passive: true, capture: true });
+      container.addEventListener("touchcancel", touchEnd, { passive: true, capture: true });
+    }
     const resize = () => chart.resize();
     window.addEventListener("resize", resize, { passive: true });
     const observer = typeof ResizeObserver === "function" ? new ResizeObserver(resize) : null;
     observer?.observe(container);
     return {
-      dispose() { window.removeEventListener("resize", resize); observer?.disconnect(); chart.dispose(); },
+      dispose() {
+        window.removeEventListener("resize", resize);
+        observer?.disconnect();
+        if (pinchEnabled) {
+          container.removeEventListener("touchstart", touchStart, true);
+          container.removeEventListener("touchmove", touchMove, true);
+          container.removeEventListener("touchend", touchEnd, true);
+          container.removeEventListener("touchcancel", touchEnd, true);
+          container.classList?.remove?.("chart-slot-pinch");
+        }
+        chart.dispose();
+      },
       onSelect(callback) { chart.on("click", point => callback({ ...point,
         rawX: ["scatter", "bubble"].includes(spec.chart_type)
           ? spec.data[point.dataIndex]?.[spec.x]

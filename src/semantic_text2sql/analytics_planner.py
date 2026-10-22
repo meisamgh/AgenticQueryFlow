@@ -29,6 +29,7 @@ from pydantic import Field, ValidationError
 
 from semantic_text2sql.conversation import ConversationState as ConversationState
 from semantic_text2sql.models import StrictModel, TokenUsage
+from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded
 from semantic_text2sql.visualization import VisualizationIntent
 
 
@@ -165,6 +166,11 @@ _COMPARE_TARGET = re.compile(
     re.I,
 )
 _IN_YEAR = re.compile(r"\b(?:in|during|for)\s+((?:19|20)\d{2})\b", re.I)
+_FILTER_TARGET = re.compile(
+    r"\b(?:filter|restrict|focus)(?:\s+it|\s+the\s+chart)?\s+"
+    r"(?:to|on|for|by)\s+(.+?)(?:[.?!]|$)",
+    re.I,
+)
 _METRIC = re.compile(
     r"\b(?:total|average|avg|mean|sum|count|number of)\s+([a-z][a-z0-9_ -]{0,40}?)"
     r"(?=\s*(?:\bby\b|\bin\b|\bper\b|\bfrom\b|\bto\b|,|\.|;|!|\?|$))",
@@ -240,6 +246,7 @@ def plan_analytics(
     removal_values = [match.group(1).strip() for match in _REMOVAL_TARGET.finditer(value)]
     compare_values = [match.group(1).strip() for match in _COMPARE_TARGET.finditer(value)]
     years = _IN_YEAR.findall(value)
+    filter_target = _FILTER_TARGET.search(value)
     removal = bool(_REMOVE.search(value))
     comparison = bool(_COMPARE.search(value))
 
@@ -265,7 +272,9 @@ def plan_analytics(
                     break
     preserve = {
         "metric_definition": not bool(metrics or derived_measures) and not aggregation,
-        "filters": not bool(only_values or years or removal_values) and not removal,
+        "filters": not bool(
+            only_values or years or removal_values or filter_target
+        ) and not removal,
         "entities": not comparison,
     }
 
@@ -295,6 +304,10 @@ def plan_analytics(
     if not removal and (only_values or years):
         for target in [*only_values, *years]:
             changes.append(SemanticChange(operation="ADD_FILTER", target=target))
+    if filter_target and not removal:
+        changes.append(SemanticChange(
+            operation="ADD_FILTER", target=filter_target.group(1).strip(),
+        ))
     if comparison and previous is not None and previous.last_columns:
         # Comparisons extend the accepted analysis; the conversational pipeline
         # resolves the field through generated SQL, so ambiguity in the stored
@@ -530,6 +543,7 @@ async def refine_plan_with_model(  # noqa: ANN201 - explicit tuple return below
     previous: Any,
     plan: AnalyticsPlan,
     timeout_seconds: float = 12.0,
+    budget: RequestBudget | None = None,
 ) -> tuple[AnalyticsPlan, TokenUsage, int]:
     """Optionally refine the deterministic plan with one bounded model call.
 
@@ -551,12 +565,16 @@ async def refine_plan_with_model(  # noqa: ANN201 - explicit tuple return below
     try:
         complete = getattr(completer, "complete_detailed", None)
         if callable(complete):
+            operation = complete(model=model, prompt=prompt)
             raw, usage = await asyncio.wait_for(
-                complete(model=model, prompt=prompt), timeout=timeout_seconds
+                budget.wait(operation, kind="model") if budget else operation,
+                timeout=timeout_seconds,
             )
         else:
+            operation = completer.complete(model=model, prompt=prompt)
             raw = await asyncio.wait_for(
-                completer.complete(model=model, prompt=prompt), timeout=timeout_seconds
+                budget.wait(operation, kind="model") if budget else operation,
+                timeout=timeout_seconds,
             )
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw).strip(), flags=re.IGNORECASE)
         parsed = AnalyticsPlan.model_validate(json.loads(text))
@@ -571,6 +589,7 @@ async def refine_plan_with_model(  # noqa: ANN201 - explicit tuple return below
         OSError,
         TimeoutError,
         asyncio.exceptions.TimeoutError,
+        RequestBudgetExceeded,
     ):
         return plan.model_copy(update={"source": "fallback"}), usage, round(
             (perf_counter() - started) * 1000

@@ -448,6 +448,7 @@ svg.lucide { stroke-width: 1.7; }
 .chart-menu button [data-icon] svg { width: 14px; height: 14px; color: var(--text-faint); }
 .chart-slot { position: relative; padding: 20px 0 4px; min-height: 280px; overflow: hidden; }
 .chart-slot-ec { height: clamp(300px, 34vw, 430px); }
+.chart-slot-pinch { touch-action: pan-y; }
 .chart-slot svg { width: 100%; height: auto; display: block; max-height: 330px; overflow: visible; }
 .chart-foot { padding: 12px 0 22px; display: flex; gap: 13px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
 .legend { display: flex; align-items: center; gap: 8px; color: var(--text-muted); font-size: 11px; }
@@ -627,13 +628,15 @@ svg.lucide { stroke-width: 1.7; }
 .review-actions button:hover { border-color: var(--accent); color: var(--accent-strong); background: var(--accent-soft); }
 
 /* ---------- Follow-up actions (answer-foot) ---------- */
-.answer-actions { margin-top: 18px; padding: 2px 0 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-.answer-actions .ghost-button {
+.answer-actions, .sql-actions { margin-top: 18px; padding: 2px 0 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.answer-actions[hidden], .sql-actions:empty { display: none; }
+.sql-actions { margin: 0; padding: 12px 14px; border-top: 1px solid var(--border); }
+.answer-actions .ghost-button, .sql-actions .ghost-button {
   border: 1px solid var(--border); color: var(--text-muted); background: var(--surface);
   border-radius: 7px; padding: 7px 10px; font-size: 11.5px; font-weight: 500;
   transition: all var(--transition);
 }
-.answer-actions .ghost-button:hover:not(:disabled) { color: var(--accent); background: var(--surface-hover); border-color: var(--focus-ring); }
+.answer-actions .ghost-button:hover:not(:disabled), .sql-actions .ghost-button:hover:not(:disabled) { color: var(--accent); background: var(--surface-hover); border-color: var(--focus-ring); }
 
 /* ---------- Contextual action chips ---------- */
 .chip {
@@ -907,7 +910,7 @@ body.inspector-open .inspector { transform: translateX(0); visibility: visible; 
 [data-theme="dark"] .result-grid tbody tr:hover td { background: #2f3043; }
 [data-theme="dark"] .empty-result { color: #abb0bd; }
 [data-theme="dark"] .panel-card > header { background: #212431; }
-[data-theme="dark"] .btn-ghost, [data-theme="dark"] .answer-actions .ghost-button { background: #262835; border-color: #424454; color: #c3c5d2; }
+[data-theme="dark"] .btn-ghost, [data-theme="dark"] .answer-actions .ghost-button, [data-theme="dark"] .sql-actions .ghost-button { background: #262835; border-color: #424454; color: #c3c5d2; }
 [data-theme="dark"] .chip { background: #262835; border-color: #424454; color: #dbdce4; }
 [data-theme="dark"] .chip:hover:not(:disabled) { background: #393950; border-color: #505064; color: #b7aefb; }
 [data-theme="dark"] .badge { background: #2f3040; color: #a4a6b6; }
