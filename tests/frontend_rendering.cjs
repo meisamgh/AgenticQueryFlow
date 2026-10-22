@@ -165,6 +165,23 @@ test('chart adapter exposes click events for investigate actions', () => {
   assert.equal(selectedHandler, onClick);
   mounted.dispose();
 });
+test('scatter-point investigation uses the observed x value when ECharts omits its name', () => {
+  const observations = [];
+  context.insightMenu = (_anchor, heading, _description, _items, runId) => {
+    observations.push({heading, runId});
+  };
+  const article = {
+    _echart: { onSelect(callback) { this.select = callback; } },
+    querySelector: () => new Element(),
+  };
+  const presentation = {chart_spec: {
+    chart_type: 'scatter', x: 'age', y: 'spend',
+    data: [{age: 32, spend: 104}, {age: 44, spend: 200}],
+  }};
+  context.attachChartInvestigations(article, presentation, 'source-run');
+  article._echart.select({name: '', value: [32, 104]});
+  assert.deepEqual(observations, [{heading: 'age: 32', runId: 'source-run'}]);
+});
 test('historical investigation restores its source run before sending', async () => {
   const calls = [];
   context.state = {activeRunId: 'latest'};

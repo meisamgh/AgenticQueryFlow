@@ -825,7 +825,8 @@ function attachChartInvestigations(article, presentation, runId) {
   const spec = presentation?.chart_spec;
   if (!article._echart?.onSelect || !spec?.data?.length) return;
   article._echart.onSelect(point => {
-    const observedX = point.name ?? (Array.isArray(point.value) ? point.value[0] : undefined);
+    const observedX = point.name !== "" && point.name != null
+      ? point.name : (Array.isArray(point.value) ? point.value[0] : undefined);
     const matches = spec.data.filter(row => String(row[spec.x]) === String(observedX)
       && (!spec.series || !point.seriesName || String(row[spec.series]) === String(point.seriesName)));
     if (!matches.length) return;
