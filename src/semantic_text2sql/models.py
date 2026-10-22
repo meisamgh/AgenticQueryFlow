@@ -871,6 +871,59 @@ class PresentationState(StrictModel):
     data_complete: bool = True
 
 
+FilterExecMode = Literal["CLIENT_FILTER", "SQL_FILTER", "UNAVAILABLE"]
+FilterControl = Literal["multi_select", "single_select", "search", "date_range"]
+
+
+class SuggestedFilter(StrictModel):
+    """One backend-verified filter proposal with its safe execution mode."""
+
+    field: str
+    source: Literal["stored_result", "verified_schema", "glossary"]
+    table: str | None = None
+    column: str | None = None
+    exec_mode: FilterExecMode
+    control: FilterControl
+    label: str = ""
+    cardinality: int | None = Field(default=None, ge=0)
+    searchable: bool = False
+    reason: str = ""
+    join_path: list[str] = Field(default_factory=list, max_length=4)
+
+
+class FilterCatalog(StrictModel):
+    client_filters: list[SuggestedFilter] = Field(default_factory=list, max_length=12)
+    sql_filters: list[SuggestedFilter] = Field(default_factory=list, max_length=12)
+    unavailable_filters: list[SuggestedFilter] = Field(default_factory=list, max_length=6)
+
+
+class FilterValuesResponse(StrictModel):
+    db_id: str
+    table: str
+    column: str
+    values: list[str] = Field(default_factory=list, max_length=100)
+    more_available: bool = False
+    cached: bool = False
+
+
+class RecommendedChart(StrictModel):
+    """One validated chart proposal; never executable chart code."""
+
+    chart_type: ChartType
+    x: str
+    y: str
+    y_measures: list[str] = Field(default_factory=list, max_length=8)
+    series: str | None = None
+    title: str = Field(max_length=160)
+    reason: str = Field(default="", max_length=300)
+    score: float
+
+
+class ChartRecommendations(StrictModel):
+    primary_chart: RecommendedChart
+    alternative_charts: list[RecommendedChart] = Field(default_factory=list, max_length=6)
+
+
 class ChatResponse(StrictModel):
     session_id: str
     run_id: str | None = None
@@ -912,6 +965,8 @@ class ChatResponse(StrictModel):
     clarification_required: bool = False
     clarification_question: str | None = None
     human_review: HumanReviewRequest | None = None
+    chart_recommendations: ChartRecommendations | None = None
+    suggested_filters: FilterCatalog | None = None
     provenance: list[str] = Field(default_factory=list)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
     timings_ms: dict[str, int] = Field(default_factory=dict)

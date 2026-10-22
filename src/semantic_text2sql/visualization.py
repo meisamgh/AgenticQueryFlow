@@ -12,6 +12,8 @@ from datetime import date, datetime
 from statistics import median
 from typing import Any, Literal, cast
 
+from pydantic import Field
+
 from semantic_text2sql.models import ChartSpec, ChartType, StrictModel
 
 # Longest and most specific expressions first. A generic "show" is never a plot request.
@@ -81,6 +83,7 @@ class VisualizationIntent(StrictModel):
     size: str | None = None
     aggregation: str | None = None
     time_grain: str | None = None
+    y_measures: list[str] = Field(default_factory=list, max_length=8)
 
 
 class VisualizationError(ValueError):
@@ -278,6 +281,59 @@ _GRAIN_CAPABILITY: dict[str, int] = {
     "daily": 40,
 }
 
+_UNIT_FAMILIES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("ratio", re.compile(
+        r"(?:^|_)(?:margin|rate|ratio|percentage|percent|share|pct|"
+        r"conversion|retention|average|avg|mean)(?:$|_)", re.I
+    )),
+    ("currency", re.compile(
+        r"(?:^|_)(?:revenue|cost|profit|price|sales|spend|spending|amount|"
+        r"expenditure|expense|fee)(?:$|_)", re.I
+    )),
+    ("count", re.compile(
+        r"(?:^|_)(?:count|orders?|customers?|users?|transactions?|"
+        r"number)(?:$|_)", re.I
+    )),
+)
+
+
+def measure_unit(column: str) -> str | None:
+    """Coarse unit family inferred from the column name, or None when unknown."""
+    for family, pattern in _UNIT_FAMILIES:
+        if pattern.search(column):
+            return family
+    return None
+
+
+def _comparable_measures(
+    primary: str, extras: list[str], numeric: list[str]
+) -> tuple[list[str], dict[str, str], list[str]]:
+    """Keep extra measures whose inferred unit family matches the primary.
+
+    Returns (measures, units, rejected) — a modified, never silently mixed,
+    axis. Ratio/count/currency families cannot share one axis.
+    """
+    primary_unit = measure_unit(primary)
+    kept = [primary]
+    rejected: list[str] = []
+    for name in extras:
+        if name not in numeric:
+            rejected.append(name)
+            continue
+        if primary_unit and measure_unit(name) not in {None, primary_unit}:
+            rejected.append(name)
+            continue
+        if not primary_unit and measure_unit(name) in {"ratio", "currency", "count"}:
+            rejected.append(name)
+            continue
+        kept.append(name)
+    units = {
+        name: unit
+        for name in kept
+        if (unit := measure_unit(name)) is not None
+    }
+    return kept, units, rejected
+
 
 def _grain_capability(grain: str) -> int | None:
     return _GRAIN_CAPABILITY.get(grain.casefold())
@@ -444,6 +500,18 @@ def plan_chart(
         raise VisualizationError("The result does not contain unambiguous chart axes.")
     if y not in numeric:
         raise VisualizationError(f"{y} must contain finite numerical values.")
+    # A multi-measure request can extend, but never corrupt, the Y axis: only
+    # measures with a compatible inferred unit family join the primary one.
+    extra_measures: list[str] = []
+    measure_units_map: dict[str, str] = {}
+    rejected_measures: list[str] = []
+    if len(intent.y_measures) > 1:
+        extras = [name for name in intent.y_measures if name != y]
+        kept, units, rejected = _comparable_measures(y, extras, numeric)
+        if len(kept) > 1:
+            extra_measures = kept
+            measure_units_map = units
+        rejected_measures = rejected
     if requested in {
         "line", "multi_line", "step_line", "area", "stacked_area", "calendar_heatmap"
     } and (
@@ -458,7 +526,11 @@ def plan_chart(
         raise VisualizationError("Scatter and bubble charts need a numeric x-axis.")
     if requested == "bubble" and (size not in numeric or size in {x, y}):
         raise VisualizationError("A bubble chart needs a separate numeric size column.")
-    if use_series and (series not in columns or series == x or series in numeric):
+    if use_series and series is not None and (
+        series not in columns or series == x or series in numeric
+    ):
+        raise VisualizationError("This chart needs a separate category or series column.")
+    if use_series and series is None and len(extra_measures) < 2:
         raise VisualizationError("This chart needs a separate category or series column.")
     if requested in {"heatmap", "treemap"} and (series not in columns or series == x):
         raise VisualizationError("This chart needs two distinct category columns.")
@@ -479,6 +551,11 @@ def plan_chart(
     if requested == "histogram" and len(rows) < 2:
         raise VisualizationError("A histogram needs at least two observations.")
     warnings: list[str] = []
+    if rejected_measures:
+        warnings.append(
+            "Incompatible measures were excluded from the shared axis: "
+            + ", ".join(rejected_measures)
+        )
     if requested not in {"scatter", "bubble", "histogram", "box"}:
         keys = [
             (row[columns.index(x)], row[columns.index(series)] if series else None) for row in rows
@@ -578,6 +655,9 @@ def plan_chart(
             )
         )
     title = f"{y.replace('_', ' ')} by {x.replace('_', ' ')}"
+    if len(extra_measures) > 1:
+        labels = [name.replace("_", " ") for name in extra_measures]
+        title = (", ".join(labels[:-1]) + " and " + labels[-1]) + f" by {x.replace('_', ' ')}"
     magnitude_column = intent.y or y
     magnitudes = (
         [abs(float(row[columns.index(magnitude_column)])) for row in rows]
@@ -594,6 +674,8 @@ def plan_chart(
         source_row_count=len(rows),
         x=x,
         y=y,
+        y_measures=extra_measures if len(extra_measures) > 1 else [],
+        measure_units=measure_units_map,
         series=series,
         size=size,
         title=title,

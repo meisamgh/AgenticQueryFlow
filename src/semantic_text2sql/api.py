@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 from time import perf_counter
 from typing import Any, cast
@@ -15,7 +16,13 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from semantic_text2sql.agent import TextToSQLAgent
-from semantic_text2sql.analytics_planner import plan_analytics, planner_enabled
+from semantic_text2sql.analytics_planner import (
+    PlannerDecisionRecord,
+    metrics_ledger,
+    plan_analytics,
+    planner_enabled,
+    planner_llm_enabled,
+)
 from semantic_text2sql.conversation import (
     ANALYTICAL_CORRECTION_OPERATIONS,
     EXPLANATION_OPERATIONS,
@@ -31,6 +38,7 @@ from semantic_text2sql.conversation import (
 from semantic_text2sql.data_requirement_validator import validate_reusability
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.explanation import deterministic_explanation, explain_turn_detailed
+from semantic_text2sql.filter_discovery import discover_filters
 from semantic_text2sql.glossary import GlossaryStore, GlossaryTerm
 from semantic_text2sql.historical import HistoricalQueryStore
 from semantic_text2sql.hybrid_retrieval import (
@@ -58,6 +66,7 @@ from semantic_text2sql.models import (
     CheckResponse,
     ConversationState,
     DatabaseOption,
+    FilterValuesResponse,
     GenerateResponse,
     HumanReviewRequest,
     ModelOption,
@@ -94,6 +103,7 @@ from semantic_text2sql.visualization import (
     plan_chart,
     sql_output_requirement,
 )
+from semantic_text2sql.visualization_recommender import recommend_charts
 from semantic_text2sql.voice import (
     MAX_AUDIO_BYTES,
     MAX_AUDIO_SECONDS,
@@ -106,6 +116,9 @@ from semantic_text2sql.voice import (
 
 logger = logging.getLogger(__name__)
 
+
+def _planner_now() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 def create_app(
     agent: TextToSQLAgent | None = None,
@@ -470,6 +483,92 @@ def create_app(
             "relationships": relationships,
         }
 
+    filter_values_cache: dict[tuple[str, str, str], tuple[list[str], bool]] = {}
+
+    @app.get("/api/databases/{db_id}/filter-values", response_model=FilterValuesResponse)
+    async def filter_values(db_id: str, table: str, column: str) -> FilterValuesResponse:
+        """Bounded, read-only DISTINCT values for one discovered filter field.
+
+        Only textual/date fields of verified non-key columns of the live schema
+        can be probed; the query is length-bounded, time-bounded, read-only, and
+        cached per (db, table, column).
+        """
+        import re as _re
+
+        if db_id in sqlite.list_ids() or (
+            postgres is not None and db_id in postgres.configured_ids()
+        ):
+            allowed = True
+        else:
+            allowed = False
+        if not allowed:
+            raise HTTPException(status_code=404, detail="Database was not found or configured.")
+        if not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table) or not _re.fullmatch(
+            r"[A-Za-z_][A-Za-z0-9_]*", column
+        ):
+            raise HTTPException(status_code=400, detail="Unsupported table or column name.")
+        database = (
+            sqlite
+            if db_id in sqlite.list_ids()
+            else (postgres if postgres is not None else None)
+        )
+        if database is None:
+            raise HTTPException(status_code=404, detail="Database was not found or configured.")
+        try:
+            schema = await asyncio.to_thread(database.inspect, db_id)
+        except DatabaseError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        table_info = next((item for item in schema.tables if item.name == table), None)
+        column_info = (
+            next(
+                (item for item in table_info.columns if item.name == column), None
+            )
+            if table_info is not None
+            else None
+        )
+        if column_info is None or column_info.primary_key:
+            raise HTTPException(status_code=404, detail="Unknown filter field.")
+        physical = column_info.data_type.casefold().split("(", 1)[0]
+        if not (
+            physical.startswith(("text", "varchar", "char"))
+            or physical in {"date", "datetime", "timestamp"}
+        ):
+            raise HTTPException(status_code=400, detail="Only text or date fields support values.")
+        cache_key = (db_id, table, column)
+        cached = filter_values_cache.get(cache_key)
+        if cached is not None:
+            cached_values, cached_more = cached
+            return FilterValuesResponse(
+                db_id=db_id, table=table, column=column,
+                values=cached_values, more_available=cached_more, cached=True,
+            )
+        sql = (
+            f'SELECT DISTINCT CAST("{column}" AS TEXT) FROM "{table}" '
+            f'WHERE "{column}" IS NOT NULL ORDER BY 1 LIMIT 101'
+        )
+        try:
+            _, rows, _ = await asyncio.to_thread(
+                database.execute,
+                db_id,
+                sql,
+                max_rows=101,
+                timeout_seconds=2.0,
+            )
+        except DatabaseError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        values: list[str] = [str(row[0]) for row in rows if row and row[0] is not None]
+        more_available = len(values) > 100
+        filter_values_cache[cache_key] = (values[:100], more_available)
+        return FilterValuesResponse(
+            db_id=db_id, table=table, column=column,
+            values=values[:100], more_available=more_available, cached=False,
+        )
+
+    @app.get("/api/analytics-metrics")
+    async def analytics_metrics() -> dict[str, int]:
+        """Aggregate planner decision counts for this process (no turns recorded)."""
+        return metrics_ledger().summarize()
+
     @app.get("/api/databases/{db_id}/analytics-capabilities")
     async def analytics_capabilities(db_id: str) -> dict[str, Any]:
         """Expose a compact, read-only analytical capability summary."""
@@ -699,6 +798,16 @@ def create_app(
                         except Exception:  # noqa: BLE001 - planner proposals never abort a chart turn
                             proposal = None
                     analytics_planning_ms = round((perf_counter() - analytics_started) * 1000)
+                    if not planner_enabled():
+                        metrics_ledger().record(
+                            PlannerDecisionRecord(
+                                recorded_at=_planner_now(),
+                                session_id=request.session_id,
+                                db_id=request.db_id,
+                                source="disabled",
+                                latency_ms=analytics_planning_ms,
+                            )
+                        )
                     requery_requested = False
                     if proposal is not None:
                         requirement = validate_reusability(
@@ -714,6 +823,22 @@ def create_app(
                         ):
                             requery_requested = True
                     if not requery_requested:
+                        if planner_enabled():
+                            metrics_ledger().record(
+                                PlannerDecisionRecord(
+                                    recorded_at=_planner_now(),
+                                    session_id=request.session_id,
+                                    db_id=request.db_id,
+                                    source=proposal.source if proposal else "fallback",
+                                    operation=proposal.operation if proposal else None,
+                                    reusability_decision=(
+                                        requirement.decision if proposal is not None else None
+                                    ),
+                                    requery=False,
+                                    latency_ms=analytics_planning_ms,
+                                    planner_llm_enabled=planner_llm_enabled(),
+                                )
+                            )
                         message = (
                             requirement.reason
                             if proposal is not None
@@ -737,9 +862,24 @@ def create_app(
                             "analytics_planning": analytics_planning_ms,
                             "total": round((perf_counter() - started) * 1000),
                         },
-                    )
-                # Fall through: proposed semantic changes route through the
-                # accepted text-to-SQL pipeline with the chart output hint.
+                    )                    # Fall through: proposed semantic changes route through the
+                    # accepted text-to-SQL pipeline with the chart output hint.
+                    if planner_enabled():
+                        metrics_ledger().record(
+                            PlannerDecisionRecord(
+                                recorded_at=_planner_now(),
+                                session_id=request.session_id,
+                                db_id=request.db_id,
+                                source=proposal.source if proposal else "fallback",
+                                operation=proposal.operation if proposal else None,
+                                reusability_decision=(
+                                    requirement.decision if proposal is not None else None
+                                ),
+                                requery=True,
+                                latency_ms=analytics_planning_ms,
+                                planner_llm_enabled=planner_llm_enabled(),
+                            )
+                        )
             else:
                 # An incomplete saved preview cannot support a trustworthy chart.
                 clarification = (
@@ -1177,6 +1317,45 @@ def create_app(
                 visualization=viz_intent,
             )
             presentation_ledger.extend(presentation_entries)
+        chart_recommendations = None
+        suggested_filters = None
+        if (
+            generated.accepted
+            and generated.rows
+            and not generated.truncated
+            and operation not in {"CHECK_CORRECTNESS", "OPTIMIZE"}
+            and not human_review
+        ):
+            try:
+                chart_recommendations = recommend_charts(
+                    pending.resolved_question,
+                    generated.columns,
+                    generated.rows,
+                    truncated=False,
+                )
+            except Exception:
+                logger.warning("Chart recommendation failed", exc_info=True)
+            database = (
+                sqlite
+                if request.db_id in sqlite.list_ids()
+                else (postgres if postgres is not None else None)
+            )
+            if database is not None:
+                try:
+                    schema = await asyncio.to_thread(database.inspect, request.db_id)
+                    profile = profiles.load(schema.dialect, request.db_id)
+                    suggested_filters = discover_filters(
+                        schema=schema,
+                        columns=generated.columns,
+                        rows=generated.rows,
+                        truncated=False,
+                        approved_tables=(
+                            response_state.approved_tables or None if response_state else None
+                        ),
+                        profile=profile,
+                    )
+                except (DatabaseError, OSError, ValueError):
+                    logger.warning("Filter discovery failed", exc_info=True)
         response = ChatResponse(
             session_id=request.session_id,
             operation=operation,
@@ -1187,6 +1366,8 @@ def create_app(
             presentation=presentation,
             message=message,
             human_review=human_review,
+            chart_recommendations=chart_recommendations,
+            suggested_filters=suggested_filters,
             provenance=[
                 "current question and trusted evidence",
                 "session-scoped conversation contract",

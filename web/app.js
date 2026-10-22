@@ -905,25 +905,43 @@ function wireDataScope(article, generation) {
   const visibleTab = pane.querySelector(".data-visible-tab");
   const note = pane.querySelector(".data-scope-note");
   const wrap = pane.querySelector(".table-wrap");
-  const sourceRows = generation.rows || [];
+  let sourceRows = generation.rows || [];
   const columns = generation.columns || [];
   article._visibleChartSpec = null;
+  /* Client-side row filter: narrows visible rows only; the SQL stays untouched. */
+  let clientFilter = null;
+  function setClientFilter(filter) {
+    clientFilter = filter;
+    renderScope();
+  }
+  article._clearClientFilter = () => { clientFilter = null; renderScope(); };
+  function applyClientFilter(rows) {
+    if (!clientFilter || generation.truncated) return rows;
+    const index = columns.indexOf(clientFilter.column);
+    if (index < 0) return rows;
+    const filtered = rows.filter(row => String(row[index]) === String(clientFilter.value));
+    return filtered.length ? filtered : rows;
+  }
   let scope = "source";
   function renderScope() {
     const visible = scope === "visible" && article._visibleChartSpec;
     const spec = article._visibleChartSpec;
     const shownColumns = visible && spec.transformation && spec.transformation !== "none"
       ? Object.keys(spec.data[0] || {}) : columns;
-    const rows = visible ? spec.data.map(row => shownColumns.map(column => row[column] ?? null)) : sourceRows;
+    const rowsSource = visible ? sourceRows : applyClientFilter(sourceRows);
+    const rows = visible ? spec.data.map(row => shownColumns.map(column => row[column] ?? null)) : rowsSource;
     wrap.replaceChildren();
     renderTable(wrap, shownColumns, rows);
     if (!visible) {
       const table = wrap.querySelector("table");
       if (table) { table.className = "result-grid"; attachResultInvestigations(table, {generation, run_id: article.dataset.runId}); }
     }
+    const filterNote = !visible && clientFilter && !generation.truncated
+      ? ` · row filter: ${clientFilter.column} = ${clientFilter.value} (display only)`
+      : "";
     note.textContent = visible
       ? `${rows.length} visible chart rows · X: ${spec.x} · Y: ${(spec.y_measures || [spec.y]).join(", ")}`
-      : `${sourceRows.length} of ${generation.row_count ?? sourceRows.length} returned rows${generation.truncated ? " · preview only; source result truncated" : " · complete within the executed row limit"}`;
+      : `${rowsSource.length} of ${generation.row_count ?? sourceRows.length} returned rows${generation.truncated ? " · preview only; source result truncated" : " · complete within the executed row limit"}${filterNote}`;
     sourceTab.setAttribute("aria-selected", String(!visible));
     visibleTab.setAttribute("aria-selected", String(Boolean(visible)));
     visibleTab.disabled = !spec;
@@ -931,6 +949,8 @@ function wireDataScope(article, generation) {
   sourceTab.addEventListener("click", () => { scope = "source"; renderScope(); });
   visibleTab.addEventListener("click", () => { scope = "visible"; renderScope(); });
   article._refreshDataScope = renderScope;
+  article._setClientFilter = setClientFilter;
+  article._hasClientFilter = () => Boolean(clientFilter);
   renderScope();
 }
 
@@ -1512,6 +1532,7 @@ async function appendAssistant(body, elapsed, options = {}) {
     wireDataScope(article, generation);
   }
   if (mode === "chart") wireChartSection(article, presentation, generation, body.run_id);
+  if (accepted && !explanatory && !body.clarification_required) renderBackendSuggestions(article, body);
   if (accepted && !explanatory && !body.clarification_required) {
     wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length)});
   }
@@ -2186,6 +2207,155 @@ function renderTable(container, columns, rows) {
     });
   });
   container.append(table);
+}
+
+/* Backend-verified suggestions: chart recommendations and safe filters found
+   on the executed result. Both go through the normal conversation pipeline;
+   client filters only ever narrow already-fetched rows. */
+function itemValueOptions(item) {
+  return fetch(
+    `/api/databases/${encodeURIComponent($("#databaseSelect").value)}/filter-values`
+    + `?table=${encodeURIComponent(item.table || "")}&column=${encodeURIComponent(item.column || "")}`,
+  ).then((response) => {
+    if (!response.ok) throw new Error(`Value request failed (${response.status})`);
+    return response.json();
+  });
+}
+
+function suggestionValueMenu(anchor, item, values, article, runId) {
+  const panel = document.createElement("div");
+  const title = document.createElement("strong");
+  title.className = "query-insight-title";
+  title.textContent = `Filter by ${item.label || item.field}`;
+  const caption = document.createElement("p");
+  caption.textContent = item.exec_mode === "CLIENT_FILTER"
+    ? "Hide all other rows on this page. SQL unchanged."
+    : `Runs a new, validated SQL through the normal pipeline (${item.join_path?.length ? `joining via ${item.join_path.join(" then ")}` : "the approved tables"}).`;
+  panel.append(title, caption);
+  values.forEach((value) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "query-insight-action";
+    button.textContent = value;
+    button.addEventListener("click", () => {
+      dismissInsight();
+      if (state.busy || !state.ready) return;
+      if (item.exec_mode === "CLIENT_FILTER") {
+        article._setClientFilter?.({ column: item.field, value });
+      } else {
+        sendFromAnswer(
+          runId,
+          `Restrict the results to ${item.column || item.field} being ${JSON.stringify(value)}.`,
+        ).catch(error => showError(error.message));
+      }
+    });
+    panel.append(button);
+  });
+  if (article._clearClientFilter && article._hasClientFilter?.()) {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "query-insight-action muted";
+    clear.textContent = "Clear row filter";
+    clear.addEventListener("click", () => {
+      dismissInsight();
+      article._clearClientFilter();
+    });
+    panel.append(clear);
+  }
+  placeInsight(anchor, panel);
+}
+
+function renderBackendSuggestions(article, body) {
+  const section = article.querySelector(".backend-suggestions");
+  if (!section) return;
+  const runId = article.dataset.runId || body.run_id || null;
+  const recommendations = body.chart_recommendations;
+  const filters = body.suggested_filters;
+  const generation = body.generation || {};
+  if (!recommendations && !filters) return;
+  const strip = document.createElement("div");
+  strip.className = "backend-suggestion-strip";
+  if (recommendations) {
+    const label = document.createElement("span");
+    label.className = "suggestion-group-label";
+    label.textContent = "Suggested charts";
+    strip.append(label);
+    const charts = [recommendations.primary_chart, ...(recommendations.alternative_charts || [])];
+    charts.forEach((chart) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "suggestion-chip chart-chip";
+      button.textContent = chart.chart_type.replaceAll("_", " ");
+      button.title = chart.reason || "";
+      if (chart === recommendations.primary_chart) button.classList.add("primary");
+      button.addEventListener("click", () => {
+        if (state.busy || !state.ready) return;
+        const measures = (chart.y_measures && chart.y_measures.length > 1)
+          ? chart.y_measures.join(", ") : chart.y;
+        sendFromAnswer(
+          runId,
+          `Plot ${chart.x} against ${measures} as a ${chart.chart_type.replaceAll("_", " ")} chart.`,
+        ).catch(error => showError(error.message));
+      });
+      strip.append(button);
+    });
+  }
+  if (filters) {
+    const actionable = [
+      ...(filters.client_filters || []),
+      ...(filters.sql_filters || []),
+    ];
+    if (actionable.length) {
+      const label = document.createElement("span");
+      label.className = "suggestion-group-label";
+      label.textContent = "Filter fields";
+      strip.append(label);
+      actionable.slice(0, 6).forEach((item) => {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "suggestion-chip filter-chip";
+        button.textContent = item.label || item.field;
+        if (item.exec_mode === "CLIENT_FILTER") button.classList.add("rows");
+        button.title = `${item.reason}${item.cardinality != null ? ` · ${item.cardinality} distinct values` : ""}`;
+        button.addEventListener("click", (event) => {
+          const anchor = event.currentTarget;
+          if (item.exec_mode === "CLIENT_FILTER") {
+            // Client filters live in the executed result, not in any table.
+            const index = (generation.columns || []).indexOf(item.field);
+            const rows = generation.rows || [];
+            const values = index < 0 ? [] : [
+              ...new Set(rows.map(row => row[index] == null ? "" : String(row[index]))),
+            ].filter(Boolean).sort();
+            if (!values.length) {
+              showError("No values for this field in the executed result.");
+              return;
+            }
+            suggestionValueMenu(anchor, item, values.slice(0, 25), article, runId);
+            return;
+          }
+          itemValueOptions(item)
+            .then((payload) => suggestionValueMenu(
+              anchor, item, payload.values.slice(0, 25), article, runId,
+            ))
+            .catch(error => showError(error.message));
+        });
+        strip.append(button);
+      });
+    }
+    const unavailable = (filters.unavailable_filters || []).length;
+    if (unavailable) {
+      const muted = document.createElement("span");
+      muted.className = "suggestion-unavailable";
+      muted.textContent = `${unavailable} field${unavailable === 1 ? "" : "s"} not filterable (sensitive or too broad)`;
+      muted.title = (filters.unavailable_filters || [])
+        .map(item => `${item.field}: ${item.reason}`).join("\n");
+      strip.append(muted);
+    }
+  }
+  if (!strip.childElementCount) return;
+  section.append(strip);
+  section.hidden = false;
+  hydrateIcons(section);
 }
 
 function downloadCsv(columns, rows) {

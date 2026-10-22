@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import UTC, datetime
+from pathlib import Path
 from time import perf_counter
 from typing import Any, Literal, cast
 
@@ -95,6 +97,7 @@ class AnalyticsPlan(StrictModel):
 
 PLANNER_ENABLED_ENV = "TEXT2SQL_ANALYTICS_PLANNER_ENABLED"
 PLANNER_LLM_ENABLED_ENV = "TEXT2SQL_ANALYTICS_PLANNER_LLM_ENABLED"
+PLANNER_METRICS_PATH_ENV = "TEXT2SQL_ANALYTICS_METRICS_PATH"
 
 
 def planner_enabled() -> bool:
@@ -528,3 +531,94 @@ async def refine_plan_with_model(  # noqa: ANN201 - explicit tuple return below
 def planner_operational(operation: str) -> bool:
     """Whether a plan operation needs interpretation beyond chart mechanics."""
     return operation not in {"VISUALIZE_EXISTING", "EXPLAIN_VISUALIZATION"}
+
+
+# --- planner metrics ledger ---------------------------------------------------
+
+
+class PlannerDecisionRecord(StrictModel):
+    """One recorded planner turn; decisions only, never row data.
+
+    ``source`` distinguishes the deterministic rules ("deterministic"), a
+    validated model refinement ("model"), a model failure that fell back to
+    the deterministic proposal ("fallback"), and turns where the planner was
+    disabled ("disabled").
+    """
+
+    recorded_at: str = Field(max_length=40)
+    session_id: str = Field(default="", max_length=100)
+    db_id: str = Field(default="", max_length=100)
+    source: Literal["deterministic", "model", "fallback", "disabled"] = "deterministic"
+    operation: str | None = Field(default=None, max_length=100)
+    reusability_decision: str | None = Field(default=None, max_length=100)
+    requery: bool = False
+    latency_ms: int = Field(default=0, ge=0)
+    planner_llm_enabled: bool = False
+
+
+class PlannerMetricsLedger:
+    """Append-only in-process ledger of planner decisions.
+
+    When a metrics path is configured each record is also appended as one JSONL
+    line; write failures never affect the request path.
+    """
+
+    def __init__(self, path: Path | None = None, *, max_entries: int = 1_000) -> None:
+        self._path = path
+        self._max_entries = max_entries
+        self._entries: list[PlannerDecisionRecord] = []
+
+    def record(self, entry: PlannerDecisionRecord) -> None:
+        self._entries.append(entry)
+        if len(self._entries) > self._max_entries:
+            del self._entries[: len(self._entries) - self._max_entries]
+        if self._path is None:
+            return
+        try:
+            self._path.parent.mkdir(parents=True, exist_ok=True)
+            with self._path.open("a", encoding="utf-8") as handle:
+                handle.write(entry.model_dump_json() + "\n")
+        except OSError:  # pragma: no cover - metrics must never break a request
+            pass
+
+    def summarize(self) -> dict[str, int]:
+        counts: dict[str, int] = {
+            "turns": len(self._entries),
+            "deterministic": 0,
+            "model": 0,
+            "fallback": 0,
+            "disabled": 0,
+            "requery": 0,
+            "reuse": 0,
+        }
+        for entry in self._entries:
+            counts[entry.source] = counts.get(entry.source, 0) + 1
+            if entry.requery:
+                counts["requery"] += 1
+            elif entry.reusability_decision == "reuse_result":
+                counts["reuse"] += 1
+        return counts
+
+    def entries(self) -> list[PlannerDecisionRecord]:
+        return list(self._entries)
+
+
+_ledger: PlannerMetricsLedger | None = None
+
+
+def metrics_ledger() -> PlannerMetricsLedger:
+    """Process-wide ledger; the JSONL path is read from the environment once."""
+    global _ledger
+    if _ledger is None:
+        configured = os.environ.get(PLANNER_METRICS_PATH_ENV, "").strip()
+        _ledger = PlannerMetricsLedger(Path(configured) if configured else None)
+    return _ledger
+
+
+def reset_metrics_ledger() -> None:
+    global _ledger
+    _ledger = None
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat(timespec="milliseconds")
