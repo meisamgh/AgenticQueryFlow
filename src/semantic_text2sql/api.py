@@ -20,8 +20,11 @@ from semantic_text2sql.analytics_planner import (
     PlannerDecisionRecord,
     metrics_ledger,
     plan_analytics,
+    plan_fields_known,
+    plan_needs_refinement,
     planner_enabled,
     planner_llm_enabled,
+    refine_plan_with_model,
 )
 from semantic_text2sql.conversation import (
     ANALYTICAL_CORRECTION_OPERATIONS,
@@ -38,6 +41,12 @@ from semantic_text2sql.conversation import (
 from semantic_text2sql.data_requirement_validator import validate_reusability
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.explanation import deterministic_explanation, explain_turn_detailed
+from semantic_text2sql.filter_discovery import (
+    _SENSITIVE_TYPES as _FILTER_FORBIDDEN_SEMANTIC_TYPES,
+)
+from semantic_text2sql.filter_discovery import (
+    _UNSAFE_NAME as _FORBIDDEN_NAME_PATTERN,
+)
 from semantic_text2sql.filter_discovery import discover_filters
 from semantic_text2sql.glossary import GlossaryStore, GlossaryTerm
 from semantic_text2sql.historical import HistoricalQueryStore
@@ -103,7 +112,12 @@ from semantic_text2sql.visualization import (
     plan_chart,
     sql_output_requirement,
 )
-from semantic_text2sql.visualization_recommender import recommend_charts
+from semantic_text2sql.visualization_recommender import (
+    merge_recommendations,
+    recommend_charts,
+    refine_charts_with_model,
+    viz_recommender_llm_enabled,
+)
 from semantic_text2sql.voice import (
     MAX_AUDIO_BYTES,
     MAX_AUDIO_SECONDS,
@@ -483,30 +497,35 @@ def create_app(
             "relationships": relationships,
         }
 
-    filter_values_cache: dict[tuple[str, str, str], tuple[list[str], bool]] = {}
+    filter_values_cache: dict[tuple[str, str, str, str], tuple[list[str], bool]] = {}
 
     @app.get("/api/databases/{db_id}/filter-values", response_model=FilterValuesResponse)
-    async def filter_values(db_id: str, table: str, column: str) -> FilterValuesResponse:
-        """Bounded, read-only DISTINCT values for one discovered filter field.
+    async def filter_values(
+        db_id: str, table: str, column: str, search: str | None = None
+    ) -> FilterValuesResponse:
+        """Bounded, read-only distinct values for one verified filter field.
 
-        Only textual/date fields of verified non-key columns of the live schema
-        can be probed; the query is length-bounded, time-bounded, read-only, and
-        cached per (db, table, column).
+        Authorization is fail-closed: the database must exist, the field must
+        be a verified non-key, non-sensitive textual/date column of the live
+        schema, and per-column semantic metadata may not mark it sensitive.
+        High-cardinality fields use a bounded server-side ``search`` instead of
+        presenting the first values as the complete domain. Keys stay cached
+        per (db, table, column, search); the cache is a bounded, process-local
+        map that is refreshed whenever the schema query changes results.
         """
         import re as _re
 
-        if db_id in sqlite.list_ids() or (
-            postgres is not None and db_id in postgres.configured_ids()
+        if db_id not in sqlite.list_ids() and (
+            postgres is None or db_id not in postgres.configured_ids()
         ):
-            allowed = True
-        else:
-            allowed = False
-        if not allowed:
             raise HTTPException(status_code=404, detail="Database was not found or configured.")
         if not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table) or not _re.fullmatch(
             r"[A-Za-z_][A-Za-z0-9_]*", column
         ):
             raise HTTPException(status_code=400, detail="Unsupported table or column name.")
+        search_term = (search or "").strip()
+        if len(search_term) > 64:
+            raise HTTPException(status_code=400, detail="Search term is too long.")
         database = (
             sqlite
             if db_id in sqlite.list_ids()
@@ -534,18 +553,48 @@ def create_app(
             or physical in {"date", "datetime", "timestamp"}
         ):
             raise HTTPException(status_code=400, detail="Only text or date fields support values.")
-        cache_key = (db_id, table, column)
+        # Authorization: verified column metadata (profiles) may retire a
+        # field from value discovery even when the raw schema still lists it.
+        profile = None
+        try:
+            profile = await asyncio.to_thread(
+                profiles.load, schema.dialect, db_id
+            )
+        except (DatabaseError, OSError, ValueError):
+            profile = None
+        for item in profile.columns if profile else []:
+            if item.table == table and item.column == column:
+                if item.semantic_type in _FILTER_FORBIDDEN_SEMANTIC_TYPES:
+                    raise HTTPException(
+                        status_code=403,
+                        detail="This field is not available for value discovery.",
+                    )
+                break
+        if _re.search(_FORBIDDEN_NAME_PATTERN, (table + "." + column).casefold()):
+            raise HTTPException(
+                status_code=403,
+                detail="This field is not available for value discovery.",
+            )
+        cache_key = (db_id, table, column, search_term.casefold())
         cached = filter_values_cache.get(cache_key)
         if cached is not None:
             cached_values, cached_more = cached
             return FilterValuesResponse(
-                db_id=db_id, table=table, column=column,
+                db_id=db_id, table=table, column=column, search=search_term or None,
                 values=cached_values, more_available=cached_more, cached=True,
             )
-        sql = (
-            f'SELECT DISTINCT CAST("{column}" AS TEXT) FROM "{table}" '
-            f'WHERE "{column}" IS NOT NULL ORDER BY 1 LIMIT 101'
-        )
+        if search_term:
+            escaped = search_term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            predicate = f'"{column}" LIKE \'%{escaped}%\' ESCAPE \'\\\\\''
+            sql = (
+                f'SELECT DISTINCT CAST("{column}" AS TEXT) FROM "{table}" '
+                f'WHERE "{column}" IS NOT NULL AND {predicate} ORDER BY 1 LIMIT 101'
+            )
+        else:
+            sql = (
+                f'SELECT DISTINCT CAST("{column}" AS TEXT) FROM "{table}" '
+                f'WHERE "{column}" IS NOT NULL ORDER BY 1 LIMIT 101'
+            )
         try:
             _, rows, _ = await asyncio.to_thread(
                 database.execute,
@@ -560,7 +609,7 @@ def create_app(
         more_available = len(values) > 100
         filter_values_cache[cache_key] = (values[:100], more_available)
         return FilterValuesResponse(
-            db_id=db_id, table=table, column=column,
+            db_id=db_id, table=table, column=column, search=search_term or None,
             values=values[:100], more_available=more_available, cached=False,
         )
 
@@ -756,99 +805,166 @@ def create_app(
                     else f"The stored result contains {source.row_count} rows."
                 )
                 chart_presentation = ResultPresentation(summary=explanation, source="fallback")
-                analytics_planning_ms = 0
-                requery_requested = False
+                # --- Result Reusability Gate: decided here, before any chart
+                # planning. A renderable chart that answers a different
+                # analytical request than the one asked is a wrong answer, so
+                # metric identities, dimensions, grain and result completeness
+                # gate every reuse of the stored result.
+                analytics_started = perf_counter()
+                proposal = None
+                # Governed derived metrics: only definitions approved in the
+                # semantic catalog are recognized; formulas are never invented.
+                approved_metrics: dict[str, Any] = {}
                 try:
-                    spec = plan_chart(
-                        viz_intent,
-                        question=request.message,
-                        columns=source.columns,
-                        rows=source.rows,
-                        truncated=source.truncated,
-                    )
-                    chart_presentation = chart_presentation.model_copy(
-                        update={
-                            "chart_type": spec.chart_type,
-                            "chart_spec": spec,
-                            "x": spec.x,
-                            "y": spec.y,
-                            "title": spec.title,
-                            "x_label": spec.x_label,
-                            "y_label": spec.y_label,
-                            "number_format": spec.number_format,
-                            "time_format": spec.time_format,
-                        }
-                    )
-                    message = "Charted the stored result without running SQL again."
-                except VisualizationError as exc:
-                    # The stored rows cannot chart as requested. Decide
-                    # deterministically whether a new validated query is
-                    # required (for example a scalar total asked per month)
-                    # or whether the request simply cannot reuse the rows.
-                    analytics_started = perf_counter()
-                    proposal = None
-                    if planner_enabled():
-                        try:
-                            proposal = plan_analytics(
-                                request.message,
-                                viz_intent=viz_intent,
-                                previous=previous,
-                                db_id=request.db_id,
-                            )
-                        except Exception:  # noqa: BLE001 - planner proposals never abort a chart turn
-                            proposal = None
-                    analytics_planning_ms = round((perf_counter() - analytics_started) * 1000)
-                    if not planner_enabled():
-                        metrics_ledger().record(
-                            PlannerDecisionRecord(
-                                recorded_at=_planner_now(),
-                                session_id=request.session_id,
-                                db_id=request.db_id,
-                                source="disabled",
-                                latency_ms=analytics_planning_ms,
-                            )
+                    catalog_document = semantic_catalogs.load(request.db_id)
+                except (ValueError, OSError):
+                    catalog_document = None
+                if catalog_document is not None:
+                    approved_metrics = {
+                        entry.id: entry
+                        for entry in catalog_document.metrics
+                        if entry.status == "approved"
+                    }
+                if planner_enabled():
+                    try:
+                        proposal = plan_analytics(
+                            request.message,
+                            viz_intent=viz_intent,
+                            previous=previous,
+                            db_id=request.db_id,
+                            approved_metrics=approved_metrics or None,
                         )
-                    requery_requested = False
-                    if proposal is not None:
-                        requirement = validate_reusability(
-                            proposal,
-                            stored_columns=source.columns,
-                            stored_rows=source.rows,
-                            stored_row_count=source.row_count,
-                            stored_truncated=source.truncated,
+                    except Exception:  # noqa: BLE001 - planner proposals never abort a chart turn
+                        proposal = None
+                # Ambiguous deterministic interpretation gets one flagged,
+                # validated model refinement; obvious chart mechanics never
+                # reach the LLM.
+                if (
+                    planner_enabled()
+                    and planner_llm_enabled()
+                    and proposal is not None
+                    and plan_needs_refinement(proposal)
+                ):
+                    known_fields = {name.casefold() for name in source.columns or []}
+                    known_fields |= {name.casefold() for name in previous.last_columns}
+                    deterministic_plan = proposal
+                    proposal, _refine_usage, _refine_ms = await refine_plan_with_model(
+                        turn_completers[request.provider],
+                        provider=request.provider,
+                        model=request.model,
+                        message=request.message,
+                        previous=previous,
+                        plan=proposal,
+                    )
+                    invented_derived = (
+                        proposal.source == "model"
+                        and bool(
+                            set(proposal.requested_analysis.derived_measures)
+                            - set(approved_metrics)
                         )
-                        if (
-                            requirement.decision == "requery_database"
-                            and proposal.semantic_changes
-                        ):
-                            requery_requested = True
-                    if not requery_requested:
-                        if planner_enabled():
-                            metrics_ledger().record(
-                                PlannerDecisionRecord(
-                                    recorded_at=_planner_now(),
-                                    session_id=request.session_id,
-                                    db_id=request.db_id,
-                                    source=proposal.source if proposal else "fallback",
-                                    operation=proposal.operation if proposal else None,
-                                    reusability_decision=(
-                                        requirement.decision if proposal is not None else None
-                                    ),
-                                    requery=False,
-                                    latency_ms=analytics_planning_ms,
-                                    planner_llm_enabled=planner_llm_enabled(),
-                                )
-                            )
+                    )
+                    if proposal.source == "model" and (
+                        not plan_fields_known(proposal, known_fields) or invented_derived
+                    ):
+                        # An invented dimension or unverified derived formula is
+                        # a failed refinement, never authorization to query
+                        # unverified schema.
+                        proposal = deterministic_plan.model_copy(
+                            update={"source": "fallback"}
+                        )
+                analytics_planning_ms = round((perf_counter() - analytics_started) * 1000)
+                if not planner_enabled():
+                    metrics_ledger().record(
+                        PlannerDecisionRecord(
+                            recorded_at=_planner_now(),
+                            session_id=request.session_id,
+                            db_id=request.db_id,
+                            source="disabled",
+                            latency_ms=analytics_planning_ms,
+                        )
+                    )
+                requirement = None
+                requery_requested = False
+                if proposal is not None:
+                    requirement = validate_reusability(
+                        proposal,
+                        stored_columns=source.columns,
+                        stored_rows=source.rows,
+                        stored_row_count=source.row_count,
+                        stored_truncated=source.truncated,
+                        approved_metrics=approved_metrics or None,
+                    )
+                    if (
+                        requirement.decision == "requery_database"
+                        and proposal.semantic_changes
+                    ):
+                        requery_requested = True
+                if planner_enabled():
+                    metrics_ledger().record(
+                        PlannerDecisionRecord(
+                            recorded_at=_planner_now(),
+                            session_id=request.session_id,
+                            db_id=request.db_id,
+                            source=(
+                                proposal.source if proposal is not None else "fallback"
+                            ),
+                            operation=proposal.operation if proposal else None,
+                            reusability_decision=(
+                                requirement.decision if requirement is not None else None
+                            ),
+                            requery=requery_requested,
+                            latency_ms=analytics_planning_ms,
+                            planner_llm_enabled=planner_llm_enabled(),
+                        )
+                    )
+                if not requery_requested:
+                    if requirement is not None and requirement.decision == "need_clarification":
+                        clarification = requirement.reason
+                        return ChatResponse(
+                            session_id=request.session_id,
+                            operation="VISUALIZE",
+                            resolved_question=previous.resolved_question,
+                            state=previous,
+                            message=clarification,
+                            clarification_required=True,
+                            clarification_question=clarification,
+                            timings_ms={
+                                "analytics_planning": analytics_planning_ms,
+                                "total": round((perf_counter() - started) * 1000),
+                            },
+                        )
+                    try:
+                        spec = plan_chart(
+                            viz_intent,
+                            question=request.message,
+                            columns=source.columns,
+                            rows=source.rows,
+                            truncated=source.truncated,
+                        )
+                        chart_presentation = chart_presentation.model_copy(
+                            update={
+                                "chart_type": spec.chart_type,
+                                "chart_spec": spec,
+                                "x": spec.x,
+                                "y": spec.y,
+                                "title": spec.title,
+                                "x_label": spec.x_label,
+                                "y_label": spec.y_label,
+                                "number_format": spec.number_format,
+                                "time_format": spec.time_format,
+                            }
+                        )
+                        message = "Charted the stored result without running SQL again."
+                    except VisualizationError as exc:
                         message = (
                             requirement.reason
-                            if proposal is not None
-                            and requirement.decision != "reuse_result"
+                            if requirement is not None
+                            and requirement.decision not in {"reuse_result", "unsupported"}
                             else str(exc)
                         )
                         chart_presentation = chart_presentation.model_copy(
                             update={"chart_reason": message}
                         )
-                if not requery_requested:
                     return ChatResponse(
                         session_id=request.session_id,
                         operation="VISUALIZE",
@@ -862,24 +978,10 @@ def create_app(
                             "analytics_planning": analytics_planning_ms,
                             "total": round((perf_counter() - started) * 1000),
                         },
-                    )                    # Fall through: proposed semantic changes route through the
-                    # accepted text-to-SQL pipeline with the chart output hint.
-                    if planner_enabled():
-                        metrics_ledger().record(
-                            PlannerDecisionRecord(
-                                recorded_at=_planner_now(),
-                                session_id=request.session_id,
-                                db_id=request.db_id,
-                                source=proposal.source if proposal else "fallback",
-                                operation=proposal.operation if proposal else None,
-                                reusability_decision=(
-                                    requirement.decision if proposal is not None else None
-                                ),
-                                requery=True,
-                                latency_ms=analytics_planning_ms,
-                                planner_llm_enabled=planner_llm_enabled(),
-                            )
-                        )
+                    )
+                # Fall through: the gate asked for new data, so the proposed
+                # semantic changes route through the accepted text-to-SQL
+                # pipeline with the chart output hint.
             else:
                 # An incomplete saved preview cannot support a trustworthy chart.
                 clarification = (
@@ -1335,6 +1437,36 @@ def create_app(
                 )
             except Exception:
                 logger.warning("Chart recommendation failed", exc_info=True)
+                chart_recommendations = None
+            if viz_recommender_llm_enabled():
+                try:
+                    model_recommended, viz_usage, viz_ms = await refine_charts_with_model(
+                        turn_completers.get(request.provider),
+                        provider=request.provider,
+                        model=request.model,
+                        question=pending.resolved_question,
+                        columns=generated.columns,
+                        rows=generated.rows,
+                    )
+                    client_ledger = [
+                        CallLedgerEntry(
+                            component="visualization_recommendation",
+                            kind="MODEL",
+                            status="SUCCEEDED" if model_recommended is not None else "FAILED",
+                            provider=request.provider,
+                            requested_model=request.model,
+                            effective_model=request.model,
+                            input_tokens=viz_usage.input_tokens,
+                            output_tokens=viz_usage.output_tokens,
+                            latency_ms=viz_ms,
+                        )
+                    ]
+                    chart_recommendations = merge_recommendations(
+                        model_recommended, chart_recommendations
+                    )
+                    presentation_ledger.extend(client_ledger)
+                except Exception:
+                    logger.warning("LLM chart recommendation failed", exc_info=True)
             database = (
                 sqlite
                 if request.db_id in sqlite.list_ids()

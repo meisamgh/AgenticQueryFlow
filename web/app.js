@@ -908,19 +908,37 @@ function wireDataScope(article, generation) {
   let sourceRows = generation.rows || [];
   const columns = generation.columns || [];
   article._visibleChartSpec = null;
-  /* Client-side row filter: narrows visible rows only; the SQL stays untouched. */
-  let clientFilter = null;
-  function setClientFilter(filter) {
-    clientFilter = filter;
-    renderScope();
+  /* Unified chart-view display filters (chartViewState concept): narrows the
+     visible chart and the Visible Chart Data tab only. The Source Data tab
+     and the accepted SQL are immutable; SQL-backed filters go through the
+     normal validated pipeline instead of touching this state. */
+  let clientFilters = [];
+  function allowedValues(filter) {
+    return filter.values && filter.values.length
+      ? filter.values.map(String) : [String(filter.value ?? "")];
   }
-  article._clearClientFilter = () => { clientFilter = null; renderScope(); };
-  function applyClientFilter(rows) {
-    if (!clientFilter || generation.truncated) return rows;
-    const index = columns.indexOf(clientFilter.column);
-    if (index < 0) return rows;
-    const filtered = rows.filter(row => String(row[index]) === String(clientFilter.value));
+  function applyClientFilters(rows, filters = clientFilters) {
+    if (!filters.length || generation.truncated) return rows;
+    const filtered = rows.filter(row => filters.every(filter => {
+      const index = columns.indexOf(filter.column);
+      if (index < 0) return true;
+      return allowedValues(filter).includes(String(row[index]));
+    }));
     return filtered.length ? filtered : rows;
+  }
+  function filterNoteText() {
+    return clientFilters.map(filter => {
+      const allowed = allowedValues(filter);
+      const value = allowed.length <= 3 ? allowed.join(" | ") : `${allowed.length} values`;
+      return `${filter.column} = ${value}`;
+    }).join(", ");
+  }
+  function setClientFilters(filters) {
+    clientFilters = filters;
+    /* One shared controller: the ECharts view updates through the same row
+       filters; the Data tab re-renders; Source Data stays the original rows. */
+    article._setChartViewRowFilters?.(filters);
+    renderScope();
   }
   let scope = "source";
   function renderScope() {
@@ -928,20 +946,22 @@ function wireDataScope(article, generation) {
     const spec = article._visibleChartSpec;
     const shownColumns = visible && spec.transformation && spec.transformation !== "none"
       ? Object.keys(spec.data[0] || {}) : columns;
-    const rowsSource = visible ? sourceRows : applyClientFilter(sourceRows);
-    const rows = visible ? spec.data.map(row => shownColumns.map(column => row[column] ?? null)) : rowsSource;
+    /* Source Data is the original executed result, never a filtered copy. */
+    const rows = visible
+      ? spec.data.map(row => shownColumns.map(column => row[column] ?? null))
+      : sourceRows;
     wrap.replaceChildren();
     renderTable(wrap, shownColumns, rows);
     if (!visible) {
       const table = wrap.querySelector("table");
       if (table) { table.className = "result-grid"; attachResultInvestigations(table, {generation, run_id: article.dataset.runId}); }
     }
-    const filterNote = !visible && clientFilter && !generation.truncated
-      ? ` · row filter: ${clientFilter.column} = ${clientFilter.value} (display only)`
+    const filterNote = visible && clientFilters.length && !generation.truncated
+      ? ` · row filter: ${filterNoteText()} (display only)`
       : "";
     note.textContent = visible
-      ? `${rows.length} visible chart rows · X: ${spec.x} · Y: ${(spec.y_measures || [spec.y]).join(", ")}`
-      : `${rowsSource.length} of ${generation.row_count ?? sourceRows.length} returned rows${generation.truncated ? " · preview only; source result truncated" : " · complete within the executed row limit"}${filterNote}`;
+      ? `${rows.length} visible chart rows · X: ${spec.x} · Y: ${(spec.y_measures || [spec.y]).join(", ")}${filterNote}`
+      : `${sourceRows.length} of ${generation.row_count ?? sourceRows.length} returned rows (source result, unfiltered)${generation.truncated ? " · preview only; source result truncated" : " · complete within the executed row limit"}`;
     sourceTab.setAttribute("aria-selected", String(!visible));
     visibleTab.setAttribute("aria-selected", String(Boolean(visible)));
     visibleTab.disabled = !spec;
@@ -949,8 +969,10 @@ function wireDataScope(article, generation) {
   sourceTab.addEventListener("click", () => { scope = "source"; renderScope(); });
   visibleTab.addEventListener("click", () => { scope = "visible"; renderScope(); });
   article._refreshDataScope = renderScope;
-  article._setClientFilter = setClientFilter;
-  article._hasClientFilter = () => Boolean(clientFilter);
+  article._setClientFilter = filter => setClientFilters([filter]);
+  article._setClientFilters = setClientFilters;
+  article._clearClientFilter = () => setClientFilters([]);
+  article._hasClientFilter = () => clientFilters.length > 0;
   renderScope();
 }
 
@@ -1015,6 +1037,9 @@ function wireChartSection(article, presentation, generation, runId) {
     article._visibleChartSpec = next;
     article._refreshDataScope?.();
     const activeParts = [];
+    if (settings.rowFilters && Object.keys(settings.rowFilters).length)
+      activeParts.push(Object.entries(settings.rowFilters).map(([column, values]) =>
+        `${column}: ${values.length <= 3 ? values.join(" | ") : `${values.length} values`}`).join(", "));
     if (settings.categories?.length) activeParts.push(settings.categories.join(", "));
     if (settings.start || settings.end) activeParts.push([settings.start || "first", settings.end || "last"].join(" – "));
     if (settings.topN) activeParts.push(`Top ${settings.topN}`);
@@ -1072,6 +1097,55 @@ function wireChartSection(article, presentation, generation, runId) {
   article._echart = null;
   article._chartType = presentation.chart_type;
   kinds.hidden = true;
+  /* Shared chart-view state (chartViewState): one controller for the chart
+     toolbar AND backend-suggested chips. `tryChart` re-validates a proposed
+     shape through the same deterministic chart explorer — display only, and
+     it may fall back to the conversational pipeline for missing data. */
+  article._chartViewState = {
+    sourceRunId: runId,
+    settings,
+    accepted: original,
+    tryChart(chart) {
+      if (!chart || !chart.x || !chart.y) return false;
+      const specColumns = new Set([
+        ...Object.keys(original.data?.[0] || {}),
+        ...(original.source_columns || []),
+      ]);
+      if (!specColumns.has(chart.x)) return false;
+      const measures = [...new Set([...(chart.y_measures || []), chart.y].filter(Boolean))];
+      if (!measures.every(name => specColumns.has(name))) return false;
+      const merged = {
+        ...settings,
+        x: chart.x,
+        metrics: measures,
+        series: chart.series || null,
+        chartType: chart.chart_type,
+        rowFilters: {},
+        categories: [],
+        start: null,
+        end: null,
+        topN: null,
+      };
+      const applied = explorer?.apply(original, merged);
+      if (!applied || !applied.data.length) return false;
+      if (applied.chart_type !== chart.chart_type) return false;
+      Object.keys(settings).forEach(key => delete settings[key]);
+      Object.assign(settings, merged);
+      saveSettings();
+      renderCurrent();
+      return true;
+    },
+    setRowFilters(rows) {
+      settings.rowFilters = (Array.isArray(rows) ? rows : [rows]).reduce((map, filter) => {
+        if (!filter?.column) return map;
+        const values = filter.values && filter.values.length
+          ? filter.values.map(String) : [String(filter.value ?? "")];
+        return { ...map, [filter.column]: values };
+      }, {});
+      saveSettings();
+      renderCurrent();
+    },
+  };
   if (explorer && options && panel) {
     panel.hidden = false;
     fillFilter(".chart-category-filter", options.categories);
@@ -2210,12 +2284,19 @@ function renderTable(container, columns, rows) {
 }
 
 /* Backend-verified suggestions: chart recommendations and safe filters found
-   on the executed result. Both go through the normal conversation pipeline;
-   client filters only ever narrow already-fetched rows. */
-function itemValueOptions(item) {
+   on the executed result. SQL-backed filters go through the normal
+   conversation pipeline; client filters only ever narrow already-fetched
+   rows. High-cardinality fields rely on bounded server-side search instead
+   of presenting 25 values as the full domain. */
+function itemValueOptions(item, search) {
+  const params = new URLSearchParams({
+    table: item.table || "",
+    column: item.column || "",
+  });
+  if (search) params.set("search", search);
   return fetch(
     `/api/databases/${encodeURIComponent($("#databaseSelect").value)}/filter-values`
-    + `?table=${encodeURIComponent(item.table || "")}&column=${encodeURIComponent(item.column || "")}`,
+    + `?${params.toString()}`,
   ).then((response) => {
     if (!response.ok) throw new Error(`Value request failed (${response.status})`);
     return response.json();
@@ -2232,6 +2313,32 @@ function suggestionValueMenu(anchor, item, values, article, runId) {
     ? "Hide all other rows on this page. SQL unchanged."
     : `Runs a new, validated SQL through the normal pipeline (${item.join_path?.length ? `joining via ${item.join_path.join(" then ")}` : "the approved tables"}).`;
   panel.append(title, caption);
+  if (item.control === "search") {
+    /* High-cardinality field: bounded server-side search, never the claim
+       that the listed values are the complete domain. */
+    const searchRow = document.createElement("p");
+    searchRow.className = "query-insight-search-row";
+    const input = document.createElement("input");
+    input.type = "search";
+    input.maxLength = 64;
+    input.placeholder = `Search ${item.label || item.field}…`;
+    const go = document.createElement("button");
+    go.type = "button";
+    go.className = "query-insight-action muted";
+    go.textContent = "Search values";
+    go.addEventListener("click", () => {
+      const term = input.value.trim();
+      if (!term) return;
+      go.disabled = true;
+      itemValueOptions(item, term)
+        .then(payload => {
+          placeInsight(anchor, suggestionValueMenu(anchor, item, payload.values.slice(0, 25), article, runId));
+        })
+        .catch(error => { showError(error.message); go.disabled = false; });
+    });
+    searchRow.append(input, go);
+    panel.append(searchRow);
+  }
   values.forEach((value) => {
     const button = document.createElement("button");
     button.type = "button";
@@ -2290,6 +2397,16 @@ function renderBackendSuggestions(article, body) {
       if (chart === recommendations.primary_chart) button.classList.add("primary");
       button.addEventListener("click", () => {
         if (state.busy || !state.ready) return;
+        // Validated recommendation over the executed result: apply the typed
+        // chart action locally (no model call, no SQL) whenever the result
+        // already contains every required column.
+        if (article._chartViewState?.tryChart({
+          x: chart.x,
+          y: chart.y,
+          y_measures: chart.y_measures || [chart.y],
+          series: chart.series,
+          chart_type: chart.chart_type,
+        })) return;
         const measures = (chart.y_measures && chart.y_measures.length > 1)
           ? chart.y_measures.join(", ") : chart.y;
         sendFromAnswer(

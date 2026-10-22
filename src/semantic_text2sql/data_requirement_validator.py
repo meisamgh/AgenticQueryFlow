@@ -85,11 +85,14 @@ def validate_reusability(
     stored_rows: list[list[object]] | None,
     stored_row_count: int | None,
     stored_truncated: bool,
+    approved_metrics: dict[str, Any] | None = None,
 ) -> DataRequirement:
     """Decide how the accepted previous result relates to the requested analysis.
 
     ``None`` stored result data means nothing executable is reliably available:
     stored state without row snapshots cannot answer any visualization request.
+    ``approved_metrics`` are typed entries from the verified semantic catalog;
+    when supplied, the gate reports derived-metric lineage in its reasons.
     """
     requested = plan.requested_analysis
     dimensions = requested.dimensions
@@ -143,11 +146,29 @@ def validate_reusability(
         else None
     )
 
+    # Governed derived measures (profit margin, revenue per customer, ...) are
+    # always recomputed through validated SQL: the verified definition belongs
+    # to the catalog, and deriving ratios from stored client-side aggregates
+    # would risk averages-of-averages and silent unit mismatches.
+    if plan.requested_analysis.derived_measures:
+        derived = plan.requested_analysis.derived_measures
+        return outcome(
+            "requery_database",
+            "Derived metric(s) "
+            + ", ".join(derived)
+            + " are governed by an approved definition and must be recomputed "
+            "through validated SQL to preserve lineage and aggregation semantics.",
+            additivity_note=(
+                "Derived measures are treated as non-additive: their definition "
+                "recomputes for every requested grain."
+            ),
+        )
+
     # Any requested grouping that is absent from the stored rows forces new SQL.
     # A finance "stored as month | country" example: "now by region" has no
     # region column, so no amount of client-side work can fabricate it.
     missing_dimensions = [name for name in dimensions if name not in stored_columns]
-    if missing_dimensions:
+    if    missing_dimensions: 
         return outcome(
             "requery_database",
             "The stored result lacks the requested dimension(s): "

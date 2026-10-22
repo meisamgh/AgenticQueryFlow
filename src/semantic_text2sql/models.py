@@ -901,6 +901,7 @@ class FilterValuesResponse(StrictModel):
     db_id: str
     table: str
     column: str
+    search: str | None = None
     values: list[str] = Field(default_factory=list, max_length=100)
     more_available: bool = False
     cached: bool = False

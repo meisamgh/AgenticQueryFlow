@@ -67,6 +67,47 @@ the query result available with a factual fallback. Partial results are labelled
 are interpretations of returned data—not correctness proofs. Recovery and human-review messages
 take precedence over this presentation path.
 
+### Conversational analytics planner
+
+Visualization follow-ups ("plot it by month", "compare Germany and France", "remove France") do not
+re-run the full SQL pipeline blindly. The accepted conversation state (semantic contract, last
+question, accepted SQL, stored columns/rows/grain) produces a **deterministic analytics plan first**
+(`analytics_planner.plan_analytics`). A **Result Reusability Gate**
+(`data_requirement_validator.validate_reusability`) then decides, from metric identities,
+grouping, time grain and stored-grain capability, whether the stored result can be reused as-is,
+needs new validated SQL, or needs clarification. Aggregates never grow finer grain client-side and
+non-additive metrics (averages, ratios, distinct counts) are always recomputed in SQL.
+
+**Governed derived metrics** (for example Profit Margin, Average Order Value) are recognized only
+when their definition is approved in the semantic catalog; the plan carries their lineage as an
+`ADD_MEASURE` change and the gate forces recomputation through validated SQL. Formulas without
+an approved definition are never invented — unverified formula requests fall to clarification.
+
+When the deterministic rules leave the request ambiguous (`plan_needs_refinement`), an optional
+**flag-gated LLM analytics refinement** runs one bounded model call
+(`refine_plan_with_model`). The model sees the previous question, accepted SQL, result columns and
+the deterministic draft plan, and returns a typed JSON plan proposal that is re-validated with
+Pydantic, checked against verified schema (`plan_fields_known`) and against the approved metric
+catalog. Any invalid, timed-out, schema-inventing or unauthorized output falls back to the
+deterministic plan. Obvious chart mechanics (reuse, chart-type changes) never reach the model.
+
+Executed results also get ranked chart recommendations. The deterministic recommender scores
+candidate charts against real rows and column roles/units; an optional **flag-gated LLM
+visualization recommender** (`refine_charts_with_model`) adds business-aware proposals
+(multi-measure comparisons, series selection, alternatives) as structured JSON. Every proposal is
+re-validated through the same deterministic chart planner (`plan_chart`); fabricated columns,
+unrenderable combinations and invalid JSON are dropped, and the deterministic ranking stays
+authoritative on failure.
+
+Planner decisions (source, operation, reusability decision, latency) are recorded per turn in a
+bounded local ledger exposed at `GET /api/analytics-metrics`; decisions are metrics only, never row
+data.
+
+Filter value discovery (`GET /api/databases/{db_id}/filter-values`) is fail-closed: the field must
+exist in the live schema as a non-key text/date column, must not be marked sensitive by verified
+profile metadata, and high-cardinality fields are answered with a bounded server-side `search`
+rather than presenting the first values as the complete domain.
+
 ### Client workspace
 
 - Inspect selected tables and columns in the Query Inspector after asking a question.

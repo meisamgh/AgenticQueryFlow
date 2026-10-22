@@ -9,8 +9,14 @@ without a verified definition — those belong to the text-to-SQL pipeline.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import os
 import re
+from time import perf_counter
 from typing import Any
+
+from pydantic import Field, ValidationError
 
 from semantic_text2sql.models import (
     ChartRecommendations as ChartRecommendations,
@@ -18,6 +24,8 @@ from semantic_text2sql.models import (
 from semantic_text2sql.models import (
     ChartSpec,
     ChartType,
+    StrictModel,
+    TokenUsage,
 )
 from semantic_text2sql.models import (
     RecommendedChart as RecommendedChart,
@@ -434,6 +442,252 @@ def recommend_charts(
 
 def build_recommendation_intent(recommendation: RecommendedChart) -> VisualizationIntent:
     return VisualizationIntent(**_intent_for(recommendation))
+
+
+# --- optional LLM candidate-generation stage ---------------------------------
+
+VIZ_RECOMMENDER_LLM_ENABLED_ENV = "TEXT2SQL_VIZ_RECOMMENDER_LLM_ENABLED"
+VIZ_RECOMMENDER_LLM_ENABLED = os.environ.get(
+    VIZ_RECOMMENDER_LLM_ENABLED_ENV, "false"
+).casefold() == "true"
+
+
+def viz_recommender_llm_enabled() -> bool:
+    return os.environ.get(
+        VIZ_RECOMMENDER_LLM_ENABLED_ENV, "false"
+    ).casefold() == "true"
+
+
+class LLMChartProposal(StrictModel):
+    """One structured chart proposal from the model; validated before use."""
+
+    chart_type: ChartType
+    x: str | None = None
+    y: str | None = None
+    y_measures: list[str] = Field(default_factory=list, max_length=8)
+    series: str | None = None
+    reason: str = Field(default="", max_length=300)
+
+
+class LLMChartProposals(StrictModel):
+    """Model output contract: never JavaScript, never ECharts options, never SQL."""
+
+    primary_chart: LLMChartProposal
+    alternative_charts: list[LLMChartProposal] = Field(
+        default_factory=list, max_length=3
+    )
+
+
+_VIZ_PROMPT = """Propose faithful charts for one executed analytical result.
+Return ONLY one JSON object with exactly these keys:
+{{"primary_chart": {{"chart_type": str, "x": str|null, "y": str,
+"y_measures": [str], "series": str|null, "reason": str}},
+"alternative_charts": [same shape, up to 3]}}
+Allowed chart_type values: {chart_types}.
+Rules:
+- Only use columns from "Columns"; never invent columns, values or measures.
+- y and every y_measures entry must be a numeric measure column.
+- Prefer multiple measures only when their units are comparable (see "Units").
+- Explain the business reason in one short sentence ("reason").
+- No JavaScript, no ECharts options, no SQL.
+Question: {question}
+Columns (name: role, unit, distinct values): {profile}
+Row count: {rows_count}
+Bounded sample (first rows): {sample}
+"""
+
+
+def _result_profile(
+    columns: list[str], rows: list[list[Any]], *, sample_rows: int = 5
+) -> tuple[str, str]:
+    """Bounded textual profile: role + unit + distinct values per column."""
+    numeric, temporal, category = _column_roles(columns, rows)
+    named_rows = [dict(zip(columns, row, strict=True)) for row in rows]
+    lines: list[str] = []
+    for name in columns:
+        if name in numeric:
+            role = "measure" if not _identifier_like(
+                name, [row[name] for row in named_rows]
+            ) else "identifier-like numeric"
+        elif name in temporal:
+            role = "temporal"
+        elif name in category:
+            role = "categorical"
+        else:
+            role = "text"
+        unit = measure_unit(name)
+        distinct = _cardinality(name, columns, named_rows)
+        lines.append(f"{name}: {role}, unit={unit or 'n/a'}, distinct={distinct}")
+    sample = [named_rows[index] for index in range(min(sample_rows, len(named_rows)))]
+    return "; ".join(lines), str(sample[:sample_rows])
+
+
+def _validated_rank_chart(
+    proposal: LLMChartProposal,
+    *,
+    columns: list[str],
+    rows: list[list[Any]],
+    question: str,
+    truncated: bool,
+    score: float,
+) -> RecommendedChart | None:
+    """Validate one LLM proposal through the deterministic chart pipeline."""
+    named_columns = set(columns)
+    referenced = {
+        value
+        for value in [proposal.x, proposal.y, proposal.series, *proposal.y_measures]
+        if value is not None
+    }
+    if not referenced <= named_columns:
+        return None
+    if proposal.y is None:
+        return None
+    candidate = RecommendedChart(
+        chart_type=proposal.chart_type,
+        x=proposal.x or proposal.y,
+        y=proposal.y,
+        series=proposal.series,
+        y_measures=list(proposal.y_measures),
+        title="",
+        reason=proposal.reason,
+        score=score,
+    )
+    try:
+        spec = plan_chart(
+            build_recommendation_intent(candidate),
+            question=question,
+            columns=columns,
+            rows=rows,
+            truncated=truncated,
+        )
+    except VisualizationError:
+        return None
+    return candidate.model_copy(
+        update={"title": spec.title, "score": round(score, 3)}
+    )
+
+
+async def refine_charts_with_model(  # noqa: ANN201 - union return
+    completer: Any,
+    *,
+    provider: str,
+    model: str,
+    question: str,
+    columns: list[str],
+    rows: list[list[Any]],
+    truncated: bool = False,
+    timeout_seconds: float = 12.0,
+) -> tuple[ChartRecommendations | None, TokenUsage, int]:
+    """One bounded model call proposing charts for an executed result.
+
+    Every candidate is re-validated through :func:`plan_chart` before it can
+    reach the caller; any parse/timeout/validation failure returns ``None``
+    and the deterministic ranking stays authoritative.
+    """
+    usage = TokenUsage()
+    started = perf_counter()
+    if truncated or not rows or len(columns) < 2:
+        return None, usage, 0
+    profile, sample = _result_profile(columns, rows)
+    prompt = _VIZ_PROMPT.format(
+        chart_types=", ".join(sorted(_TYPE_BASE)),
+        question=question,
+        profile=profile,
+        rows_count=len(rows),
+        sample=sample,
+    )
+    try:
+        complete = getattr(completer, "complete_detailed", None)
+        if callable(complete):
+            raw, usage = await asyncio.wait_for(
+                complete(model=model, prompt=prompt), timeout=timeout_seconds
+            )
+        else:
+            raw = await asyncio.wait_for(
+                completer.complete(model=model, prompt=prompt), timeout=timeout_seconds
+            )
+        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw).strip(), flags=re.IGNORECASE)
+        parsed = LLMChartProposals.model_validate(json.loads(text))
+    except (
+        ValueError,
+        TypeError,
+        AttributeError,
+        ValidationError,
+        json.JSONDecodeError,
+        OSError,
+        TimeoutError,
+        asyncio.exceptions.TimeoutError,
+    ):
+        return None, usage, round((perf_counter() - started) * 1000)
+
+    primary = _validated_rank_chart(
+        parsed.primary_chart,
+        columns=columns,
+        rows=rows,
+        question=question,
+        truncated=truncated,
+        score=1.0,
+    )
+    if primary is None:
+        return None, usage, round((perf_counter() - started) * 1000)
+    alternatives: list[RecommendedChart] = []
+    seen = {(primary.chart_type, primary.x, primary.y, primary.series, tuple(primary.y_measures))}
+    llm_score = 0.95
+    for proposal in parsed.alternative_charts:
+        validated = _validated_rank_chart(
+            proposal,
+            columns=columns,
+            rows=rows,
+            question=question,
+            truncated=truncated,
+            score=llm_score,
+        )
+        if validated is None:
+            continue
+        key = (
+            validated.chart_type,
+            validated.x,
+            validated.y,
+            validated.series,
+            tuple(validated.y_measures),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        alternatives.append(validated)
+        llm_score -= 0.05
+    return (
+        ChartRecommendations(primary_chart=primary, alternative_charts=alternatives),
+        usage,
+        round((perf_counter() - started) * 1000),
+    )
+
+
+def merge_recommendations(
+    model_recommended: ChartRecommendations | None,
+    deterministic: ChartRecommendations | None,
+) -> ChartRecommendations | None:
+    """Prefer validated model proposals; backfill from the deterministic ranking."""
+    if model_recommended is None:
+        return deterministic
+    if deterministic is None:
+        return model_recommended
+    merged_alternatives = [model_recommended.primary_chart, *model_recommended.alternative_charts]
+    used = {
+        (item.chart_type, item.x, item.y, item.series, tuple(item.y_measures))
+        for item in merged_alternatives
+    }
+    backfill = [deterministic.primary_chart, *deterministic.alternative_charts]
+    for item in backfill:
+        key = (item.chart_type, item.x, item.y, item.series, tuple(item.y_measures))
+        if key in used or len(merged_alternatives) >= 4:
+            continue
+        used.add(key)
+        merged_alternatives.append(item)
+    return ChartRecommendations(
+        primary_chart=merged_alternatives[0],
+        alternative_charts=merged_alternatives[1:4],
+    )
 
 
 def materialize_recommendation(

@@ -89,10 +89,15 @@ window.QueryflowChartExplorer = (function () {
       ? requestedMeasures : [metric];
     const filterKey = spec.series || (!isTime(spec) ? spec.x : null);
     const selectedCategories = Array.isArray(settings.categories) ? settings.categories.map(String) : [];
+    const rowFilters = settings.rowFilters && typeof settings.rowFilters === "object"
+      ? settings.rowFilters : {};
+    const rowFilterEntries = Object.entries(rowFilters)
+      .filter(([column, values]) => spec.data.length && column in spec.data[0] && Array.isArray(values) && values.length);
     let rows = spec.data.filter(row =>
       (!filterKey || !selectedCategories.length || selectedCategories.includes(String(row[filterKey])))
       && (!isTime(spec) || (!settings.start || chronological(row[spec.x]) >= chronological(settings.start))
-        && (!settings.end || chronological(row[spec.x]) <= chronological(settings.end))));
+        && (!settings.end || chronological(row[spec.x]) <= chronological(settings.end)))
+      && rowFilterEntries.every(([column, values]) => values.includes(String(row[column]))));
     if (settings.topN && Number.isInteger(settings.topN) && settings.topN > 0) {
       // Ranking is display-only and never sums multiple rows at a category.
       if (distinct(rows, spec.x).length === rows.length) {

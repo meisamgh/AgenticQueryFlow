@@ -16,6 +16,7 @@ Reusability of stored results is decided by
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -202,12 +203,18 @@ def plan_analytics(
     viz_intent: VisualizationIntent,
     previous: ConversationState | None,
     db_id: str,
+    approved_metrics: dict[str, Any] | None = None,
 ) -> AnalyticsPlan:
     """Deterministically propose the analytical change for this turn.
 
     Conversational dependency, metrics, dimensions, grain and filter changes
     are extracted with bounded, auditable rules. The previous systate's
     resolved question supplies entity context without leaking other sessions.
+
+    ``approved_metrics`` maps metric ids from the verified semantic catalog to
+    their typed entries; a requested derived metric is only recognized when
+    its id or label matches this approved set, and its definition is always
+    recomputed through validated SQL (never from stored aggregates).
     """
     value = _normalize(message)
     unresolved: list[str] = []
@@ -241,8 +248,23 @@ def plan_analytics(
         or _IMPERATIVE.match(value)
         or re.search(r"\b(?:it|that|this|those|them|again|previous|also)\b", value)
     )
+    # Governed derived metrics: the definition must exist in the approved
+    # semantic catalog. Anything else falls through to clarification of the
+    # metric requirement by the text-to-SQL pipeline — formulas are never
+    # invented here and never recomputed from stored aggregates.
+    derived_measures: list[str] = []
+    if approved_metrics:
+        for metric_id, entry in approved_metrics.items():
+            label = str(getattr(entry, "label", metric_id))
+            aliases = {metric_id.replace("_", " ").strip(), label.casefold().strip()}
+            for alias in aliases:
+                if alias and re.search(rf"(?<![\w]){re.escape(alias)}(?![\w])", value):
+                    metrics = [name for name in metrics if name != metric_id]
+                    if metric_id not in derived_measures:
+                        derived_measures.append(metric_id)
+                    break
     preserve = {
-        "metric_definition": not metrics and not aggregation,
+        "metric_definition": not bool(metrics or derived_measures) and not aggregation,
         "filters": not bool(only_values or years or removal_values) and not removal,
         "entities": not comparison,
     }
@@ -254,9 +276,13 @@ def plan_analytics(
     if aggregation:
         changes.append(SemanticChange(operation="CHANGE_AGGREGATION", target="aggregation",
                                       new_value=aggregation))
-    if metrics:
+    if metrics and not derived_measures:
+        # An approved derived metric supersedes inline metric mentions; its
+        # lineage is carried by ADD_MEASURE, never by a vague metric swap.
         changes.append(SemanticChange(operation="CHANGE_METRIC", target="metric",
                                       new_value=", ".join(metrics)))
+    for derived in derived_measures:
+        changes.append(SemanticChange(operation="ADD_MEASURE", target=derived))
     for term in dimensions:
         if term:
             changes.append(SemanticChange(operation="ADD_DIMENSION", target=term))
@@ -282,7 +308,7 @@ def plan_analytics(
         dimensions=dimensions,
         time_grain=cast(Any, grain),
         aggregation=cast(Any, aggregation),
-        derived_measures=[],
+        derived_measures=derived_measures,
     )
 
     return _choose_operation(
@@ -483,8 +509,14 @@ Rules:
 - Preserve constraints the user did not change.
 - If the request is ambiguous, set operation to CLARIFY with unresolved_terms as strings.
 - Do not generate SQL. Do not generate chart code.
+- Only reference columns that appear in "Result columns".
 Previous root question: {base}
 Previous resolved request: {resolved}
+Accepted SQL: {accepted_sql}
+Result columns: {result_columns}
+Deterministic draft plan (improve it ONLY when it misreads the request;
+it already captures filters, grain and metrics the user did not change):
+{draft}
 Message: {message}
 """
 
@@ -507,30 +539,95 @@ async def refine_plan_with_model(  # noqa: ANN201 - explicit tuple return below
     """
     usage = TokenUsage()
     started = perf_counter()
+    columns = getattr(previous, "last_columns", None) or []
     prompt = _PLAN_PROMPT.format(
         base=getattr(previous, "root_question", "") or "",
         resolved=getattr(previous, "resolved_question", "") or "",
+        accepted_sql=getattr(previous, "last_sql", None) or "None",
+        result_columns=", ".join(columns) or "None",
+        draft=plan.model_dump_json(),
         message=message,
     )
     try:
         complete = getattr(completer, "complete_detailed", None)
         if callable(complete):
-            raw, usage = await complete(model=model, prompt=prompt)
+            raw, usage = await asyncio.wait_for(
+                complete(model=model, prompt=prompt), timeout=timeout_seconds
+            )
         else:
-            raw = await completer.complete(model=model, prompt=prompt)
+            raw = await asyncio.wait_for(
+                completer.complete(model=model, prompt=prompt), timeout=timeout_seconds
+            )
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw).strip(), flags=re.IGNORECASE)
         parsed = AnalyticsPlan.model_validate(json.loads(text))
         refined = parsed.model_copy(update={"source": "model"})
         return refined, usage, round((perf_counter() - started) * 1000)
-    except (ValueError, TypeError, AttributeError, ValidationError, json.JSONDecodeError, OSError):
+    except (
+        ValueError,
+        TypeError,
+        AttributeError,
+        ValidationError,
+        json.JSONDecodeError,
+        OSError,
+        TimeoutError,
+        asyncio.exceptions.TimeoutError,
+    ):
         return plan.model_copy(update={"source": "fallback"}), usage, round(
             (perf_counter() - started) * 1000
         )
 
 
+def plan_fields_known(plan: AnalyticsPlan, known_fields: set[str]) -> bool:
+    """Whether a model proposal only references verified result/schema names.
+
+    Dimensions are the dangerous inventions: an absent dimension names a
+    grouping the stored result can never support and the text-to-SQL pipeline
+    must not be steered by hallucinated schema. Filter targets are values
+    ("Germany"), not columns, so they are deliberately not checked here.
+    """
+    haystack = " ".join(known_fields)
+    dimensions = set(plan.requested_analysis.dimensions)
+    for change in plan.semantic_changes:
+        if change.operation == "ADD_DIMENSION" and change.target:
+            dimensions.add(change.target.strip())
+    if not dimensions:
+        return True
+    tokens = {token for token in re.split(r"[\W_]", haystack) if token}
+    return all(
+        token in tokens
+        for name in dimensions
+        for token in re.split(r"[\W_]", name.casefold())
+        if token
+    )
+
+
 def planner_operational(operation: str) -> bool:
     """Whether a plan operation needs interpretation beyond chart mechanics."""
     return operation not in {"VISUALIZE_EXISTING", "EXPLAIN_VISUALIZATION"}
+
+
+def plan_needs_refinement(plan: AnalyticsPlan) -> bool:
+    """Whether the deterministic rules left the request ambiguous.
+
+    Obvious chart mechanics — a pure reuse request, an explicit grain or
+    chart-type change — never reach the LLM. Refinement is reserved for
+    turns where the rules extracted no structure at all, or explicitly
+    declared the request unresolved.
+    """
+    if plan.clarify or plan.unresolved_terms:
+        return True
+    if plan.operation in {"REFINE_AND_VISUALIZE", "NEW_ANALYTICAL_QUERY"}:
+        nothing_extracted = not (
+            plan.semantic_changes
+            or plan.requested_analysis.metrics
+            or plan.requested_analysis.dimensions
+            or plan.requested_analysis.time_grain
+            or plan.requested_analysis.aggregation
+            or (plan.visualization_intent is not None and plan.visualization_intent.chart_type)
+            or (plan.visualization_intent is not None and plan.visualization_intent.explicit_type)
+        )
+        return nothing_extracted
+    return False
 
 
 # --- planner metrics ledger ---------------------------------------------------
