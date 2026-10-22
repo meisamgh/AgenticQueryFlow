@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=qf4-9" />
+    <link rel="stylesheet" href="/static/styles.css?v=qf4-11" />
     <script>
       // Apply the stored theme before first paint to avoid a flash.
       try {
@@ -202,19 +202,25 @@
                 </div>
               </header>
               <div class="chart-explorer" hidden>
+                <div class="chart-active-view" aria-live="polite"><strong>ACTIVE CHART VIEW</strong><span class="chart-active-label">Current executed result · no display filters</span></div>
                 <details class="chart-filter-panel">
                   <summary>Filters &amp; Parameters <span class="chart-filter-count" hidden></span></summary>
                   <div class="chart-filter-controls">
+                    <label class="chart-x-control" hidden>X-axis<select class="chart-x-filter"></select></label>
+                    <label class="chart-series-control" hidden>Series / group<select class="chart-series-filter"></select></label>
                     <label class="chart-category-control" hidden>Category (select multiple)<select class="chart-category-filter" multiple size="4"></select></label>
                     <label class="chart-metric-control" hidden>Metric<select class="chart-metric-filter"></select></label>
+                    <label class="chart-measures-control" hidden>Measures (select multiple)<select class="chart-measures-filter" multiple size="4"></select></label>
                     <label class="chart-start-control" hidden>From<select class="chart-start-filter"></select></label>
                     <label class="chart-end-control" hidden>To<select class="chart-end-filter"></select></label>
                     <label class="chart-top-control" hidden>Top N<select class="chart-top-filter"><option value="">All</option><option value="5">5</option><option value="10">10</option><option value="20">20</option></select></label>
-                    <button type="button" class="chart-apply-filter">Apply Filters</button>
-                    <button type="button" class="chart-reset-filter">Reset Filters</button>
-                    <button type="button" class="chart-clear-filter">Clear All</button>
+                    <label class="chart-legend-control"><input type="checkbox" class="chart-legend-filter" checked> Legend</label>
+                    <button type="button" class="chart-apply-filter">Apply to chart</button>
+                    <button type="button" class="chart-reset-filter">Reset to recommended</button>
+                    <button type="button" class="chart-clear-filter">Clear display filters</button>
                   </div>
-                  <p class="chart-filter-note">Display-only filters use the complete executed result. For additional data or a different aggregation, ask a follow-up question.</p>
+                  <div class="chart-query-parameters"><strong>Change the query</strong><p>For a dimension or value missing from this result, generate a new validated read-only query.</p><label>Field<select class="chart-query-field"></select></label><label>Operator<select class="chart-query-operator"><option value="=">is</option><option value="!=">is not</option><option value=">">greater than</option><option value="<">less than</option></select></label><label>Value<input class="chart-query-value" maxlength="120" autocomplete="off"></label><button type="button" class="chart-apply-query">Apply to query</button></div>
+                  <p class="chart-filter-note">Chart controls change only the displayed, complete result. Apply to query creates a new SQL result through Queryflow.</p>
                 </details>
                 <div class="chart-suggestions" role="group" aria-label="Suggested charts"></div>
               </div>
@@ -240,11 +246,13 @@
               </section>
               <section class="panel-card result-panel-pane" role="tabpanel" hidden>
                 <header>
-                  <span data-icon="table"></span><strong>Result</strong><small class="row-count"></small>
+                  <span data-icon="table"></span><strong>Data</strong><small class="row-count"></small>
                   <div class="panel-actions">
                     <button class="icon-button csv-button" type="button" title="Download CSV" data-icon="download"></button>
                   </div>
                 </header>
+                <nav class="data-view-tabs" role="tablist" aria-label="Data scope"><button type="button" class="data-source-tab" aria-selected="true">Source result</button><button type="button" class="data-visible-tab" aria-selected="false">Visible chart data</button></nav>
+                <p class="data-scope-note"></p>
                 <div class="table-wrap"></div>
               </section>
             </div>
@@ -300,6 +308,6 @@
     <script src="/static/icons.js?v=3"></script>
     <script src="/static/echarts_view.js?v=10"></script>
     <script src="/static/chart_explorer.js?v=1"></script>
-    <script src="/static/app.js?v=qf4-11"></script>
+    <script src="/static/app.js?v=qf4-14"></script>
   </body>
 </html>

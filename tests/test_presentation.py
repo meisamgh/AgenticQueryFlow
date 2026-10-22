@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from semantic_text2sql.models import TokenUsage
+from semantic_text2sql.models import ChartSpec, TokenUsage
 from semantic_text2sql.presentation import present_result
 from semantic_text2sql.runtime import RequestBudget
 from semantic_text2sql.visualization import (
@@ -147,6 +147,43 @@ def test_intent_distinguishes_show_from_plot_and_followup() -> None:
     assert not parse_intent("Show revenue by month in 2025.").requested
     assert parse_intent("Plot monthly revenue in 2025.").requested
     assert parse_intent("Make it a line chart instead.", has_previous=True).followup
+
+
+def test_percent_stacked_chart_intent_and_complete_result() -> None:
+    question = "Plot a 100% stacked bar chart by country and month."
+    intent = parse_intent(question)
+    assert intent.chart_type == "percent_stacked_bar"
+    spec = plan_chart(
+        intent,
+        question=question,
+        columns=["Month", "Country", "Revenue"],
+        rows=[
+            ["2026-01", "DE", 10], ["2026-01", "FR", 20],
+            ["2026-02", "DE", 15], ["2026-02", "FR", 25],
+        ],
+        truncated=False,
+    )
+    assert spec.chart_type == "percent_stacked_bar"
+
+
+def test_chart_spec_rejects_unverified_or_incompatible_multi_measures() -> None:
+    from pydantic import ValidationError
+
+    base = dict(
+        chart_type="multi_line", x="Month", y="Revenue", title="Results",
+        x_label="Month", y_label="Money", source_columns=["Month", "Revenue", "Profit"],
+        data=[{"Month": "2026-01", "Revenue": 10, "Profit": 4}],
+    )
+    spec = ChartSpec(
+        **base, y_measures=["Revenue", "Profit"],
+        measure_units={"Revenue": "EUR", "Profit": "EUR"},
+    )
+    assert spec.y_measures == ["Revenue", "Profit"]
+    with pytest.raises(ValidationError):
+        ChartSpec(**base, y_measures=["Revenue", "Orders"])
+    with pytest.raises(ValidationError):
+        ChartSpec(**base, y_measures=["Revenue", "Profit"],
+                  measure_units={"Revenue": "EUR", "Profit": "count"})
 
 
 def test_intent_axis_extraction_from_per_by_and_multi_dimensions() -> None:

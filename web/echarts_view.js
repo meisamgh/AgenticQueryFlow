@@ -55,7 +55,10 @@ window.QueryflowECharts = (function () {
     const data = spec.data;
     const type = spec.chart_type;
     const x = spec.x, y = spec.y, group = spec.series;
+    const measures = Array.isArray(spec.y_measures) && spec.y_measures.length
+      ? spec.y_measures : [y];
     if (!x || !y || data.some(row => !(x in row) || !(y in row))) return null;
+    if (measures.some(name => data.some(row => !(name in row) || row[name] == null || !Number.isFinite(Number(row[name]))))) return null;
     const text = cssVar("--text", "#20212b");
     const muted = cssVar("--text-muted", "#5c6170");
     const border = cssVar("--border-strong", "#dcdbe2");
@@ -141,7 +144,7 @@ window.QueryflowECharts = (function () {
           start: spec.zoom_start ?? 0, end: spec.zoom_end ?? 100 },
         { type: "inside", xAxisIndex: 0, filterMode: "filter",
           start: spec.zoom_start ?? 0, end: spec.zoom_end ?? 100 }] : [],
-      legend: { show: grouped, type: "scroll", top: 0, textStyle: { color: muted } },
+      legend: { show: spec.legend !== false && (grouped || measures.length > 1), type: "scroll", top: 0, textStyle: { color: muted } },
       series: [],
     };
     if (type === "histogram") {
@@ -152,6 +155,12 @@ window.QueryflowECharts = (function () {
       option.series = [{ type: "scatter", symbolSize: type === "bubble"
         ? item => Math.max(5, Math.min(45, Math.sqrt(Math.max(0, Number(item[2]))) * 3)) : 11,
       data: data.map(row => [row[x], row[y], type === "bubble" ? row[spec.size] : null]) }];
+    } else if (measures.length > 1 && !group && ["multi_line", "grouped_bar"].includes(type)) {
+      option.series = measures.map(name => {
+        const points = new Map(data.map(row => [label(row[x]), row[name]]));
+        return { name, type: type === "multi_line" ? "line" : "bar", connectNulls: false,
+          data: category.map(value => points.has(value) ? points.get(value) : null) };
+      });
     } else if (grouped) {
       option.series = unique(data.map(row => row[group])).map(name => {
         const points = new Map(data.filter(row => label(row[group]) === name)
@@ -169,7 +178,7 @@ window.QueryflowECharts = (function () {
         step: type === "step_line" ? "end" : undefined,
         areaStyle: type === "area" ? {} : undefined,
         connectNulls: false,
-        data: data.map(row => row[y]) }];
+        data: category.map(value => data.find(row => label(row[x]) === value)?.[y] ?? null) }];
     }
     if (type === "percent_stacked_bar") {
       option.yAxis.name = "Share (%)";
@@ -192,7 +201,13 @@ window.QueryflowECharts = (function () {
     observer?.observe(container);
     return {
       dispose() { window.removeEventListener("resize", resize); observer?.disconnect(); chart.dispose(); },
-      onSelect(callback) { chart.on("click", callback); },
+      onSelect(callback) { chart.on("click", point => callback({ ...point,
+        rawX: ["scatter", "bubble"].includes(spec.chart_type)
+          ? spec.data[point.dataIndex]?.[spec.x]
+          : [...new Set(spec.data.map(row => label(row[spec.x])))].sort((a, b) =>
+              spec.time_format !== "raw"
+                ? Date.parse(`${canonicalDate(a)}T00:00:00Z`) - Date.parse(`${canonicalDate(b)}T00:00:00Z`) : 0)[point.dataIndex],
+      })); },
       onZoom(callback) { chart.on("datazoom", () => {
         const zoom = chart.getOption()?.dataZoom?.[0];
         if (zoom) callback({ start: zoom.start, end: zoom.end });

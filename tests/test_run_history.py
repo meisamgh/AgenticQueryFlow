@@ -97,6 +97,22 @@ def test_reopen_restore_branch_and_rerun_survive_api_restart(
     }).json()
     assert "Italy" not in another_branch["state"]["resolved_question"]
 
+    separate_branch = client.post("/api/chat", json={
+        **base, "message": "Instead show all orders", "parent_run_id": first["run_id"],
+        "branch_from_parent": True,
+    }).json()
+    assert separate_branch["parent_run_id"] == first["run_id"]
+    assert separate_branch["conversation_id"] != first["conversation_id"]
+    assert separate_branch["history_saved"]
+    branch_turns = client.get(
+        f"/api/history/{separate_branch['run_id']}/turns", params={"session_id": "owner"}
+    ).json()
+    assert [turn["run_id"] for turn in branch_turns] == [first["run_id"], separate_branch["run_id"]]
+    branch_followup = client.post("/api/chat", json={
+        **base, "message": "Now only Germany", "parent_run_id": separate_branch["run_id"],
+    }).json()
+    assert branch_followup["conversation_id"] == separate_branch["conversation_id"]
+
     # An explicit rerun executes the accepted SQL through the existing safety boundary.
     calls_before_rerun = model.calls
     rerun = client.post(f"/api/history/{first['run_id']}/rerun", params={"session_id": "owner"})

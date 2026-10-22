@@ -17,6 +17,7 @@ from semantic_text2sql.models import ChartSpec, ChartType, StrictModel
 # Longest and most specific expressions first. A generic "show" is never a plot request.
 CHART_PATTERNS: tuple[tuple[ChartType, str], ...] = (
     ("calendar_heatmap", r"\bcalendar\s+heat\s*map\b"),
+    ("percent_stacked_bar", r"\b(?:100\s*%|100\s*percent|percent)\s*stacked\s+(?:bar|column)\b"),
     ("stacked_area", r"\bstacked\s+area\b"),
     ("stacked_bar", r"\bstacked\s+(?:bar|column)\b"),
     ("grouped_bar", r"\b(?:grouped|clustered)\s+(?:bar|column)\b"),
@@ -131,7 +132,7 @@ def parse_intent(question: str, *, has_previous: bool = False) -> VisualizationI
     multi_family = bool(
         match
         and match[0]
-        in {"multi_line", "stacked_area", "grouped_bar", "stacked_bar"}
+        in {"multi_line", "stacked_area", "grouped_bar", "stacked_bar", "percent_stacked_bar"}
     )
     if multi_family:
         # A grouped/stacked/multi-series request maps the named dimension(s) to
@@ -161,7 +162,7 @@ def sql_output_requirement(intent: VisualizationIntent) -> str | None:
     if not intent.requested:
         return None
     kind = intent.chart_type
-    if kind in {"stacked_bar", "stacked_area", "grouped_bar", "multi_line"}:
+    if kind in {"stacked_bar", "stacked_area", "percent_stacked_bar", "grouped_bar", "multi_line"}:
         shape = "one x-axis dimension, one series dimension, and one numeric measure"
     elif kind in {"scatter"}:
         shape = "two numeric measures at the same observation grain"
@@ -312,7 +313,9 @@ def plan_chart(
     y = _resolve_dimension(intent.y, columns) if intent.y else intent.y
     series = _resolve_dimension(intent.series, columns) if intent.series else intent.series
     size = _resolve_dimension(intent.size, columns) if intent.size else intent.size
-    use_series = requested in {"multi_line", "stacked_area", "grouped_bar", "stacked_bar"}
+    use_series = requested in {
+        "multi_line", "stacked_area", "grouped_bar", "stacked_bar", "percent_stacked_bar"
+    }
     point_series = requested in {"scatter", "bubble"}
     frequency = next(
         (
@@ -403,7 +406,9 @@ def plan_chart(
         raise VisualizationError("This chart needs a separate category or series column.")
     if requested in {"heatmap", "treemap"} and (series not in columns or series == x):
         raise VisualizationError("This chart needs two distinct category columns.")
-    if requested in {"pie", "donut", "treemap", "stacked_bar", "stacked_area"} and any(
+    if requested in {
+        "pie", "donut", "treemap", "stacked_bar", "stacked_area", "percent_stacked_bar"
+    } and any(
         row[columns.index(y)] < 0 for row in rows
     ):
         raise VisualizationError("This composition chart requires nonnegative measures.")
@@ -432,7 +437,7 @@ def plan_chart(
             x_values = {key[0] for key in keys}
             series_values = {key[1] for key in keys}
             if len(keys) < len(x_values) * len(series_values):
-                if requested in {"stacked_bar", "stacked_area"}:
+                if requested in {"stacked_bar", "stacked_area", "percent_stacked_bar"}:
                     raise VisualizationError(
                         "A stacked chart needs every series at every x value; "
                         "missing data cannot be zero-filled."

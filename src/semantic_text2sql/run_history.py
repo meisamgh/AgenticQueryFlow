@@ -33,6 +33,7 @@ class RunRecord(BaseModel):
     conversation_id: str = ""
     turn_id: str = ""
     parent_run_id: str | None = None
+    branch_from_parent: bool = False
     sql_version: int = 0
     db_id: str
     operation: str
@@ -138,9 +139,13 @@ class RunHistoryStore:
             raise ValueError("The parent turn is unavailable for this session and database.")
         if parent is None and entry.operation != "NEW_QUERY":
             parent = next((item for item in recent if item.db_id == entry.db_id), None)
-        if entry.operation == "NEW_QUERY":
+        if entry.operation == "NEW_QUERY" and not entry.branch_from_parent:
             parent = None
-        conversation_id = (parent.conversation_id or parent.run_id) if parent else uuid4().hex
+        conversation_id = (
+            uuid4().hex
+            if entry.branch_from_parent and parent
+            else (parent.conversation_id or parent.run_id) if parent else uuid4().hex
+        )
         sql_version = parent.sql_version if parent else 0
         previous_sql = (
             parent.state_snapshot.last_sql
@@ -326,6 +331,7 @@ def build_run_record(raw: dict[str, Any]) -> RunRecord:
         turn_id=response.turn_id or response.run_id or uuid4().hex,
         session_id=response.session_id,
         parent_run_id=request.parent_run_id if request else None,
+        branch_from_parent=request.branch_from_parent if request else False,
         db_id=db_id,
         operation=response.operation,
         original_message=raw["message"],

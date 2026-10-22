@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 from semantic_text2sql.sql_formatting import format_sql_for_display
 
@@ -672,6 +672,7 @@ class ChatRequest(StrictModel):
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     message: str = Field(min_length=1, max_length=4_000)
     parent_run_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    branch_from_parent: bool = False
     evidence: str | None = Field(default=None, max_length=8_000)
     provider: ModelProvider = Field(
         default_factory=lambda: cast(
@@ -781,6 +782,7 @@ ChartType = Literal[
     "horizontal_bar",
     "grouped_bar",
     "stacked_bar",
+    "percent_stacked_bar",
     "scatter",
     "bubble",
     "histogram",
@@ -799,6 +801,8 @@ class ChartSpec(StrictModel):
     source_row_count: int = Field(default=0, ge=0)
     x: str
     y: str
+    y_measures: list[str] = Field(default_factory=list, max_length=8)
+    measure_units: dict[str, str] = Field(default_factory=dict)
     series: str | None = None
     size: str | None = None
     title: str = Field(max_length=160)
@@ -811,6 +815,24 @@ class ChartSpec(StrictModel):
     warnings: list[str] = Field(default_factory=list, max_length=4)
     number_format: Literal["plain", "compact"] = "plain"
     time_format: Literal["raw", "year", "month", "day"] = "raw"
+
+    @model_validator(mode="after")
+    def validate_measures(self) -> ChartSpec:
+        if self.y_measures:
+            if self.y not in self.y_measures or len(set(self.y_measures)) != len(self.y_measures):
+                raise ValueError("Chart measures must be unique and include the primary Y measure")
+            if self.source_columns and any(
+                name not in self.source_columns for name in self.y_measures
+            ):
+                raise ValueError("Chart measures must occur in the executed result")
+            if any(any(name not in row for name in self.y_measures) for row in self.data):
+                raise ValueError("Chart data is missing a selected measure")
+            if len(self.y_measures) > 1 and self.chart_type not in {"multi_line", "grouped_bar"}:
+                raise ValueError("Multiple measures require a compatible grouped chart")
+            units = {self.measure_units.get(name) for name in self.y_measures}
+            if len(units - {None}) > 1:
+                raise ValueError("Multiple measures cannot share an axis with incompatible units")
+        return self
 
 
 class ResultPresentation(StrictModel):

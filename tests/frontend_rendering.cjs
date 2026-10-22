@@ -43,6 +43,26 @@ test('conversation history has no heading or search control', () => {
   assert.ok(!source.includes('$("#historySearch")'));
   assert.ok(markup.includes('id="conversationHistory"'));
 });
+test('semantic chips edit through the live query path and branch creates new lineage', () => {
+  assert.ok(source.includes('function editSemanticChip('));
+  assert.ok(source.includes('sendFromAnswer(runId, prompt)'));
+  assert.ok(source.includes('state.pendingBranch = true'));
+  assert.ok(source.includes('branch_from_parent: state.pendingBranch'));
+  assert.ok(!markup.includes('Schema explorer'));
+});
+test('single-value answer uses a readable label and exact grouped number', () => {
+  const helpers = source.slice(source.indexOf('function readableResultLabel('), source.indexOf('function renderAnswerPreview('));
+  const display = vm.runInNewContext(`${helpers}; ({readableResultLabel, formatKpiValue})`);
+  assert.equal(display.readableResultLabel('total_monthly_consumption'), 'Total monthly consumption');
+  assert.equal(display.readableResultLabel('CustomerID'), 'Customer ID');
+  assert.equal(display.formatKpiValue(3415480125.73), '3,415,480,125.73');
+  assert.equal(display.formatKpiValue('1234567890.123456789'), '1,234,567,890.123456789');
+  assert.equal(display.formatKpiValue('001234'), '001234');
+  assert.equal(display.formatKpiValue(null), 'NULL');
+  const preview = source.slice(source.indexOf('function renderAnswerPreview('), source.indexOf('async function appendAssistant('));
+  assert.ok(preview.includes('readableResultLabel(columns[0])'));
+  assert.ok(preview.includes('formatKpiValue(rows[0][0])'));
+});
 test('inspector has separate context, schema, recovery and details tabs', () => {
   for (const tab of ['understanding', 'schema', 'recovery', 'validation']) {
     assert.ok(markup.includes(`data-inspector-tab="${tab}"`));
@@ -224,6 +244,29 @@ test('stacked charts require a complete nonnegative series grid', () => {
   assert.ok([...explorer.choices({...base, data: [...base.data,
     {Country: 'FR', Product: 'B', Revenue: 4} ]})].includes('stacked_bar'));
 });
+test('display-only filters preserve executed rows and support compatible wide measures', () => {
+  const rows = ['2026-01', '2026-02'].flatMap(Month => ['DE', 'FR'].map(Country =>
+    ({Month, Country, Revenue: 100, Profit: 40, Orders: 4})));
+  const spec = {chart_type: 'multi_line', x: 'Month', y: 'Revenue', series: 'Country',
+    source_columns: Object.keys(rows[0]), time_format: 'month', data: rows};
+  const filtered = explorer.apply(spec, {categories: ['DE'], metrics: ['Revenue', 'Profit']});
+  assert.equal(filtered.data.length, 2);
+  assert.equal(spec.data.length, 4);
+  assert.equal(filtered.series, null);
+  assert.deepEqual([...filtered.y_measures], ['Revenue', 'Profit']);
+  assert.equal(filtered.chart_type, 'multi_line');
+  assert.equal(explorer.compatibleMeasures(['Revenue', 'Orders'], spec), false);
+  const option = context.window.QueryflowECharts.buildOption(filtered);
+  assert.deepEqual(option.series.map(series => series.name), ['Revenue', 'Profit']);
+  assert.deepEqual([...option.series[0].data], [100, 100]);
+});
+test('stack recommendations reject ratios and accept complete additive time series', () => {
+  const rows = ['2026-01', '2026-02'].flatMap(Month => ['DE', 'FR'].map(Country =>
+    ({Month, Country, Revenue: 10, ConversionRate: 0.2})));
+  const base = {chart_type: 'multi_line', x: 'Month', series: 'Country', time_format: 'month', data: rows};
+  assert.ok([...explorer.choices({...base, y: 'Revenue'})].includes('stacked_bar'));
+  assert.ok(![...explorer.choices({...base, y: 'ConversionRate'})].includes('stacked_bar'));
+});
 test('time zoom counts unique chronological points and excludes ordinary categories', () => {
   const make = (count, time) => ({chart_type: time ? 'line' : 'bar', x: 'Period', y: 'Value',
     time_format: time ? 'day' : 'raw', data: Array.from({length: count}, (_, index) => ({
@@ -336,18 +379,53 @@ test('query understanding chips show only fields from the confirmed semantic con
   strip.hidden = true;
   context.renderSemanticChips({querySelector: () => strip}, {
     state: { semantic_contract: {
-      measures: ['net_revenue'], grain: ['month'],
-      filters: [{column:'country', operator:'=', value:'DE'}],
+      measures: ['total_spending'], grain: ['CustomerID'],
+      filters: [{operand:'year', operator:'=', value:'2025'}, {operand:'country', operator:'=', value:'DE'}],
     } },
   });
   assert.equal(strip.hidden, false);
-  assert.equal(strip.children.length, 4); // eyebrow + 3 chips
+  assert.equal(strip.children.length, 5); // eyebrow + metric, period, grain and filter
   assert.equal(strip.children[1].children[0].textContent, 'Metric');
-  assert.equal(strip.children[1].children[1].textContent, 'net_revenue');
-  assert.equal(strip.children[3].children[0].textContent, 'Filter');
+  assert.equal(strip.children[1].children[1].textContent, 'Total spending');
+  assert.equal(strip.children[2].children[0].textContent, 'Period');
+  assert.equal(strip.children[2].children[1].textContent, '2025');
+  assert.equal(strip.children[3].children[0].textContent, 'Grain');
+  assert.equal(strip.children[3].children[1].textContent, 'Customer');
+  assert.equal(strip.children[4].children[1].textContent, 'Country: DE');
+  assert.equal(strip.children[1].children[2].getAttribute?.('data-icon') || strip.children[1].children[2]['data-icon'], 'chevron-right');
+  assert.ok(strip.children[1].listeners.click);
   const empty = new Element(); empty.hidden = true;
   context.renderSemanticChips({querySelector: () => empty}, {state:null});
   assert.equal(empty.hidden, true);
+});
+test('Answer keeps a single KPI but never duplicates a result table', () => {
+  const preview = new Element(); preview.hidden = true;
+  const fragment = {querySelector: () => preview};
+  context.renderAnswerPreview(fragment, {generation: {
+    accepted:true, columns:['customer', 'spending'], rows:[['A', 120], ['B', 90]], row_count:2,
+  }}, 'sql');
+  assert.equal(preview.hidden, true);
+  assert.equal(preview.children.length, 0);
+  const scalar = new Element(); scalar.hidden = true;
+  context.renderAnswerPreview({querySelector: () => scalar}, {generation: {
+    accepted:true, columns:['total_monthly_consumption'], rows:[[3415480125.73]], row_count:1,
+  }}, 'sql');
+  assert.equal(scalar.hidden, false);
+  assert.equal(scalar.children[0].textContent, 'Total monthly consumption');
+  assert.equal(scalar.children[1].textContent, '3,415,480,125.73');
+});
+test('recovery diagnosis is shown once when it matches the answer text', () => {
+  const helper = source.slice(source.indexOf('function sameDisplayText('), source.indexOf('function updateStatusPill('));
+  const sameDisplayText = vm.runInNewContext(`${helper}; sameDisplayText`);
+  const diagnosis = 'The customer ID 7657657 does not exist in the customers table, so no information can be shown for it.';
+  assert.equal(sameDisplayText(diagnosis, diagnosis), true);
+  assert.equal(sameDisplayText(diagnosis, `  ${diagnosis.slice(0, -1)}  `), true);
+  assert.equal(sameDisplayText(diagnosis, 'The customer has no transactions.'), false);
+  const answer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function generationQuestion('));
+  assert.ok(answer.includes('!sameDisplayText(responseMessage, diagnosis)'));
+  assert.ok(answer.includes('!sameDisplayText(body.human_review?.reason, diagnosis)'));
+  assert.ok(answer.includes('!body.human_review && !sameDisplayText(responseMessage, failure)'));
+  assert.ok(answer.includes('renderHumanReview(fragment, body.human_review, responseMessage)'));
 });
 test('chart adapter exposes click events for investigate actions', () => {
   let handlerName = null, selectedHandler = null;
@@ -361,11 +439,55 @@ test('chart adapter exposes click events for investigate actions', () => {
   const spec = {chart_type: 'line', x: 'Month', y: 'Revenue',
     data: [{Month:'Jan', Revenue:4}, {Month:'Feb', Revenue:5}]};
   const mounted = context.window.QueryflowECharts.render(new Element(), {chart_spec:spec});
-  const onClick = () => {};
+  let selected;
+  const onClick = point => { selected = point; };
   mounted.onSelect(onClick);
   assert.equal(handlerName, 'click');
-  assert.equal(selectedHandler, onClick);
+  selectedHandler({dataIndex: 1, name: 'Feb'});
+  assert.equal(selected.rawX, 'Feb');
   mounted.dispose();
+});
+test('formatted date click carries the original month key', () => {
+  let handler;
+  const chart = {setOption() {}, resize() {}, dispose() {}, on(_name, callback) { handler = callback; }};
+  context.window.echarts = {init: () => chart};
+  const spec = {chart_type: 'line', x: 'Month', y: 'Revenue', time_format: 'month',
+    data: [{Month:'2026-02', Revenue:2}, {Month:'2026-01', Revenue:1}]};
+  const mounted = context.window.QueryflowECharts.render(new Element(), {chart_spec: spec});
+  let selected;
+  mounted.onSelect(point => { selected = point; });
+  handler({dataIndex: 0, name: 'Jan 2026'});
+  assert.equal(selected.rawX, '2026-01');
+  mounted.dispose();
+});
+test('grouped chart click keeps the raw date and series after display filtering', () => {
+  let handler;
+  const chart = {setOption() {}, resize() {}, dispose() {}, on(_name, callback) { handler = callback; }};
+  context.window.echarts = {init: () => chart};
+  const original = {chart_type: 'multi_line', x: 'Month', y: 'Revenue', series: 'Country',
+    time_format: 'month', data: [
+      {Month:'2026-01', Country:'DE', Revenue:1}, {Month:'2026-01', Country:'FR', Revenue:2},
+      {Month:'2026-02', Country:'DE', Revenue:3}, {Month:'2026-02', Country:'FR', Revenue:4},
+    ]};
+  const filtered = explorer.apply(original, {categories:['FR']});
+  const mounted = context.window.QueryflowECharts.render(new Element(), {chart_spec:filtered});
+  let selected;
+  mounted.onSelect(point => { selected = point; });
+  handler({dataIndex: 1, name: 'Feb 2026', seriesName: 'FR'});
+  assert.equal(selected.rawX, '2026-02');
+  assert.equal(selected.seriesName, 'FR');
+  mounted.dispose();
+});
+test('data scope and query-backed filters are separate from tab switching', () => {
+  assert.ok(markup.includes('class="data-source-tab"'));
+  assert.ok(markup.includes('class="data-visible-tab"'));
+  assert.ok(markup.includes('class="chart-apply-query"'));
+  const scope = source.slice(source.indexOf('function wireDataScope('), source.indexOf('function wireChartSection('));
+  assert.ok(!scope.includes('sendFromAnswer('));
+  assert.ok(!scope.includes('api('));
+  const chart = source.slice(source.indexOf('function wireChartSection('), source.indexOf('function toast('));
+  assert.ok(chart.includes('await sendFromAnswer(runId,'));
+  assert.ok(chart.includes('availableFields.includes(field)'));
 });
 test('scatter-point investigation uses the observed x value when ECharts omits its name', () => {
   const observations = [];
@@ -484,6 +606,32 @@ test('recovery timeline reflects the real trace and stays honest about outcomes'
   assert.ok(repaired[4].detail.includes('Remove the country filter.'));
 
   assert.equal(context.recoveryTimelineSteps({ activated: false }).length, 0);
+});
+
+test('inspector recovery trace follows recorded signal, probes and decision', () => {
+  const helper = source.slice(source.indexOf('function inspectorRecoverySteps('), source.indexOf('function renderInspectorPerformance('));
+  const inspector = vm.runInNewContext(`${helper}; inspectorRecoverySteps`, {
+    sameDisplayText: (left, right) => left === right,
+  });
+  const recovery = {
+    activated: true, mode: 'ZERO_RESULT', failure_code: 'SQL_SUCCESS_ZERO_ROWS',
+    tool_calls: [{tool:'inspect_values', purpose:'Check the customer identifier',
+      result_summary:'Customer 999 was not found', evidence_id:'E1'}],
+    claims: [{statement:'No matching customer was found', evidence_ids:['E1']}],
+    diagnosis_summary:'Customer 999 has no matching record.', agent_action:'INFORM',
+  };
+  const steps = inspector(recovery);
+  assert.deepEqual([...steps].map(step => step.title), [
+    'Unmatched result detected', 'Value check', 'Evidence evaluated',
+  ]);
+  assert.match(steps[1].detail, /Customer 999 was not found/);
+  assert.match(steps[1].meta, /Observation E1/);
+  assert.match(steps[2].meta, /Outcome: INFORM/);
+  assert.equal(inspector({...recovery, tool_calls: []}).length, 2);
+  assert.equal(inspector({activated:false}).length, 0);
+  assert.ok(styles.includes('.inspect-recovery-timeline'));
+  assert.ok(styles.includes('.inspect-recovery-step:not(:last-child)::before'));
+  assert.ok(!helper.includes('Illustrative'));
 });
 
 test('recovery presentation uses backend event IDs and keeps claims as interpretations', () => {

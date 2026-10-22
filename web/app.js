@@ -10,7 +10,7 @@ const state = {
   busy: false, jobId: null, cancelled: false, currentQuestion: "", ready: false,
   lastBody: null, history: [], saved: [], glossaryByDb: {}, schemaRequest: 0,
   activeRunId: null, diffCache: new Map(), modelConfig: null,
-  restorePending: false,
+  restorePending: false, pendingBranch: false,
 };
 let voiceInput = null;
 import("/static/voice.js?v=voice-1").then(async ({VoiceInput}) => {
@@ -444,6 +444,7 @@ async function send(message, feedbackCategory = null) {
         db_id: $("#databaseSelect").value,
         message: message.trim(),
         parent_run_id: state.activeRunId,
+        branch_from_parent: state.pendingBranch,
         execute: true,
         max_rows: 100,
         feedback_category: feedbackCategory,
@@ -454,6 +455,7 @@ async function send(message, feedbackCategory = null) {
     const body = await waitForJob(created.job_id, progress);
     progress.remove();
     state.activeRunId = body.history_saved ? body.run_id : null;
+    if (body.history_saved) state.pendingBranch = false;
     await appendAssistant(body, (performance.now() - started) / 1000);
     void refreshHistory();
   } catch (error) {
@@ -490,6 +492,11 @@ function renderCallout(root, kind, iconName, text) {
   callout.classList.add(kind);
   callout.querySelector(".callout-icon").innerHTML = icon(iconName);
   callout.querySelector(".callout-text").textContent = text;
+}
+
+function sameDisplayText(left, right) {
+  const normalize = value => String(value || "").trim().replace(/\s+/g, " ").replace(/[.!?]+$/, "").toLowerCase();
+  return Boolean(normalize(left)) && normalize(left) === normalize(right);
 }
 
 function updateStatusPill(fragment, body, accepted, status) {
@@ -607,13 +614,36 @@ function insightMenu(anchor, heading, description, items, runId = null) {
   });
   placeInsight(anchor, panel);
 }
-function editSemanticChip(anchor, dimension, current, runId) {
+function editSemanticChip(anchor, dimension, current, runId, body, filterItem = null) {
   const panel = document.createElement("form");
   const title = document.createElement("label");
   title.className = "query-insight-title";
   title.textContent = "Change " + dimension.toLowerCase();
-  const input = document.createElement("input");
+  const contract = body.state?.semantic_contract || {};
+  const verified = body.generation?.model_context?.tables || {};
+  let suggestions = [];
+  if (dimension === "Metric") suggestions = contract.measures || [];
+  if (dimension === "Grain") suggestions = contract.grain || [];
+  if (dimension === "Aggregation") suggestions = ["count", "sum", "average", "minimum", "maximum"];
+  if (dimension === "Filter" && filterItem) {
+    const [tableName, columnName] = String(filterItem.operand || filterItem.column || "").split(".");
+    const profile = verified[tableName]?.columns?.[columnName] || {};
+    suggestions = profile.example_values || profile.top_values || [];
+  }
+  const input = suggestions.length > 1 && dimension !== "Filter"
+    ? document.createElement("select") : document.createElement("input");
   input.className = "query-insight-input";
+  if (input.tagName === "SELECT") {
+    [...new Set([current, ...suggestions])].forEach(value => {
+      const option = document.createElement("option"); option.value = value;
+      option.textContent = readableResultLabel(value); input.append(option);
+    });
+  }
+  if (dimension === "Period" && /^\d{4}-\d{2}$/.test(current)) input.type = "month";
+  else if (dimension === "Period" && /^\d{4}-\d{2}-\d{2}$/.test(current)) input.type = "date";
+  else if (dimension === "Period" && /^\d{4}$/.test(current)) {
+    input.type = "number"; input.min = "1900"; input.max = "2200";
+  }
   input.value = current;
   input.maxLength = 220;
   input.required = true;
@@ -625,54 +655,121 @@ function editSemanticChip(anchor, dimension, current, runId) {
   apply.type = "submit";
   apply.textContent = "Apply change";
   panel.append(title, input, note, apply);
+  if (dimension === "Filter" && filterItem) {
+    const operator = document.createElement("select");
+    operator.className = "query-insight-input";
+    for (const value of ["=", "!=", ">", ">=", "<", "<=", "IN"]) {
+      const option = document.createElement("option"); option.value = value; option.textContent = value;
+      operator.append(option);
+    }
+    operator.value = filterItem.operator || "=";
+    panel.insertBefore(operator, input);
+    panel._operator = operator;
+    if (suggestions.length) {
+      const list = document.createElement("datalist");
+      list.id = `verified-values-${Math.random().toString(36).slice(2)}`;
+      suggestions.slice(0, 20).forEach(value => {
+        const option = document.createElement("option"); option.value = String(value); list.append(option);
+      });
+      input.setAttribute("list", list.id); panel.append(list);
+    }
+    input.value = Array.isArray(filterItem.value) ? filterItem.value.join(", ") : String(filterItem.value ?? "");
+  }
   panel.addEventListener("submit", async event => {
     event.preventDefault();
     if (state.busy || !state.ready || !input.value.trim()) return;
     const revised = input.value.trim();
     dismissInsight();
+    const update = filterItem && dimension === "Filter"
+      ? `${filterItem.operand || filterItem.column} ${panel._operator.value} ${JSON.stringify(revised)}`
+      : filterItem && dimension === "Period"
+        ? `${filterItem.operand || filterItem.column} ${filterItem.operator || "="} ${JSON.stringify(revised)}`
+        : JSON.stringify(revised);
     const prompt = "Change the " + dimension.toLowerCase() + " in the previous query from " +
-      JSON.stringify(current) + " to " + JSON.stringify(revised) +
+      JSON.stringify(current) + " to " + update +
       ". Preserve all other confirmed metrics, filters, and grouping requirements.";
     try { await sendFromAnswer(runId, prompt); }
     catch (error) { showError(error.message); }
   });
   placeInsight(anchor, panel);
   input.focus();
-  input.select();
+  input.select?.();
 }
+function semanticFilterText(item, includeColumn = true) {
+  const column = String(item.operand || item.column || "").split(".").at(-1);
+  const value = Array.isArray(item.value) ? item.value.join(", ") : String(item.value ?? "");
+  const operator = item.operator || "=";
+  if (!includeColumn && operator === "=") return value;
+  const label = includeColumn ? readableResultLabel(column) : "";
+  return operator === "=" && includeColumn ? `${label}: ${value}`
+    : [label, operator, value].filter(Boolean).join(" ");
+}
+
 function renderSemanticChips(fragment, body) {
   const strip = fragment.querySelector(".query-semantic-strip");
   if (!strip) return;
   const contract = body.state?.semantic_contract;
   if (!contract || body.clarification_required) return;
   const items = [];
-  if (contract.measures?.length) items.push(["Metric", contract.measures.join(", ")]);
-  if (contract.aggregation) items.push(["Aggregation", contract.aggregation]);
-  if (contract.grain?.length) items.push(["Grouping", contract.grain.join(", ")]);
+  if (contract.measures?.length) items.push([
+    "Metric", contract.measures.map(readableResultLabel).join(", "), contract.measures.join(", "),
+  ]);
+  const temporal = [], otherFilters = [];
   if (contract.filters?.length) {
-    for (const item of contract.filters.slice(0, 3)) {
-      items.push(["Filter", [item.operand || item.column, item.operator || "=", JSON.stringify(item.value)].filter(Boolean).join(" ")]);
+    for (const item of contract.filters) {
+      const operand = String(item.operand || item.column || "");
+      if (/(?:^|[._])(?:date|year|month|period|timestamp|time)$/i.test(operand)) temporal.push(item);
+      else otherFilters.push(item);
     }
   }
+  if (temporal.length) items.push([
+    "Period", temporal.map(item => semanticFilterText(item, false)).join("; "),
+    temporal.length === 1 ? String(temporal[0].value ?? "")
+      : temporal.map(item => semanticFilterText(item)).join("; "),
+    temporal.length === 1 ? temporal[0] : null,
+  ]);
+  if (contract.grain?.length) items.push([
+    "Grain", contract.grain.map(item => readableResultLabel(String(item).split(".").at(-1).replace(/(?:_id|ID)$/, ""))).join(", "),
+    contract.grain.join(", "),
+  ]);
+  if (contract.aggregation) items.push(["Aggregation", readableResultLabel(contract.aggregation), contract.aggregation]);
+  for (const item of otherFilters) items.push(["Filter", semanticFilterText(item),
+    [item.operand || item.column, item.operator || "=", JSON.stringify(item.value)].filter(Boolean).join(" "), item]);
   if (!items.length) return;
   strip.hidden = false;
   const eyebrow = document.createElement("span");
   eyebrow.className = "query-semantic-eyebrow";
   eyebrow.textContent = "UNDERSTOOD AS";
   strip.append(eyebrow);
-  items.slice(0, 6).forEach(([kind, value]) => {
+  const appendChip = ([kind, display, raw, filterItem]) => {
     const chip = document.createElement("button");
     chip.type = "button";
     chip.className = "query-semantic-chip";
-    chip.title = "Refine " + kind.toLowerCase() + " in the next query";
+    chip.title = `Change ${kind.toLowerCase()}: ${display}`;
+    chip.setAttribute("aria-label", chip.title);
     const k = document.createElement("small");
     k.textContent = kind;
     const v = document.createElement("span");
-    v.textContent = value.length > 55 ? value.slice(0, 52) + "…" : value;
-    chip.append(k, v);
-    chip.addEventListener("click", () => editSemanticChip(chip, kind, value, body.run_id));
+    v.className = "chip-value";
+    v.textContent = display;
+    const arrow = document.createElement("span");
+    arrow.className = "chip-chevron";
+    arrow.setAttribute("data-icon", "chevron-right");
+    chip.append(k, v, arrow);
+    chip.addEventListener("click", () => editSemanticChip(chip, kind, raw, body.run_id, body, filterItem));
     strip.append(chip);
-  });
+  };
+  items.slice(0, 6).forEach(appendChip);
+  if (items.length > 6) {
+    const more = document.createElement("button");
+    more.type = "button"; more.className = "query-semantic-chip query-semantic-more";
+    more.textContent = `+${items.length - 6} filters`;
+    more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", () => {
+      items.slice(6).forEach(appendChip); more.remove();
+    });
+    strip.append(more);
+  }
 }
 function attachResultInvestigations(table, body) {
   const cols = body.generation?.columns || [];
@@ -708,8 +805,8 @@ function attachChartInvestigations(article, presentation, runId) {
   const spec = presentation?.chart_spec;
   if (!article._echart?.onSelect || !spec?.data?.length) return;
   article._echart.onSelect(point => {
-    const observedX = point.name !== "" && point.name != null
-      ? point.name : (Array.isArray(point.value) ? point.value[0] : undefined);
+    const observedX = point.rawX ?? (point.name !== "" && point.name != null
+      ? point.name : (Array.isArray(point.value) ? point.value[0] : undefined));
     const matches = spec.data.filter(row => String(row[spec.x]) === String(observedX)
       && (!spec.series || !point.seriesName || String(row[spec.series]) === String(point.seriesName)));
     if (!matches.length) return;
@@ -800,6 +897,43 @@ function wireResponseTabs(article, available = {sql: true, data: true}) {
   setResponseTab(article, "answer");
 }
 
+/* Data scope is presentation state only; neither tab runs a query. */
+function wireDataScope(article, generation) {
+  const pane = article.querySelector(".result-panel-pane");
+  if (!pane) return;
+  const sourceTab = pane.querySelector(".data-source-tab");
+  const visibleTab = pane.querySelector(".data-visible-tab");
+  const note = pane.querySelector(".data-scope-note");
+  const wrap = pane.querySelector(".table-wrap");
+  const sourceRows = generation.rows || [];
+  const columns = generation.columns || [];
+  article._visibleChartSpec = null;
+  let scope = "source";
+  function renderScope() {
+    const visible = scope === "visible" && article._visibleChartSpec;
+    const spec = article._visibleChartSpec;
+    const shownColumns = visible && spec.transformation && spec.transformation !== "none"
+      ? Object.keys(spec.data[0] || {}) : columns;
+    const rows = visible ? spec.data.map(row => shownColumns.map(column => row[column] ?? null)) : sourceRows;
+    wrap.replaceChildren();
+    renderTable(wrap, shownColumns, rows);
+    if (!visible) {
+      const table = wrap.querySelector("table");
+      if (table) { table.className = "result-grid"; attachResultInvestigations(table, {generation, run_id: article.dataset.runId}); }
+    }
+    note.textContent = visible
+      ? `${rows.length} visible chart rows · X: ${spec.x} · Y: ${(spec.y_measures || [spec.y]).join(", ")}`
+      : `${sourceRows.length} of ${generation.row_count ?? sourceRows.length} returned rows${generation.truncated ? " · preview only; source result truncated" : " · complete within the executed row limit"}`;
+    sourceTab.setAttribute("aria-selected", String(!visible));
+    visibleTab.setAttribute("aria-selected", String(Boolean(visible)));
+    visibleTab.disabled = !spec;
+  }
+  sourceTab.addEventListener("click", () => { scope = "source"; renderScope(); });
+  visibleTab.addEventListener("click", () => { scope = "visible"; renderScope(); });
+  article._refreshDataScope = renderScope;
+  renderScope();
+}
+
 function wireChartSection(article, presentation, generation, runId) {
   const section = article.querySelector(".chart-section");
   const slot = article.querySelector(".chart-slot");
@@ -841,7 +975,16 @@ function wireChartSection(article, presentation, generation, runId) {
   function renderCurrent() {
     const next = explorer?.apply(original, settings) || original;
     if (!next.data.length) {
-      toast("No result rows match these display filters.");
+      article._echart?.dispose?.();
+      article._echart = null;
+      slot.replaceChildren();
+      const message = document.createElement("p");
+      message.className = "chart-note";
+      message.textContent = "No rows in the executed result match these display filters. The source query is unchanged.";
+      slot.append(message);
+      article._visibleChartSpec = next;
+      article._refreshDataScope?.();
+      section.querySelector(".chart-active-label").textContent = "No visible chart rows · display filters only; SQL unchanged";
       return;
     }
     if (explorer?.isTime(next) && settings.zoom && next.data.length > 25) {
@@ -849,6 +992,22 @@ function wireChartSection(article, presentation, generation, runId) {
       next.zoom_end = settings.zoom.end;
     }
     chartPres.chart_spec = next;
+    article._visibleChartSpec = next;
+    article._refreshDataScope?.();
+    const activeParts = [];
+    if (settings.categories?.length) activeParts.push(settings.categories.join(", "));
+    if (settings.start || settings.end) activeParts.push([settings.start || "first", settings.end || "last"].join(" – "));
+    if (settings.topN) activeParts.push(`Top ${settings.topN}`);
+    if (settings.x && settings.x !== original.x) activeParts.push(`X: ${settings.x}`);
+    if (settings.metrics?.length && (settings.metrics.length !== 1 || settings.metrics[0] !== original.y))
+      activeParts.push(settings.metrics.join(" + "));
+    if (settings.series !== undefined && settings.series !== original.series)
+      activeParts.push(`Series: ${settings.series || "none"}`);
+    if (settings.chartType && settings.chartType !== original.chart_type)
+      activeParts.push(settings.chartType.replaceAll("_", " "));
+    section.querySelector(".chart-active-label").textContent = activeParts.length
+      ? `${activeParts.join(" · ")} · display only; SQL unchanged`
+      : "Current executed result · no display filters";
     section.querySelector(".chart-sub").textContent = next.chart_type.replaceAll("_", " ");
     article._echart = renderChartInto(slot, chartPres, generation).echarts;
     article._echart?.onZoom?.(range => {
@@ -879,9 +1038,7 @@ function wireChartSection(article, presentation, generation, runId) {
         suggestions.append(button);
       });
     }
-    const active = [settings.categories?.length ? settings.categories.join(",") : null,
-      settings.metric && settings.metric !== original.y ? settings.metric : null,
-      settings.start, settings.end, settings.topN].filter(Boolean).length;
+    const active = activeParts.length;
     const count = section.querySelector(".chart-filter-count");
     count.hidden = active === 0;
     count.textContent = active ? String(active) : "";
@@ -893,21 +1050,36 @@ function wireChartSection(article, presentation, generation, runId) {
     panel.hidden = false;
     fillFilter(".chart-category-filter", options.categories);
     fillFilter(".chart-metric-filter", options.metric);
+    fillFilter(".chart-measures-filter", options.metric);
+    fillFilter(".chart-x-filter", options.dimensions);
+    fillFilter(".chart-series-filter", options.dimensions.filter(name => name !== original.x), "None");
     fillFilter(".chart-start-filter", options.dates, "First date");
     fillFilter(".chart-end-filter", options.dates, "Last date");
     section.querySelector(".chart-category-control").hidden = !options.categories.length;
     section.querySelector(".chart-metric-control").hidden = options.metric.length < 2;
+    section.querySelector(".chart-measures-control").hidden = options.metric.length < 2;
+    section.querySelector(".chart-x-control").hidden = options.dimensions.length < 2;
+    section.querySelector(".chart-series-control").hidden = options.dimensions.length < 2;
     section.querySelector(".chart-start-control").hidden = !options.dates.length;
     section.querySelector(".chart-end-control").hidden = !options.dates.length;
     section.querySelector(".chart-top-control").hidden = explorer.isTime(original) || Boolean(original.series)
       || new Set(original.data.map(row => String(row[original.x]))).size !== original.data.length;
-    const inputs = { metric: ".chart-metric-filter",
+    const inputs = { metric: ".chart-metric-filter", x: ".chart-x-filter", series: ".chart-series-filter",
       start: ".chart-start-filter", end: ".chart-end-filter", topN: ".chart-top-filter" };
     const syncInputs = () => Object.entries(inputs).forEach(([key, selector]) => {
       const select = section.querySelector(selector);
-      select.value = settings[key] ?? (key === "metric" ? original.y : "");
+      select.value = settings[key] ?? (key === "metric" ? original.y
+        : key === "x" ? original.x : key === "series" ? original.series || "" : "");
       if (!select.value && key === "metric") select.value = original.y;
+      if (!select.value && key === "x") select.value = original.x;
     });
+    const syncMeasures = () => {
+      const selected = new Set(settings.metrics || [original.y]);
+      [...section.querySelector(".chart-measures-filter").options].forEach(option => {
+        option.selected = selected.has(option.value);
+      });
+      section.querySelector(".chart-legend-filter").checked = settings.legend !== false;
+    };
     const syncCategories = () => {
       const selected = new Set(settings.categories || []);
       [...section.querySelector(".chart-category-filter").options].forEach(option => {
@@ -919,6 +1091,7 @@ function wireChartSection(article, presentation, generation, runId) {
       saveSettings();
       syncInputs();
       syncCategories();
+      syncMeasures();
       renderCurrent();
     };
     section.querySelector(".chart-apply-filter").addEventListener("click", () => {
@@ -928,12 +1101,22 @@ function wireChartSection(article, presentation, generation, runId) {
       });
       settings.categories = [...section.querySelector(".chart-category-filter").selectedOptions]
         .map(option => option.value);
+      settings.metrics = [...section.querySelector(".chart-measures-filter").selectedOptions]
+        .map(option => option.value);
+      if (settings.metrics.length && !explorer.compatibleMeasures(settings.metrics, original)) {
+        toast("These measures have incompatible units. Choose measures with the same verified unit.");
+        return;
+      }
+      settings.legend = section.querySelector(".chart-legend-filter").checked;
       delete settings.zoom;
       saveSettings();
       renderCurrent();
     });
     section.querySelector(".chart-reset-filter").addEventListener("click", reset);
-    section.querySelector(".chart-clear-filter").addEventListener("click", reset);
+    section.querySelector(".chart-clear-filter").addEventListener("click", () => {
+      for (const key of ["categories", "start", "end", "topN"]) delete settings[key];
+      saveSettings(); syncInputs(); syncCategories(); renderCurrent();
+    });
     section.querySelector(".chart-reset-zoom").addEventListener("click", () => {
       delete settings.zoom;
       saveSettings();
@@ -941,6 +1124,27 @@ function wireChartSection(article, presentation, generation, runId) {
     });
     syncInputs();
     syncCategories();
+    syncMeasures();
+    const fields = generation.model_context?.tables || generation.model_context?.execution_context?.tables || {};
+    const availableFields = [...new Set([
+      ...Object.entries(fields).flatMap(([table, meta]) =>
+        (Array.isArray(meta.columns) ? meta.columns : Object.keys(meta.columns || {}))
+          .map(column => `${table}.${column}`)),
+      ...browserTables.flatMap(table => (table.columns || []).map(column => `${table.name}.${column.name}`)),
+    ])].sort();
+    fillFilter(".chart-query-field", availableFields);
+    section.querySelector(".chart-query-parameters").hidden = !availableFields.length;
+    section.querySelector(".chart-apply-query").addEventListener("click", async () => {
+      const field = section.querySelector(".chart-query-field").value;
+      const operator = section.querySelector(".chart-query-operator").value;
+      const value = section.querySelector(".chart-query-value").value.trim();
+      if (!availableFields.includes(field) || !value || !["=", "!=", ">", "<"].includes(operator)) {
+        toast("Choose a verified field, operator and value."); return;
+      }
+      try {
+        await sendFromAnswer(runId, `Add the filter ${JSON.stringify(field)} ${operator} ${JSON.stringify(value)} to the previous query. Preserve every other accepted requirement. Verify the value and regenerate safely.`);
+      } catch (error) { showError(error.message); }
+    });
   }
   renderCurrent();
   /* Theme switches recolor the shared token palette, so live charts repaint. */
@@ -1116,36 +1320,35 @@ function recoveryTimelineSteps(recovery, events = []) {
   return steps;
 }
 
+function readableResultLabel(column) {
+  const words = String(column).replace(/_/g, " ").replace(/([a-z0-9])([A-Z])/g, "$1 $2").trim();
+  return words ? words[0].toUpperCase() + words.slice(1).replace(/\bId\b/g, "ID") : "Result";
+}
+
+function formatKpiValue(value) {
+  if (value == null) return "NULL";
+  const raw = String(value);
+  // Group ordinary decimal numbers without rounding or altering identifier-like strings.
+  if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(raw)) return raw;
+  const [integer, fraction] = raw.split(".");
+  const grouped = integer.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return fraction === undefined ? grouped : `${grouped}.${fraction}`;
+}
+
 function renderAnswerPreview(fragment, body, mode) {
   const preview = fragment.querySelector(".answer-preview");
   const generation = body.generation || {};
   const columns = generation.columns || [];
   const rows = generation.rows || [];
   if (!preview || mode === "chart" || mode === "explanation" || body.clarification_required
-      || !generation.accepted || !columns.length || !rows.length) return;
+      || !generation.accepted || columns.length !== 1 || rows.length !== 1) return;
   preview.hidden = false;
-  if (columns.length === 1 && rows.length === 1) {
-    preview.classList.add("answer-kpi");
-    const label = document.createElement("span");
-    label.textContent = columns[0];
-    const value = document.createElement("strong");
-    value.textContent = rows[0][0] == null ? "NULL" : String(rows[0][0]);
-    preview.append(label, value);
-    return;
-  }
-  preview.classList.add("answer-table-preview");
-  const heading = document.createElement("div");
-  heading.className = "answer-preview-heading";
-  heading.textContent = `Result preview · ${Math.min(rows.length, 5)} of ${generation.row_count ?? rows.length} rows`;
-  const wrap = document.createElement("div");
-  wrap.className = "table-wrap";
-  renderTable(wrap, columns, rows.slice(0, 5));
-  const table = wrap.querySelector("table");
-  if (table) {
-    table.className = "result-grid";
-    attachResultInvestigations(table, body);
-  }
-  preview.append(heading, wrap);
+  preview.classList.add("answer-kpi");
+  const label = document.createElement("span");
+  label.textContent = readableResultLabel(columns[0]);
+  const value = document.createElement("strong");
+  value.textContent = formatKpiValue(rows[0][0]);
+  preview.append(label, value);
 }
 
 async function appendAssistant(body, elapsed, options = {}) {
@@ -1165,10 +1368,17 @@ async function appendAssistant(body, elapsed, options = {}) {
 
   // Distinct empty / anomaly states, grounded in the real response.
   if (accepted && generation.row_count === 0) {
-    renderCallout(fragment, "warn", "search", generation.recovery?.diagnosis_summary
-      || "The query executed but returned no rows. Adjust the question or check the filters.");
+    const diagnosis = generation.recovery?.diagnosis_summary
+      || "The query executed but returned no rows. Adjust the question or check the filters.";
+    if (!sameDisplayText(responseMessage, diagnosis)
+        && !sameDisplayText(body.human_review?.reason, diagnosis)) {
+      renderCallout(fragment, "warn", "search", diagnosis);
+    }
   } else if (!accepted && !explanatory && !modelUnavailable) {
-    renderCallout(fragment, "error", "alert", body.human_review?.reason || body.message || "The query could not be completed.");
+    const failure = body.human_review?.reason || body.message || "The query could not be completed.";
+    if (!body.human_review && !sameDisplayText(responseMessage, failure)) {
+      renderCallout(fragment, "error", "alert", failure);
+    }
   }
 
   // The Answer tab adapts to intent; SQL and Data use the same executed response.
@@ -1234,7 +1444,11 @@ async function appendAssistant(body, elapsed, options = {}) {
   const actions = fragment.querySelector(".answer-actions");
   if (accepted && !explanatory) {
     if (body.run_id && !options.restored) actions.append(actionButton("Branch from here", "git", async () => {
-      try { await continueRun(body.run_id); $("#messageInput").placeholder = "Explore an alternative question from this point…"; }
+      try {
+        await continueRun(body.run_id);
+        state.pendingBranch = true;
+        $("#messageInput").placeholder = "Explore an alternative question from this point…";
+      }
       catch (error) { showError(error.message); }
     }));
     actions.append(
@@ -1254,7 +1468,7 @@ async function appendAssistant(body, elapsed, options = {}) {
     actions.before(snapshot);
   }
 
-  renderHumanReview(fragment, body.human_review);
+  renderHumanReview(fragment, body.human_review, responseMessage);
   if (!sqlNotAvailable) {
     fragment.querySelector(".copy-button").addEventListener("click", (event) => {
       navigator.clipboard.writeText(sqlText);
@@ -1286,6 +1500,10 @@ async function appendAssistant(body, elapsed, options = {}) {
   }
   hydrateIcons(article);
   $("#messages").append(fragment);
+  if (!sqlNotAvailable && !explanatory) {
+    article.dataset.runId = body.run_id || "";
+    wireDataScope(article, generation);
+  }
   if (mode === "chart") wireChartSection(article, presentation, generation, body.run_id);
   if (accepted && !explanatory && !body.clarification_required) {
     wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length)});
@@ -1776,44 +1994,80 @@ function metaRow(k, v) {
   return row;
 }
 
+function inspectorRecoverySteps(recovery, events = []) {
+  if (!recovery?.activated) return [];
+  const signal = events.find(event => event.event_type === "SQL_FAILED");
+  const modes = {
+    ZERO_RESULT: ["Unmatched result detected", "The query ran but returned no rows."],
+    NULL_RESULT: ["NULL result detected", "The query returned a NULL value."],
+    FAILURE: ["Query failure detected", signal?.summary || "The SQL attempt failed."],
+    CORRECTNESS: ["Correctness review requested", "The answer was flagged for review."],
+    FILTER: ["Filter issue detected", "A filter produced an unexpected result."],
+  };
+  const [title, detail] = modes[recovery.mode] || ["Recovery started", recovery.failure_category || "An anomaly was recorded."];
+  const steps = [{title, detail, meta: recovery.failure_code || "", icon: "alert", tone: "warn"}];
+  const toolTitles = {
+    inspect_schema: "Schema inspection", inspect_values: "Value check",
+    query_database: "Database probe", run_probe: "Database probe",
+  };
+  for (const call of recovery.tool_calls || []) {
+    const observations = [call.purpose, call.result_summary].filter(Boolean);
+    steps.push({
+      title: toolTitles[call.tool] || "Evidence check",
+      detail: observations.filter((item, index) => !index || !sameDisplayText(item, observations[0])).join(" — "),
+      meta: [call.tool, call.evidence_id ? `Observation ${call.evidence_id}` : null].filter(Boolean).join(" · "),
+      icon: call.tool === "inspect_schema" ? "table" : "database", tone: "accent",
+    });
+  }
+  if (recovery.agent_action || recovery.diagnosis_summary || recovery.agent_diagnosis || recovery.claims?.length) {
+    const evidenceIds = [...new Set((recovery.claims || []).flatMap(claim => claim.evidence_ids || []))];
+    steps.push({
+      title: "Evidence evaluated",
+      detail: recovery.diagnosis_summary || recovery.agent_diagnosis || recovery.claims[0]?.statement || "A recovery decision was recorded.",
+      meta: [recovery.agent_action ? `Outcome: ${recovery.agent_action}` : "Agent interpretation",
+        evidenceIds.length ? `Evidence ${evidenceIds.join(", ")}` : null].filter(Boolean).join(" · "),
+      icon: recovery.agent_action === "ESCALATE" ? "alert" : "check",
+      tone: recovery.agent_action === "ESCALATE" ? "warn" : "ok",
+    });
+  }
+  return steps;
+}
+
 function renderInspectorRecovery(body) {
   const box = $("#recoveryMini");
   const recovery = body.generation?.recovery;
   box.replaceChildren();
   const kicker = document.createElement("div");
   kicker.className = "inspect-kicker";
-  kicker.textContent = "INVESTIGATION · VERIFIED EVIDENCE";
+  kicker.textContent = "INVESTIGATION · RECORDED EVIDENCE";
   box.append(kicker);
   if (!recovery || !recovery.activated) {
     box.append(emptyNote("The recovery agent only activates on anomalies."));
     return;
   }
   const info = document.createElement("div");
-  info.className = "recovery-mini";
-  info.append(metaRow("Mode", recovery.mode || ""));
-  info.append(metaRow("Decision", recovery.agent_action || "pending"));
-  if (recovery.agent_confidence != null) info.append(metaRow("Confidence", String(recovery.agent_confidence)));
-  if (recovery.diagnosis_summary) info.append(metaRow("Diagnosis", recovery.diagnosis_summary));
-  (recovery.claims || []).forEach((claim) => {
+  info.className = "inspect-recovery-timeline";
+  for (const step of inspectorRecoverySteps(recovery, body.recovery_events || [])) {
     const item = document.createElement("div");
-    item.className = "claim-item";
-    item.innerHTML = "";
-    const text = document.createElement("span");
-    text.textContent = claim.statement;
-    const small = document.createElement("small");
-    small.textContent = `${claim.claim_type} · evidence ${(claim.evidence_ids || []).join(", ")}`;
-    item.append(text, small);
+    item.className = "inspect-recovery-step";
+    const marker = document.createElement("span");
+    marker.className = `inspect-recovery-marker ${step.tone}`;
+    marker.innerHTML = icon(step.icon, 17);
+    const content = document.createElement("div");
+    content.className = "inspect-recovery-content";
+    const title = document.createElement("strong");
+    title.textContent = step.title;
+    const detail = document.createElement("p");
+    detail.textContent = step.detail;
+    content.append(title, detail);
+    if (step.meta) {
+      const meta = document.createElement("small");
+      meta.textContent = step.meta;
+      content.append(meta);
+    }
+    item.append(marker, content);
     info.append(item);
-  });
-  const link = document.createElement("button");
-  link.type = "button";
-  link.className = "ghost-button";
-  link.innerHTML = `${icon("binoculars", 13)}<span>Open full timeline</span>`;
-  link.addEventListener("click", () => {
-    const last = [...document.querySelectorAll(".recovery-panel")].pop();
-    if (last) { last.open = true; last.scrollIntoView({ behavior: "smooth", block: "center" }); }
-  });
-  info.append(link);
+  }
   box.append(info);
 }
 
@@ -1854,12 +2108,17 @@ function wireSqlIdents(fragment, article) {
   });
 }
 
-function renderHumanReview(fragment, review) {
+function renderHumanReview(fragment, review, responseMessage = "") {
   const panel = fragment.querySelector(".human-review");
   if (!panel || !review) return;
   panel.hidden = false;
-  panel.querySelector(".human-review-reason").textContent = review.reason || "Automated review is uncertain.";
-  panel.querySelector(".human-review-question").textContent = review.question || "Please clarify.";
+  const reason = panel.querySelector(".human-review-reason");
+  reason.textContent = review.reason || "Automated review is uncertain.";
+  reason.hidden = sameDisplayText(responseMessage, reason.textContent);
+  const question = panel.querySelector(".human-review-question");
+  question.textContent = review.question || "Please clarify.";
+  question.hidden = sameDisplayText(responseMessage, question.textContent)
+    || (!reason.hidden && sameDisplayText(reason.textContent, question.textContent));
   const options = panel.querySelector(".review-actions");
   const editableActions = {
     "Enter another ID": "Enter the replacement ID in the chat…",
@@ -2189,6 +2448,7 @@ function renderHistory() {
 
 async function openRun(run) {
   if (state.busy || voiceInput?.busy) return;
+  state.pendingBranch = false;
   $("#emptyState").hidden = true;
   state.activeRunId = run.run_id;
   renderHistory();
@@ -2214,6 +2474,7 @@ async function continueRun(runId, focus = true) {
   const savedState = await api(`/api/history/${encodeURIComponent(runId)}/continue?session_id=${encodeURIComponent(sessionId)}`, {method: "POST"});
   state.activeRunId = runId;
   state.restorePending = false;
+  state.pendingBranch = false;
   $("#databaseSelect").value = savedState.db_id;
   renderHistory();
   if (focus) {
@@ -2453,6 +2714,7 @@ $("#clearHistory").addEventListener("click", async () => {
   state.history = [];
   state.activeRunId = null;
   state.restorePending = false;
+  state.pendingBranch = false;
   renderHistory();
 });
 
@@ -2465,6 +2727,7 @@ $("#resetButton").addEventListener("click", async () => {
     $("#messages").replaceChildren();
     state.activeRunId = null;
     state.restorePending = false;
+    state.pendingBranch = false;
     $("#emptyState").hidden = false;
     $("#threadIntro").hidden = true;
     $("#threadBreadcrumb").textContent = "Live database";
@@ -2477,6 +2740,7 @@ initialize();
 $("#databaseSelect").addEventListener("change", async () => {
   state.activeRunId = null;
   state.restorePending = false;
+  state.pendingBranch = false;
   await loadDatabaseSchema();
   await loadGlossary($("#databaseSelect").value);
 });
