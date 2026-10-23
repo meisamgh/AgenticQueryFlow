@@ -60,7 +60,7 @@ class DataRequirement(StrictModel):
 def _stored_grain_capability(stored_columns: list[str]) -> int:
     """Finest guaranteed grain implied by the stored columns (0 = aggregate)."""
     best = 0
-    name = " ".join(stored_columns).casefold()
+    name = " ".join(column.replace("_", " ") for column in stored_columns).casefold()
     if re.search(r"\b(?:day|daily|date)\b", name):
         best = _GRAINS["daily"]
     elif re.search(r"\b(?:week|weekly)\b", name):
@@ -179,8 +179,13 @@ def validate_reusability(
     # Treat these as SQL changes unless an explicit display-only action has
     # been checked against complete result rows elsewhere.
     sql_changes = {
-        "ADD_FILTER", "REMOVE_FILTER", "REPLACE_FILTER", "CHANGE_METRIC",
-        "CHANGE_AGGREGATION", "ADD_MEASURE", "COMPARE_WITH",
+        "ADD_FILTER",
+        "REMOVE_FILTER",
+        "REPLACE_FILTER",
+        "CHANGE_METRIC",
+        "CHANGE_AGGREGATION",
+        "ADD_MEASURE",
+        "COMPARE_WITH",
     }
     changed = [item.operation for item in plan.semantic_changes if item.operation in sql_changes]
     if changed:
@@ -249,9 +254,8 @@ def validate_reusability(
                     "requery_database",
                     "The stored rows are at a finer grain than requested for a "
                     "non-additive metric; the aggregation must happen in SQL.",
-                    additivity_note=additivity_note or (
-                        "Non-additive metrics cannot be reaggregated from stored rows."
-                    ),
+                    additivity_note=additivity_note
+                    or ("Non-additive metrics cannot be reaggregated from stored rows."),
                 )
             return outcome(
                 "requery_database",
@@ -261,11 +265,7 @@ def validate_reusability(
             )
 
     # Same-or-coarser requested grain with all dimensions present: reuse.
-    reuse_dimensions = [
-        name
-        for name in dimensions
-        if name in stored_columns
-    ]
+    reuse_dimensions = [name for name in dimensions if name in stored_columns]
     return outcome(
         "reuse_result",
         "The complete stored rows already contain this analysis; no SQL runs again.",

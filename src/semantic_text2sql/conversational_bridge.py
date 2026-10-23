@@ -68,7 +68,11 @@ class _GraphState(TypedDict, total=False):
 
 def _route(message: str) -> Route:
     text = " ".join(message.split())
-    if _BUSINESS_QUESTION.search(text):
+    if _BUSINESS_QUESTION.search(text) and not re.search(
+        r"\b(?:look like|over time|by month|by year|trend|compare|change|how much|how many)\b",
+        text,
+        re.I,
+    ):
         return "business"
     if _SCHEMA_QUESTION.search(text) and not _ANALYTICAL_ACTION.search(text):
         return "schema"
@@ -107,9 +111,15 @@ class ConversationalAnalyticsBridge:
         graph.add_node("business", self._business_node)
         graph.add_node("sql", self._sql_node)
         graph.add_edge(START, "route")
-        graph.add_conditional_edges("route", lambda state: state["route"], {
-            "schema": "schema", "business": "business", "sql": "sql",
-        })
+        graph.add_conditional_edges(
+            "route",
+            lambda state: state["route"],
+            {
+                "schema": "schema",
+                "business": "business",
+                "sql": "sql",
+            },
+        )
         for name in ("schema", "business", "sql"):
             graph.add_edge(name, END)
         self.graph = graph.compile()
@@ -144,9 +154,7 @@ class ConversationalAnalyticsBridge:
             operation="EXPLAIN_CONTEXT",
             resolved_question=request.message,
             message=(
-                "\n".join(result.facts)
-                if result.facts
-                else "No verified information was found."
+                "\n".join(result.facts) if result.facts else "No verified information was found."
             ),
             provenance=[result.evidence_id],
         )

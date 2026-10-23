@@ -14,6 +14,7 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.analytics_planner import (
@@ -38,6 +39,7 @@ from semantic_text2sql.conversation import (
     requires_model_interpretation,
     resolve_turn,
 )
+from semantic_text2sql.conversational_agent import ConversationalAnalyticsAgent
 from semantic_text2sql.conversational_bridge import ConversationalAnalyticsBridge
 from semantic_text2sql.data_requirement_validator import validate_reusability
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
@@ -92,6 +94,7 @@ from semantic_text2sql.presentation import present_result
 from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.provider_registry import configured_model_options, supports_model
 from semantic_text2sql.recovery_events import recovery_events
+from semantic_text2sql.result_cache import RecentResult
 from semantic_text2sql.run_history import RunHistoryStore, RunRecord, build_run_record
 from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded
 from semantic_text2sql.semantic_catalog import SemanticCatalogStore, compose_document
@@ -218,6 +221,12 @@ def create_app(
             "safety-first validation, and read-only execution."
         ),
     )
+    if os.environ.get("TEXT2SQL_GZIP_ENABLED", "true").casefold() == "true":
+        app.add_middleware(
+            GZipMiddleware,
+            minimum_size=int(os.environ.get("TEXT2SQL_GZIP_MIN_BYTES", "2048")),
+            compresslevel=int(os.environ.get("TEXT2SQL_GZIP_LEVEL", "5")),
+        )
     web_root = Path(__file__).resolve().parents[2] / "web"
     if web_root.is_dir():
         app.mount("/static", StaticFiles(directory=web_root), name="static")
@@ -228,8 +237,23 @@ def create_app(
             reranker = LightGBMSchemaReranker(Path(reranker_path or ""))
         except (FileNotFoundError, RuntimeError, ValueError) as exc:
             logger.warning("schema_reranker_disabled=%s", exc)
+    dense_encoder = FastEmbedEncoder(
+        os.environ.get("TEXT2SQL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")
+    )
+
+    async def preload_encoder() -> None:
+        if os.environ.get("TEXT2SQL_EMBEDDING_PRELOAD", "true").casefold() != "true":
+            return
+        timeout = float(os.environ.get("TEXT2SQL_EMBEDDING_STARTUP_TIMEOUT_SECONDS", "15"))
+        try:
+            await asyncio.wait_for(asyncio.to_thread(dense_encoder.initialize), timeout=timeout)
+        except (TimeoutError, RuntimeError, ImportError) as exc:
+            dense_encoder.disable(f"Startup initialization failed: {exc}")
+            logger.warning("dense_encoder_disabled=%s", exc)
+
+    app.router.add_event_handler("startup", preload_encoder)
     hybrid_retriever = HybridSchemaRetriever(
-        FastEmbedEncoder(os.environ.get("TEXT2SQL_EMBEDDING_MODEL", "BAAI/bge-small-en-v1.5")),
+        dense_encoder,
         max_tables=int(os.environ.get("TEXT2SQL_RETRIEVAL_TABLES", "5")),
         max_columns_per_table=int(os.environ.get("TEXT2SQL_RETRIEVAL_COLUMNS", "5")),
         reranker=reranker,
@@ -253,7 +277,7 @@ def create_app(
     )
     # Complete bounded results are kept only for the active process. Persisted
     # history retains a smaller preview and is reused only when it is complete.
-    recent_results: dict[tuple[str, str], ChatResponse] = {}
+    recent_results: dict[tuple[str, str], RecentResult] = {}
     chat_jobs: dict[str, dict[str, Any]] = {}
     job_ttl_seconds = max(60, int(os.environ.get("TEXT2SQL_JOB_TTL_SECONDS", "3600")))
     max_jobs = max(10, int(os.environ.get("TEXT2SQL_MAX_JOBS", "500")))
@@ -1015,17 +1039,25 @@ def create_app(
                             if (
                                 previous_chart is not None
                                 and viz_intent.explicit_type
-                                and not any((
-                                    viz_intent.x, viz_intent.y, viz_intent.series,
-                                    viz_intent.size, viz_intent.time_grain,
-                                    viz_intent.x_components, viz_intent.y_measures,
-                                ))
+                                and not any(
+                                    (
+                                        viz_intent.x,
+                                        viz_intent.y,
+                                        viz_intent.series,
+                                        viz_intent.size,
+                                        viz_intent.time_grain,
+                                        viz_intent.x_components,
+                                        viz_intent.y_measures,
+                                    )
+                                )
                             ):
-                                chart_intent = viz_intent.model_copy(update={
-                                    "x": previous_chart.x,
-                                    "y": previous_chart.y,
-                                    "x_components": previous_chart.x_components,
-                                })
+                                chart_intent = viz_intent.model_copy(
+                                    update={
+                                        "x": previous_chart.x,
+                                        "y": previous_chart.y,
+                                        "x_components": previous_chart.x_components,
+                                    }
+                                )
                             spec = plan_chart(
                                 chart_intent,
                                 question=request.message,
@@ -1702,7 +1734,7 @@ def create_app(
             return
         key = (request.session_id, request.db_id)
         recent_results.pop(key, None)
-        recent_results[key] = response
+        recent_results[key] = RecentResult.from_response(response)
         if len(recent_results) > 100:
             recent_results.pop(next(iter(recent_results)))
 
@@ -1779,9 +1811,19 @@ def create_app(
         retriever=hybrid_retriever,
         sql_handler=execute_chat,
     )
+    conversational_agent = ConversationalAnalyticsAgent(
+        bridge=bridge,
+        completers=turn_completers,
+        get_state=conversations.get,
+        get_last_response=lambda session_id, db_id: recent_results.get((session_id, db_id)),
+        sql_handler=execute_chat,
+    )
 
     @app.post("/api/chat", response_model=ChatResponse)
     async def chat(request: ChatRequest) -> ChatResponse:
+        if os.environ.get("TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED", "false").casefold() == "true":
+            response = await conversational_agent.run(request)
+            return response if response.history_saved else await save_response(request, response)
         if os.environ.get("TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED", "false").casefold() != "true":
             return await execute_chat(request)
         try:

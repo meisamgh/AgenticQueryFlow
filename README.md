@@ -25,6 +25,13 @@ continue through the existing `/api/chat` SQL workflow. Set
 `TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED=true` to enable it; the default remains the current
 conversation path. This bridge is an incremental integration, not the full V6 agent described in
 the design document.
+An experimental adaptive LangGraph assistant can be enabled separately with
+`TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED=true`. It chooses bounded metadata and
+analytical tools while delegating every data query to the governed Text-to-SQL
+pipeline. See the bridge document for configuration and current limitations;
+it is not yet recommended for shared production deployment.
+Local cold/warm and transport measurements, including their limitations, are
+documented in [Performance](docs/PERFORMANCE.md).
 
 ```text
 Question -> conversation resolver

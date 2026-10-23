@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import math
 import re
-from collections import Counter, deque
+from collections import Counter, OrderedDict, deque
 from collections.abc import Iterable, Sequence
 from pathlib import Path
+from threading import RLock
 from typing import Any, Protocol
 
 from semantic_text2sql.glossary import BusinessGlossary, GlossaryTerm
@@ -83,22 +84,45 @@ class FastEmbedEncoder:
     ) -> None:
         self.model_name = model_name
         self._model: Any | None = None
+        self._lock = RLock()
+        self._disabled_reason: str | None = None
         self.cache_size = cache_size
         self._cache: dict[str, list[float]] = {}
 
-    def encode(self, texts: Sequence[str]) -> list[list[float]]:
-        if self._model is None:
-            from fastembed import TextEmbedding
+    def initialize(self) -> None:
+        """Initialize exactly once across startup and concurrent retrievals."""
+        with self._lock:
+            if self._disabled_reason is not None:
+                raise RuntimeError(self._disabled_reason)
+            if self._model is not None:
+                return
+            try:
+                from fastembed import TextEmbedding
 
-            self._model = TextEmbedding(model_name=self.model_name)
-        missing = list(dict.fromkeys(text for text in texts if text not in self._cache))
-        if missing:
-            vectors = [list(map(float, vector)) for vector in self._model.embed(missing)]
-            for text, vector in zip(missing, vectors, strict=True):
-                self._cache[text] = vector
-            while len(self._cache) > self.cache_size:
-                self._cache.pop(next(iter(self._cache)))
-        return [self._cache[text] for text in texts]
+                self._model = TextEmbedding(model_name=self.model_name)
+            except Exception as exc:
+                self._disabled_reason = f"Dense encoder unavailable: {exc}"
+                raise RuntimeError(self._disabled_reason) from exc
+
+    def disable(self, reason: str) -> None:
+        """Allow startup timeout to force immediate BM25 fallback."""
+        self._disabled_reason = reason
+
+    def encode(self, texts: Sequence[str]) -> list[list[float]]:
+        with self._lock:
+            self.initialize()
+            if self._disabled_reason is not None:
+                raise RuntimeError(self._disabled_reason)
+            missing = list(dict.fromkeys(text for text in texts if text not in self._cache))
+            if missing:
+                model = self._model
+                assert model is not None
+                vectors = [list(map(float, vector)) for vector in model.embed(missing)]
+                for text, vector in zip(missing, vectors, strict=True):
+                    self._cache[text] = vector
+                while len(self._cache) > self.cache_size:
+                    self._cache.pop(next(iter(self._cache)))
+            return [self._cache[text] for text in texts]
 
 
 class HybridSchemaRetriever:
@@ -118,6 +142,51 @@ class HybridSchemaRetriever:
         self.max_columns_per_table = max_columns_per_table
         self.reranker = reranker
         self.reranker_pool = reranker_pool
+        self._document_cache: OrderedDict[
+            tuple[int, int],
+            tuple[SchemaInfo, DatabaseProfile | None, dict[str, str], dict[str, str]],
+        ] = OrderedDict()
+        self._document_lock = RLock()
+
+    def _base_documents(
+        self, schema: SchemaInfo, profile: DatabaseProfile | None
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        """Cache only schema/profile text, never question-matched glossary terms."""
+        key = (id(schema), id(profile))
+        with self._document_lock:
+            cached = self._document_cache.get(key)
+            if cached is not None and cached[0] is schema and cached[1] is profile:
+                self._document_cache.move_to_end(key)
+                return cached[2], cached[3]
+            profiles = (
+                {(item.table, item.column): item for item in profile.columns} if profile else {}
+            )
+            table_profiles = {item.table: item for item in profile.tables} if profile else {}
+            column_docs: dict[str, str] = {}
+            table_docs: dict[str, str] = {}
+            for table in schema.tables:
+                column_texts = []
+                for column in table.columns:
+                    document = _column_document(
+                        table.name, column, profiles.get((table.name, column.name)), []
+                    )
+                    column_docs[f"column:{table.name}.{column.name}"] = document
+                    column_texts.append(document)
+                profile_table = table_profiles.get(table.name)
+                table_docs[f"table:{table.name}"] = " ".join(
+                    value
+                    for value in (
+                        table.name,
+                        profile_table.summary if profile_table else "",
+                        profile_table.grain if profile_table else "",
+                        " ".join(column_texts),
+                    )
+                    if value
+                )
+            self._document_cache[key] = (schema, profile, table_docs, column_docs)
+            while len(self._document_cache) > 8:
+                self._document_cache.popitem(last=False)
+            return table_docs, column_docs
 
     def retrieve(
         self,
@@ -130,33 +199,40 @@ class HybridSchemaRetriever:
     ) -> tuple[SchemaInfo, SchemaSelection, RetrievalTrace]:
         query = " ".join(value for value in (question, evidence or "") if value)
         profiles = {(item.table, item.column): item for item in profile.columns} if profile else {}
-        table_profiles = {item.table: item for item in profile.tables} if profile else {}
         relevant_terms = _relevant_glossary_terms(query, glossary)
-        column_docs: dict[str, str] = {}
-        table_docs: dict[str, str] = {}
-        for table in schema.tables:
-            column_texts: list[str] = []
-            for column in table.columns:
-                identifier = f"column:{table.name}.{column.name}"
-                document = _column_document(
-                    table.name,
-                    column,
-                    profiles.get((table.name, column.name)),
-                    relevant_terms,
-                )
-                column_docs[identifier] = document
-                column_texts.append(document)
-            profile_table = table_profiles.get(table.name)
-            table_docs[f"table:{table.name}"] = " ".join(
-                value
-                for value in (
-                    table.name,
-                    profile_table.summary if profile_table else "",
-                    profile_table.grain if profile_table else "",
-                    " ".join(column_texts),
-                )
-                if value
-            )
+        base_tables, base_columns = self._base_documents(schema, profile)
+        column_docs = base_columns.copy()
+        table_docs = base_tables.copy()
+        if relevant_terms:
+            table_profiles = {item.table: item for item in profile.tables} if profile else {}
+            for table in schema.tables:
+                enriched = False
+                column_texts = []
+                for column in table.columns:
+                    identifier = f"column:{table.name}.{column.name}"
+                    if any(
+                        f"{table.name}.{column.name}" in term.columns for term in relevant_terms
+                    ):
+                        column_docs[identifier] = _column_document(
+                            table.name,
+                            column,
+                            profiles.get((table.name, column.name)),
+                            relevant_terms,
+                        )
+                        enriched = True
+                    column_texts.append(column_docs[identifier])
+                if enriched:
+                    profile_table = table_profiles.get(table.name)
+                    table_docs[f"table:{table.name}"] = " ".join(
+                        value
+                        for value in (
+                            table.name,
+                            profile_table.summary if profile_table else "",
+                            profile_table.grain if profile_table else "",
+                            " ".join(column_texts),
+                        )
+                        if value
+                    )
 
         documents = {**table_docs, **column_docs}
         bm25_scores = _bm25(query, documents)

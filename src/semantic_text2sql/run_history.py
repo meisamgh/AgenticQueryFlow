@@ -85,6 +85,10 @@ class RunHistoryStore:
                 "CREATE INDEX IF NOT EXISTS query_runs_session "
                 "ON query_runs(session_id, created_at)"
             )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS query_runs_session_db "
+                "ON query_runs(session_id, json_extract(record_json, '$.db_id'), created_at)"
+            )
 
     @classmethod
     def from_environment(cls) -> RunHistoryStore:
@@ -99,12 +103,33 @@ class RunHistoryStore:
             if self.path is not None:
                 with sqlite3.connect(cast_path(self.path), isolation_level=None) as connection:
                     connection.execute("BEGIN IMMEDIATE")
-                    rows = connection.execute(
+                    # Decoration needs only the latest version and one parent,
+                    # not hundreds of complete response payloads.
+                    latest = connection.execute(
                         "SELECT record_json FROM query_runs WHERE session_id = ? "
-                        "ORDER BY created_at DESC, rowid DESC LIMIT ?",
-                        (entry.session_id, GLOBAL_RETENTION_LIMIT),
-                    ).fetchall()
-                    recent = [RunRecord.model_validate_json(row[0]) for row in rows]
+                        "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                        (entry.session_id,),
+                    ).fetchone()
+                    parent = (
+                        connection.execute(
+                            "SELECT record_json FROM query_runs WHERE session_id = ? "
+                            "AND run_id = ? LIMIT 1",
+                            (entry.session_id, entry.parent_run_id),
+                        ).fetchone()
+                        if entry.parent_run_id
+                        else connection.execute(
+                            "SELECT record_json FROM query_runs WHERE session_id = ? "
+                            "AND json_extract(record_json, '$.db_id') = ? "
+                            "ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                            (entry.session_id, entry.db_id),
+                        ).fetchone()
+                    )
+                    recent: list[RunRecord] = []
+                    for row in (latest, parent):
+                        if row is not None:
+                            record = RunRecord.model_validate_json(row[0])
+                            if not recent or record.run_id != recent[0].run_id:
+                                recent.append(record)
                     entry = self._decorate(entry, recent)
                     connection.execute(
                         "INSERT INTO query_runs(run_id, session_id, created_at, "
@@ -144,7 +169,9 @@ class RunHistoryStore:
         conversation_id = (
             uuid4().hex
             if entry.branch_from_parent and parent
-            else (parent.conversation_id or parent.run_id) if parent else uuid4().hex
+            else (parent.conversation_id or parent.run_id)
+            if parent
+            else uuid4().hex
         )
         sql_version = parent.sql_version if parent else 0
         previous_sql = (
@@ -165,7 +192,7 @@ class RunHistoryStore:
                 "parent_run_id": parent.run_id if parent else None,
                 "version": (recent[0].version + 1) if recent else 1,
                 "sql_version": sql_version,
-            }
+            },
         )
         record.response_payload.update(
             {
@@ -315,11 +342,16 @@ def build_run_record(raw: dict[str, Any]) -> RunRecord:
         # A failed first query still needs its own question for later corrections.
         # Do not restore a different database's accepted SQL or invent successful rows.
         state = ConversationState(
-            session_id=response.session_id, db_id=db_id,
-            root_question=generation.question, resolved_question=response.resolved_question,
+            session_id=response.session_id,
+            db_id=db_id,
+            root_question=generation.question,
+            resolved_question=response.resolved_question,
             last_failure=response.message if not generation.accepted else None,
-            last_failed_sql=(generation.attempts[-1].sql
-                             if generation.attempts and not generation.accepted else None),
+            last_failed_sql=(
+                generation.attempts[-1].sql
+                if generation.attempts and not generation.accepted
+                else None
+            ),
         )
     payload = response.model_dump(mode="json")
     if generation:
