@@ -61,6 +61,22 @@ guessed chart. A second model call then explains the result using that validated
 renders only actual returned rows and never runs model-generated chart code. SQL and the exact
 result table remain available in the SQL and Data tabs.
 
+Interactive charts use Plotly.js for supported chart types, with ECharts retained as a fallback.
+Time-series plots include drag/wheel zoom, a touch pinch gesture, and a range-slider navigator
+when there are enough points. Chart export uses the active renderer. The plot receives the
+validated result rows without browser-side aggregation or dropping missing values.
+
+Each conversation follows one original analytical question. Corrections, explanations, filters,
+and plot follow-ups stay in that thread; an unrelated question prompts **New conversation**.
+For an explicit plot request with more than two returned columns, the selected model may propose
+chart axes from the executed result
+(including a validated Year+Month display axis). Proposed charts are checked against actual
+columns and rows; when the user names specific plot columns, the chart uses only those columns.
+The model cannot create measures or aggregate rows for display. Two-column results use the
+deterministic chart planner without an extra model call. Model recommendation is enabled by
+default for wider explicit plot requests and can be disabled with
+`TEXT2SQL_VIZ_RECOMMENDER_LLM_ENABLED=false`.
+
 Both calls share the request-wide model-call budget and have a 15-second timeout each. Their token
 usage and outcomes appear separately in the call ledger. A model failure or exhausted budget leaves
 the query result available with a factual fallback. Partial results are labelled, and explanations
@@ -137,16 +153,29 @@ multi-user authorization boundary.
   Data shows the executed rows and CSV export. The separate saved-question and branch buttons
   have been removed; conversation history remains available.
 - See a model-selected chart and plain-language answer when the returned data supports them.
-- For a complete chart result, switch among compatible suggested charts, change a displayed
-  metric/category/date range, or show Top N without another SQL call. Long chronological series
+- For a complete chart result, switch among compatible recommended plots in the answer, change a displayed
+  metric/category, or show Top N without another SQL call. Long chronological series
   have zoom controls; a zoom or display filter never changes the underlying query result.
-- Suggested filters over complete saved rows update the visible chart and Data view together.
+  Explicit plot requests allow up to 500 bounded result rows; larger results are flagged as
+  truncated and are not plotted. Missing line/bar measures remain visible as gaps, never zeros;
+  stacked and composition charts reject missing measures. An axis change that would collapse
+  separate rows requires a new validated query instead of silently dropping data.
+  Chart warnings remain visible beside the chart; the SQL and Data tabs show the source query and rows.
+- Display filters over complete saved rows update the visible chart and Data view together.
+  The compact query filter bar instead loads relevant metric, grouping and categorical
+  choices from verified schema/glossary metadata and bounded live distinct-value search. Apply
+  or Reset sends a follow-up through the existing SQL generation, validation and execution path;
+  it does not edit SQL in the browser or silently filter an aggregate. The prior result remains
+  visible if the follow-up fails. Simple string equality/IN filters are preselected from the
+  accepted SQL using SQLGlot; ambiguous or derived predicates are not guessed. Charts with three
+  or more category points support touch pinch zoom, including horizontal bars.
   Zero matches show an empty view, while Source Data and the accepted SQL remain unchanged.
 - Follow live backend stages and a timestamped activity log, including recovery schema/value
   checks and read-only probes. Timings are observations, not predicted completion percentages.
-- Cancel a running request; model/database selection stays locked until it finishes.
+- Cancel a running request; the configured database and model remain fixed during execution.
 
-If the table selector is empty, check `TEXT2SQL_DATABASE_ROOT` in `.env`. It must contain
+Set `TEXT2SQL_DEFAULT_DB_ID` in `.env` to choose the web app's database. The database
+selector is not shown in the UI. For SQLite, `TEXT2SQL_DATABASE_ROOT` must contain
 `<db_id>/<db_id>.sqlite`; profile JSON files do not replace the database files.
 Frontend rendering regressions can be checked with `node --test tests/frontend_rendering.cjs`.
 
@@ -360,6 +389,7 @@ Important settings:
 | Variable | Purpose | Default |
 |---|---|---|
 | `TEXT2SQL_DATABASE_ROOT` | SQLite database root | `data` |
+| `TEXT2SQL_DEFAULT_DB_ID` | Database used by the web app | `debit_card_specializing` |
 | `TEXT2SQL_POSTGRES_DATABASES` | PostgreSQL database allowlist | unset |
 | `TEXT2SQL_PROFILE_ROOT` | Offline profile root | `profiles` |
 | `TEXT2SQL_GLOSSARY_ROOT` | Approved glossary root | `data/business_glossaries` |

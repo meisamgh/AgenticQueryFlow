@@ -9,8 +9,10 @@ window.QueryflowChartExplorer = (function () {
     const iso = /^\d{6}$/.test(raw) ? `${raw.slice(0, 4)}-${raw.slice(4)}-01`
       : /^\d{4}$/.test(raw) ? `${raw}-01-01`
       : /^\d{4}-\d{2}$/.test(raw) ? `${raw}-01` : raw;
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(iso)) return null;
     const stamp = Date.parse(`${iso}T00:00:00Z`);
-    return Number.isFinite(stamp) ? stamp : null;
+    return Number.isFinite(stamp) && new Date(stamp).toISOString().slice(0, 10) === iso
+      ? stamp : null;
   }
   function isTime(spec) {
     return spec.time_format !== "raw" && spec.data.every(row => chronological(row[spec.x]) !== null);
@@ -18,8 +20,10 @@ window.QueryflowChartExplorer = (function () {
   function numericColumns(spec) {
     return (spec.source_columns || Object.keys(spec.data[0] || {})).filter(column =>
       !/(?:^|_)(?:id|key|code|year|month)(?:$|_)/i.test(column) &&
-      spec.data.every(row => row[column] !== null && row[column] !== ""
-        && Number.isFinite(Number(row[column]))));
+      spec.data.some(row => row[column] !== null && row[column] !== ""
+        && Number.isFinite(Number(row[column]))) &&
+      spec.data.every(row => row[column] === null
+        || (row[column] !== "" && Number.isFinite(Number(row[column])))));
   }
   function completeGrid(spec) {
     if (!spec.series) return false;
@@ -28,7 +32,8 @@ window.QueryflowChartExplorer = (function () {
       && new Set(spec.data.map(row => `${JSON.stringify(row[spec.x])}|${JSON.stringify(row[spec.series])}`)).size
         === spec.data.length;
   }
-  function nonnegative(spec) { return spec.data.every(row => Number(row[spec.y]) >= 0); }
+  function nonnegative(spec) { return spec.data.every(row => row[spec.y] !== null
+    && row[spec.y] !== "" && Number.isFinite(Number(row[spec.y])) && Number(row[spec.y]) >= 0); }
   function additive(spec) { return !NON_ADDITIVE.test(spec.y) && spec.additive_measures?.[spec.y] !== false; }
   function dimensions(spec) {
     const numeric = new Set(numericColumns(spec));
@@ -111,6 +116,13 @@ window.QueryflowChartExplorer = (function () {
       series: measures.length > 1 ? null : selectedSeries, y: measures[0], y_measures: measures,
       y_label: measures.length === 1 ? measures[0].replaceAll("_", " ") : unitFor(measures[0], spec),
       time_format: selectedX === spec.x ? spec.time_format : "raw", data: rows };
+    // Never collapse multiple source rows onto one plotted position when a
+    // display-only axis/series switch changes the grain. That needs new SQL.
+    if ((!output.transformation || output.transformation === "none")
+        && !["scatter", "bubble", "histogram", "box"].includes(spec.chart_type)) {
+      const positions = rows.map(row => JSON.stringify([row[selectedX], selectedSeries ? row[selectedSeries] : null]));
+      if (new Set(positions).size !== positions.length) return null;
+    }
     const supported = choices(output);
     const wanted = settings.chartType || (measures.length > 1 ? "multi_line" : spec.chart_type);
     output.chart_type = measures.length > 1

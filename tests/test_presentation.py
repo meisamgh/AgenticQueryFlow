@@ -115,7 +115,7 @@ def test_chart_families(word: str, columns: list[str], rows: list[list[object]])
     assert spec.data
 
 
-def test_duplicate_grain_null_and_truncation_are_rejected() -> None:
+def test_duplicate_grain_and_truncation_are_rejected_but_null_measure_is_a_gap() -> None:
     intent = parse_intent("Create a stacked bar chart.")
     with pytest.raises(VisualizationError, match="Multiple rows"):
         plan_chart(
@@ -125,14 +125,16 @@ def test_duplicate_grain_null_and_truncation_are_rejected() -> None:
             rows=[["Jan", "DE", 4], ["Jan", "DE", 5]],
             truncated=False,
         )
-    with pytest.raises(VisualizationError, match="NULL"):
-        plan_chart(
-            parse_intent("Plot a bar chart"),
-            question="bar chart",
-            columns=["Country", "Revenue"],
-            rows=[["DE", 4], ["FR", None]],
-            truncated=False,
-        )
+    spec = plan_chart(
+        parse_intent("Plot a bar chart"),
+        question="bar chart",
+        columns=["Country", "Revenue"],
+        rows=[["DE", 4], ["FR", None]],
+        truncated=False,
+    )
+    assert spec.null_policy == "preserve"
+    assert spec.data[1]["Revenue"] is None
+    assert "gaps" in spec.warnings[0]
     with pytest.raises(VisualizationError, match="truncated"):
         plan_chart(
             parse_intent("Plot a bar chart"),
@@ -140,6 +142,44 @@ def test_duplicate_grain_null_and_truncation_are_rejected() -> None:
             columns=["Country", "Revenue"],
             rows=[["DE", 4]],
             truncated=True,
+        )
+
+
+def test_chart_uses_all_complete_rows_beyond_forty_and_orders_dates() -> None:
+    rows = [[f"2026-{month:02d}-{day:02d}", month * 100 + day]
+            for month in (2, 1) for day in range(1, 26)]
+    spec = plan_chart(
+        parse_intent("Plot a line chart"), question="Plot a line chart",
+        columns=["Date", "Revenue"], rows=rows, truncated=False,
+    )
+    assert spec.source_row_count == 50
+    assert len(spec.data) == 50
+    assert spec.data[0]["Date"] == "2026-01-01"
+    assert spec.data[-1]["Date"] == "2026-02-25"
+
+
+def test_complete_two_hundred_plus_point_result_is_not_silently_clipped() -> None:
+    rows = [[f"2026-{month:02d}-{day:02d}", month * 100 + day]
+            for month in range(1, 9) for day in range(1, 29)]
+    spec = plan_chart(
+        parse_intent("Plot a line chart"), question="Plot a line chart",
+        columns=["Date", "Revenue"], rows=rows, truncated=False,
+    )
+    assert spec.source_row_count == len(rows) == len(spec.data) == 224
+
+
+def test_unused_null_does_not_block_chart_and_stacks_reject_missing_measure() -> None:
+    spec = plan_chart(
+        parse_intent("Plot a line chart"), question="Plot a line chart",
+        columns=["Date", "Revenue", "Comment"],
+        rows=[["2026-01", 2, None], ["2026-02", 3, "reviewed"]], truncated=False,
+    )
+    assert spec.null_policy == "reject"
+    with pytest.raises(VisualizationError, match="missing measure"):
+        plan_chart(
+            parse_intent("Plot a stacked bar chart"), question="Plot a stacked bar chart",
+            columns=["Month", "Country", "Revenue"],
+            rows=[["Jan", "DE", 4], ["Jan", "FR", None]], truncated=False,
         )
 
 

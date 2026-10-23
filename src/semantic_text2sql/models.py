@@ -681,7 +681,8 @@ class ChatRequest(StrictModel):
     )
     model: str = Field(
         default_factory=lambda: os.environ.get("TEXT2SQL_SQL_MODEL", DEFAULT_MODEL),
-        min_length=1, max_length=200,
+        min_length=1,
+        max_length=200,
     )
     context_provider: ModelProvider | None = Field(
         default_factory=lambda: cast(
@@ -690,7 +691,8 @@ class ChatRequest(StrictModel):
     )
     context_model: str | None = Field(
         default_factory=lambda: os.environ.get("TEXT2SQL_CONTEXT_MODEL") or None,
-        min_length=1, max_length=200,
+        min_length=1,
+        max_length=200,
     )
     execute: bool = True
     max_rows: int = Field(default=100, ge=1, le=500)
@@ -800,6 +802,7 @@ class ChartSpec(StrictModel):
     source_columns: list[str] = Field(default_factory=list)
     source_row_count: int = Field(default=0, ge=0)
     x: str
+    x_components: list[str] = Field(default_factory=list, max_length=2)
     y: str
     y_measures: list[str] = Field(default_factory=list, max_length=8)
     measure_units: dict[str, str] = Field(default_factory=dict)
@@ -865,9 +868,7 @@ class PresentationState(StrictModel):
     series: str | None = None
     size: str | None = None
     title: str | None = None
-    source_run_id: str | None = Field(
-        default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$"
-    )
+    source_run_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     data_complete: bool = True
 
 
@@ -895,6 +896,7 @@ class FilterCatalog(StrictModel):
     client_filters: list[SuggestedFilter] = Field(default_factory=list, max_length=12)
     sql_filters: list[SuggestedFilter] = Field(default_factory=list, max_length=12)
     unavailable_filters: list[SuggestedFilter] = Field(default_factory=list, max_length=6)
+    applied_values: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class FilterValuesResponse(StrictModel):
@@ -912,6 +914,7 @@ class RecommendedChart(StrictModel):
 
     chart_type: ChartType
     x: str
+    x_components: list[str] = Field(default_factory=list, max_length=2)
     y: str
     y_measures: list[str] = Field(default_factory=list, max_length=8)
     series: str | None = None

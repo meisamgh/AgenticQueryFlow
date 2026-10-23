@@ -109,6 +109,7 @@ def test_ui_config_reads_safe_model_defaults_from_environment(monkeypatch) -> No
     monkeypatch.setenv("TEXT2SQL_CONTEXT_MODE", "model1")
     monkeypatch.setenv("TEXT2SQL_CONTEXT_PROVIDER", "groq")
     monkeypatch.setenv("TEXT2SQL_CONTEXT_MODEL", "qwen/qwen3.8-27b")
+    monkeypatch.setenv("TEXT2SQL_DEFAULT_DB_ID", "books")
     response = TestClient(create_app()).get("/api/ui-config")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
@@ -118,6 +119,7 @@ def test_ui_config_reads_safe_model_defaults_from_environment(monkeypatch) -> No
         "context_mode": "model1",
         "context_provider": "groq",
         "context_model": "qwen/qwen3.8-27b",
+        "default_db_id": "books",
     }
 
 

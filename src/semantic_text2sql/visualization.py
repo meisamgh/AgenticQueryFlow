@@ -78,6 +78,7 @@ class VisualizationIntent(StrictModel):
     unsupported_type: str | None = None
     followup: bool = False
     x: str | None = None
+    x_components: list[str] = Field(default_factory=list, max_length=2)
     y: str | None = None
     series: str | None = None
     size: str | None = None
@@ -159,8 +160,11 @@ def parse_intent(question: str, *, has_previous: bool = False) -> VisualizationI
         size=sized.group(1).strip().casefold() if sized else None,
         unsupported_type=unsupported.group(1).lower() if unsupported else None,
         time_grain=(
-            "yearly" if grain_word and grain_word.casefold() == "annual" else
-            grain_word.casefold() if grain_word else None
+            "yearly"
+            if grain_word and grain_word.casefold() == "annual"
+            else grain_word.casefold()
+            if grain_word
+            else None
         ),
     )
 
@@ -218,7 +222,9 @@ def _column_roles(
     category: list[str] = []
     for index, name in enumerate(columns):
         values = [row[index] for row in rows]
-        if all(_number(value) for value in values):
+        if any(_number(value) for value in values) and all(
+            value is None or _number(value) for value in values
+        ):
             numeric.append(name)
         elif all(_date_value(value) is not None for value in values):
             temporal.append(name)
@@ -246,11 +252,7 @@ def _resolve_dimension(raw: Any, columns: list[str]) -> str | None:
         return exact
     first_word = text.split()[0]
     return next(
-        (
-            name
-            for name in columns
-            if text in norm(name) or norm(name) == first_word
-        ),
+        (name for name in columns if text in norm(name) or norm(name) == first_word),
         None,
     )
 
@@ -263,6 +265,21 @@ def _mentioned(columns: list[str], text: str) -> str | None:
         if re.search(rf"(?<!\w){re.escape(name.casefold().replace('_', ' '))}(?!\w)", normalized)
     ]
     return max(matches, key=len) if matches else None
+
+
+def requested_plot_columns(question: str, columns: list[str]) -> set[str]:
+    """Exact result-column names explicitly named in the plot instruction."""
+    instruction = re.split(
+        r"\b(?:where|only|filtered\s+to|in\s+20\d\d)\b",
+        question,
+        maxsplit=1,
+        flags=re.I,
+    )[0].replace("_", " ")
+    return {
+        name
+        for name in columns
+        if re.search(rf"(?<!\w){re.escape(name.replace('_', ' '))}(?!\w)", instruction, re.I)
+    }
 
 
 def _quantile(values: list[float], q: float) -> float:
@@ -282,18 +299,30 @@ _GRAIN_CAPABILITY: dict[str, int] = {
 }
 
 _UNIT_FAMILIES: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("ratio", re.compile(
-        r"(?:^|_)(?:margin|rate|ratio|percentage|percent|share|pct|"
-        r"conversion|retention|average|avg|mean)(?:$|_)", re.I
-    )),
-    ("currency", re.compile(
-        r"(?:^|_)(?:revenue|cost|profit|price|sales|spend|spending|amount|"
-        r"expenditure|expense|fee)(?:$|_)", re.I
-    )),
-    ("count", re.compile(
-        r"(?:^|_)(?:count|orders?|customers?|users?|transactions?|"
-        r"number)(?:$|_)", re.I
-    )),
+    (
+        "ratio",
+        re.compile(
+            r"(?:^|_)(?:margin|rate|ratio|percentage|percent|share|pct|"
+            r"conversion|retention|average|avg|mean)(?:$|_)",
+            re.I,
+        ),
+    ),
+    (
+        "currency",
+        re.compile(
+            r"(?:^|_)(?:revenue|cost|profit|price|sales|spend|spending|amount|"
+            r"expenditure|expense|fee)(?:$|_)",
+            re.I,
+        ),
+    ),
+    (
+        "count",
+        re.compile(
+            r"(?:^|_)(?:count|orders?|customers?|users?|transactions?|"
+            r"number)(?:$|_)",
+            re.I,
+        ),
+    ),
 )
 
 
@@ -327,11 +356,7 @@ def _comparable_measures(
             rejected.append(name)
             continue
         kept.append(name)
-    units = {
-        name: unit
-        for name in kept
-        if (unit := measure_unit(name)) is not None
-    }
+    units = {name: unit for name in kept if (unit := measure_unit(name)) is not None}
     return kept, units, rejected
 
 
@@ -378,6 +403,45 @@ def plan_chart(
         raise VisualizationError("The result has ambiguous or incomplete columns.")
     if len(rows) > 500:
         raise VisualizationError("The result is too large to plot without a verified reduction.")
+    if intent.x_components:
+        if len(intent.x_components) != 2 or len(set(intent.x_components)) != 2:
+            raise VisualizationError("A combined time axis requires Year and Month columns.")
+        year_column, month_column = intent.x_components
+        if year_column not in columns or month_column not in columns:
+            raise VisualizationError("The selected Year and Month columns are not in the result.")
+        if not re.search(r"year", year_column, re.I) or not re.search(r"month", month_column, re.I):
+            raise VisualizationError("Only verified Year and Month columns may be combined.")
+        composite = "Year-Month"
+        if composite in columns:
+            raise VisualizationError("The combined time-axis name conflicts with a result column.")
+        expanded_rows: list[list[Any]] = []
+        for row in rows:
+            year = row[columns.index(year_column)]
+            month = row[columns.index(month_column)]
+            if (
+                isinstance(year, bool)
+                or isinstance(month, bool)
+                or not re.fullmatch(r"\d{4}", str(year))
+            ):
+                raise VisualizationError("Year and Month cannot be combined into valid dates.")
+            month_text = str(month)
+            if not re.fullmatch(r"\d{1,2}", month_text) or not 1 <= int(month_text) <= 12:
+                raise VisualizationError("Year and Month cannot be combined into valid dates.")
+            expanded_rows.append([*row, f"{year}-{int(month_text):02d}"])
+        expanded = plan_chart(
+            intent.model_copy(update={"x": composite, "x_components": []}),
+            question="",
+            columns=[*columns, composite],
+            rows=expanded_rows,
+            truncated=False,
+        )
+        return expanded.model_copy(
+            update={
+                "source_columns": columns,
+                "x_components": [year_column, month_column],
+                "x_label": "Year and Month",
+            }
+        )
     if intent.time_grain:
         requested_grain = _grain_capability(intent.time_grain)
         stored_grain = _stored_grain_capability(columns)
@@ -387,9 +451,9 @@ def plan_chart(
                 if requested_grain > stored_grain
                 else "has no time axis at all and detail cannot be inferred from an aggregate"
                 if stored_grain == 0
-                else f"is aggregated at the {next(
-                    (k for k, v in _GRAIN_CAPABILITY.items() if v == stored_grain), 'coarser'
-                )} grain"
+                else f"is aggregated at the {
+                    next((k for k, v in _GRAIN_CAPABILITY.items() if v == stored_grain), 'coarser')
+                } grain"
             )
             raise VisualizationError(
                 "The stored result "
@@ -399,10 +463,6 @@ def plan_chart(
                 + " grain requires a validated SQL change that keeps the "
                 "earlier metric and filters."
             )
-    if any(value is None for row in rows for value in row):
-        raise VisualizationError(
-            "The result contains NULL values; clarify how missing points should be shown."
-        )
     if any(isinstance(value, float) and not math.isfinite(value) for row in rows for value in row):
         raise VisualizationError("The result contains a non-finite number.")
     numeric, temporal, category = _column_roles(columns, rows)
@@ -426,7 +486,11 @@ def plan_chart(
     series = _resolve_dimension(intent.series, columns) if intent.series else intent.series
     size = _resolve_dimension(intent.size, columns) if intent.size else intent.size
     use_series = requested in {
-        "multi_line", "stacked_area", "grouped_bar", "stacked_bar", "percent_stacked_bar"
+        "multi_line",
+        "stacked_area",
+        "grouped_bar",
+        "stacked_bar",
+        "percent_stacked_bar",
     }
     point_series = requested in {"scatter", "bubble"}
     frequency = next(
@@ -435,7 +499,9 @@ def plan_chart(
             for name in numeric
             if re.search(r"(?:^|_)(?:count|frequency|freq)(?:$|_)", name, re.I)
             and all(
-                float(row[columns.index(name)]).is_integer() and row[columns.index(name)] >= 0
+                row[columns.index(name)] is not None
+                and float(row[columns.index(name)]).is_integer()
+                and row[columns.index(name)] >= 0
                 for row in rows
             )
         ),
@@ -446,8 +512,10 @@ def plan_chart(
     five_names = {
         key: next((name for name in numeric if name.casefold() in alternatives), None)
         for key, alternatives in {
-            "min": {"min", "minimum"}, "q1": {"q1", "first_quartile"},
-            "median": {"median"}, "q3": {"q3", "third_quartile"},
+            "min": {"min", "minimum"},
+            "q1": {"q1", "first_quartile"},
+            "median": {"median"},
+            "q3": {"q3", "third_quartile"},
             "max": {"max", "maximum"},
         }.items()
     }
@@ -481,12 +549,16 @@ def plan_chart(
         mentioned = _mentioned(numeric, question)
         if mentioned == x:
             mentioned = None
-        y = y or mentioned or (
-            remaining_numeric[0]
-            if x and len(remaining_numeric) == 1
-            else numeric[0]
-            if len(numeric) == 1
-            else None
+        y = (
+            y
+            or mentioned
+            or (
+                remaining_numeric[0]
+                if x and len(remaining_numeric) == 1
+                else numeric[0]
+                if len(numeric) == 1
+                else None
+            )
         )
         if use_series:
             series = series or next((name for name in category if name != x), None)
@@ -500,6 +572,14 @@ def plan_chart(
         raise VisualizationError("The result does not contain unambiguous chart axes.")
     if y not in numeric:
         raise VisualizationError(f"{y} must contain finite numerical values.")
+    if any(row[columns.index(x)] is None for row in rows):
+        raise VisualizationError(
+            "The chart axis contains NULL values; choose a complete dimension."
+        )
+    if series and any(row[columns.index(series)] is None for row in rows):
+        raise VisualizationError(
+            "The chart series contains NULL values; choose a complete dimension."
+        )
     # A multi-measure request can extend, but never corrupt, the Y axis: only
     # measures with a compatible inferred unit family join the primary one.
     extra_measures: list[str] = []
@@ -512,11 +592,31 @@ def plan_chart(
             extra_measures = kept
             measure_units_map = units
         rejected_measures = rejected
+    selected_measures = extra_measures if len(extra_measures) > 1 else [y]
+    missing_measures = any(
+        row[columns.index(name)] is None for row in rows for name in selected_measures
+    )
+    if missing_measures and requested not in {
+        "line",
+        "multi_line",
+        "step_line",
+        "area",
+        "bar",
+        "horizontal_bar",
+        "grouped_bar",
+    }:
+        raise VisualizationError(
+            "This chart cannot faithfully display missing measure values. "
+            "Choose a line or bar chart, or clarify the missing values."
+        )
     if requested in {
-        "line", "multi_line", "step_line", "area", "stacked_area", "calendar_heatmap"
-    } and (
-        x not in temporal and x not in numeric
-    ):
+        "line",
+        "multi_line",
+        "step_line",
+        "area",
+        "stacked_area",
+        "calendar_heatmap",
+    } and (x not in temporal and x not in numeric):
         raise VisualizationError("This chart needs an ordered date or numeric axis.")
     if requested == "calendar_heatmap" and (
         x not in temporal or any(len(str(row[columns.index(x)])) != 10 for row in rows)
@@ -526,8 +626,10 @@ def plan_chart(
         raise VisualizationError("Scatter and bubble charts need a numeric x-axis.")
     if requested == "bubble" and (size not in numeric or size in {x, y}):
         raise VisualizationError("A bubble chart needs a separate numeric size column.")
-    if use_series and series is not None and (
-        series not in columns or series == x or series in numeric
+    if (
+        use_series
+        and series is not None
+        and (series not in columns or series == x or series in numeric)
     ):
         raise VisualizationError("This chart needs a separate category or series column.")
     if use_series and series is None and len(extra_measures) < 2:
@@ -535,10 +637,13 @@ def plan_chart(
     if requested in {"heatmap", "treemap"} and (series not in columns or series == x):
         raise VisualizationError("This chart needs two distinct category columns.")
     if requested in {
-        "pie", "donut", "treemap", "stacked_bar", "stacked_area", "percent_stacked_bar"
-    } and any(
-        row[columns.index(y)] < 0 for row in rows
-    ):
+        "pie",
+        "donut",
+        "treemap",
+        "stacked_bar",
+        "stacked_area",
+        "percent_stacked_bar",
+    } and any(row[columns.index(y)] < 0 for row in rows):
         raise VisualizationError("This composition chart requires nonnegative measures.")
     if requested in {"pie", "donut", "treemap"} and not any(
         row[columns.index(y)] > 0 for row in rows
@@ -551,6 +656,8 @@ def plan_chart(
     if requested == "histogram" and len(rows) < 2:
         raise VisualizationError("A histogram needs at least two observations.")
     warnings: list[str] = []
+    if missing_measures:
+        warnings.append("Missing measure values are shown as gaps, not zeros.")
     if rejected_measures:
         warnings.append(
             "Incompatible measures were excluded from the shared axis: "
@@ -564,8 +671,6 @@ def plan_chart(
             raise VisualizationError(
                 "Multiple rows share a chart position; define the aggregation in SQL first."
             )
-        if len(set(keys)) > 200:
-            raise VisualizationError("Too many chart positions; narrow the result before plotting.")
         if series:
             x_values = {key[0] for key in keys}
             series_values = {key[1] for key in keys}
@@ -583,7 +688,9 @@ def plan_chart(
 
     raw: list[dict[str, str | int | float | None]] = [
         {
-            name: row[index] if isinstance(row[index], (str, int, float)) else str(row[index])
+            name: row[index]
+            if row[index] is None or isinstance(row[index], (str, int, float))
+            else str(row[index])
             for index, name in enumerate(columns)
         }
         for row in rows
@@ -608,8 +715,10 @@ def plan_chart(
     elif requested == "box" and pre_summarized:
         raw = []
         for index, row in enumerate(rows):
-            numbers = [float(row[columns.index(cast(str, five_names[key]))])
-                       for key in ("min", "q1", "median", "q3", "max")]
+            numbers = [
+                float(row[columns.index(cast(str, five_names[key]))])
+                for key in ("min", "q1", "median", "q3", "max")
+            ]
             if numbers != sorted(numbers):
                 raise VisualizationError(
                     "Five-number summaries must be ordered min, Q1, median, Q3, max."
@@ -660,7 +769,11 @@ def plan_chart(
         title = (", ".join(labels[:-1]) + " and " + labels[-1]) + f" by {x.replace('_', ' ')}"
     magnitude_column = intent.y or y
     magnitudes = (
-        [abs(float(row[columns.index(magnitude_column)])) for row in rows]
+        [
+            abs(float(row[columns.index(magnitude_column)]))
+            for row in rows
+            if row[columns.index(magnitude_column)] is not None
+        ]
         if magnitude_column in columns
         else [0.0]
     )
@@ -668,6 +781,16 @@ def plan_chart(
     if x in temporal:
         sample = str(rows[0][columns.index(x)])
         time_format = {4: "year", 6: "month", 7: "month", 10: "day"}.get(len(sample), "raw")  # type: ignore[assignment]
+    explicit = requested_plot_columns(question, columns)
+    if (len(explicit) >= 2 and explicit.intersection(numeric)
+            and re.search(r"\b(?:plot|chart|visuali[sz]e|draw)\b", question, re.I)):
+        plotted = {y, *extra_measures, *(intent.x_components or [x])}
+        if series:
+            plotted.add(series)
+        if size:
+            plotted.add(size)
+        if plotted != explicit:
+            raise VisualizationError("The chart must use exactly the requested result columns.")
     return ChartSpec(
         chart_type=requested,
         source_columns=columns,
@@ -682,9 +805,10 @@ def plan_chart(
         x_label=x.replace("_", " "),
         y_label=y.replace("_", " "),
         legend=bool(series),
+        null_policy="preserve" if missing_measures else "reject",
         transformation=transformation,
         data=raw,
         warnings=warnings,
-        number_format="compact" if max(magnitudes) >= 10_000 else "plain",
+        number_format="compact" if magnitudes and max(magnitudes) >= 10_000 else "plain",
         time_format=time_format,
     )

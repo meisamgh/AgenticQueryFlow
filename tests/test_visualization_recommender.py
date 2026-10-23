@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 from typing import Any
 
+from semantic_text2sql.models import TokenUsage
+from semantic_text2sql.visualization import VisualizationError, VisualizationIntent, plan_chart
 from semantic_text2sql.visualization_recommender import (
     ChartRecommendations,
     materialize_recommendation,
     recommend_charts,
+    refine_charts_with_model,
 )
 
 ROW_MONTH_COUNTRY = [
@@ -151,6 +156,72 @@ def test_incompatible_measures_not_mixed_into_one_axis() -> None:
 
 def test_scalar_result_yields_no_recommendation() -> None:
     assert recommend_charts("Total", ["total_consumption"], SCALAR_TOTAL) is None
+
+
+def test_year_and_month_can_form_a_verified_chart_axis_without_aggregation() -> None:
+    columns = ["Year", "Month", "Revenue"]
+    rows = [[2025, 12, 10.0], [2026, 1, 11.0], [2025, 11, 9.0]]
+    recommendation = recommend_charts("Plot Year, Month and Revenue", columns, rows)
+    assert recommendation is not None
+    assert recommendation.primary_chart.x_components == ["Year", "Month"]
+    spec = materialize_recommendation(
+        recommendation.primary_chart, question="Plot Year, Month and Revenue",
+        columns=columns, rows=rows, truncated=False,
+    )
+    assert spec.source_columns == columns
+    assert spec.x == "Year-Month"
+    assert spec.x_components == ["Year", "Month"]
+    assert [row[spec.x] for row in spec.data] == ["2025-11", "2025-12", "2026-01"]
+    assert [row[spec.y] for row in spec.data] == [9.0, 10.0, 11.0]
+
+
+def test_invalid_or_duplicate_combined_month_is_not_silently_plotted() -> None:
+    columns = ["Year", "Month", "Revenue"]
+    intent = VisualizationIntent(requested=True, chart_type="line", x="Year-Month",
+                                 x_components=["Year", "Month"], y="Revenue")
+    for rows in ([[2025, 13, 3.0]], [[2025, 1, 3.0], [2025, 1, 4.0]]):
+        try:
+            plan_chart(intent, question="", columns=columns, rows=rows, truncated=False)
+        except VisualizationError:
+            pass
+        else:
+            raise AssertionError("Invalid or duplicate Year-Month chart position was accepted")
+
+
+def test_explicit_plot_columns_exclude_unrequested_series() -> None:
+    columns = ["Month", "Revenue", "Country"]
+    rows = [["2025-01", 10.0, "DE"], ["2025-02", 12.0, "FR"]]
+    recommendation = recommend_charts("Plot Month and Revenue", columns, rows)
+    assert recommendation is not None
+    assert recommendation.primary_chart.x == "Month"
+    assert recommendation.primary_chart.y == "Revenue"
+    assert recommendation.primary_chart.series is None
+
+
+def test_model_can_select_combined_time_axis_but_not_unrequested_columns() -> None:
+    class ChartModel:
+        async def complete_detailed(self, *, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            assert "Year and Month" in prompt
+            return json.dumps({"primary_chart": {
+                "chart_type": "line", "x": "Year-Month",
+                "x_components": ["Year", "Month"], "y": "Revenue",
+                "y_measures": [], "series": None, "reason": "Monthly trend",
+            }, "alternative_charts": [{
+                "chart_type": "line", "x": "Year-Month",
+                "x_components": ["Year", "Month"], "y": "Revenue",
+                "y_measures": [], "series": "Country", "reason": "Unrequested series",
+            }]}), TokenUsage()
+
+    recommended, _, _ = asyncio.run(refine_charts_with_model(
+        ChartModel(), provider="agentrouter", model="test",
+        question="Plot Year, Month and Revenue as a line chart",
+        columns=["Year", "Month", "Revenue", "Country"],
+        rows=[[2025, 12, 10.0, "DE"], [2026, 1, 11.0, "FR"]],
+        required_chart_type="line",
+    ))
+    assert recommended is not None
+    assert recommended.primary_chart.x_components == ["Year", "Month"]
+    assert recommended.alternative_charts == []
 
 
 def test_truncated_result_yields_no_recommendation() -> None:

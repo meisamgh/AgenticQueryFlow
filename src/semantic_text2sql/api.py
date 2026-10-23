@@ -135,6 +135,7 @@ logger = logging.getLogger(__name__)
 def _planner_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
+
 def create_app(
     agent: TextToSQLAgent | None = None,
     conversation_completers: dict[str, Any] | None = None,
@@ -300,7 +301,7 @@ def create_app(
 
     @app.get("/", include_in_schema=False)
     async def web_application() -> FileResponse:
-        return FileResponse(web_root / "index.html")
+        return FileResponse(web_root / "index.html", headers={"Cache-Control": "no-store"})
 
     @app.get("/api/models", response_model=list[ModelOption])
     async def models(response: Response) -> list[ModelOption]:
@@ -316,6 +317,7 @@ def create_app(
             "context_mode": os.environ.get("TEXT2SQL_CONTEXT_MODE") or "retrieval",
             "context_provider": os.environ.get("TEXT2SQL_CONTEXT_PROVIDER") or None,
             "context_model": os.environ.get("TEXT2SQL_CONTEXT_MODEL") or None,
+            "default_db_id": os.environ.get("TEXT2SQL_DEFAULT_DB_ID") or "debit_card_specializing",
         }
 
     @app.get("/api/voice")
@@ -527,9 +529,7 @@ def create_app(
         if len(search_term) > 64:
             raise HTTPException(status_code=400, detail="Search term is too long.")
         database = (
-            sqlite
-            if db_id in sqlite.list_ids()
-            else (postgres if postgres is not None else None)
+            sqlite if db_id in sqlite.list_ids() else (postgres if postgres is not None else None)
         )
         if database is None:
             raise HTTPException(status_code=404, detail="Database was not found or configured.")
@@ -539,9 +539,7 @@ def create_app(
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         table_info = next((item for item in schema.tables if item.name == table), None)
         column_info = (
-            next(
-                (item for item in table_info.columns if item.name == column), None
-            )
+            next((item for item in table_info.columns if item.name == column), None)
             if table_info is not None
             else None
         )
@@ -557,9 +555,7 @@ def create_app(
         # field from value discovery even when the raw schema still lists it.
         profile = None
         try:
-            profile = await asyncio.to_thread(
-                profiles.load, schema.dialect, db_id
-            )
+            profile = await asyncio.to_thread(profiles.load, schema.dialect, db_id)
         except (DatabaseError, OSError, ValueError):
             profile = None
         for item in profile.columns if profile else []:
@@ -580,8 +576,13 @@ def create_app(
         if cached is not None and monotonic() - cached[0] < 60:
             _, cached_values, cached_more = cached
             return FilterValuesResponse(
-                db_id=db_id, table=table, column=column, search=search_term or None,
-                values=cached_values, more_available=cached_more, cached=True,
+                db_id=db_id,
+                table=table,
+                column=column,
+                search=search_term or None,
+                values=cached_values,
+                more_available=cached_more,
+                cached=True,
             )
         if search_term:
             # Treat the user's text literally; it is never SQL or a LIKE pattern.
@@ -619,8 +620,13 @@ def create_app(
             filter_values_cache.clear()
         filter_values_cache[cache_key] = (monotonic(), values[:100], more_available)
         return FilterValuesResponse(
-            db_id=db_id, table=table, column=column, search=search_term or None,
-            values=values[:100], more_available=more_available, cached=False,
+            db_id=db_id,
+            table=table,
+            column=column,
+            search=search_term or None,
+            values=values[:100],
+            more_available=more_available,
+            cached=False,
         )
 
     @app.get("/api/analytics-metrics")
@@ -796,15 +802,18 @@ def create_app(
             viz_intent = viz_intent.model_copy(update={"requested": True})
         if viz_intent.requested and viz_intent.followup and previous and previous.last_sql:
             prior_response = recent_results.get((request.session_id, request.db_id))
-            if request.parent_run_id and prior_response and (
-                prior_response.run_id != request.parent_run_id
+            if (
+                request.parent_run_id
+                and prior_response
+                and (prior_response.run_id != request.parent_run_id)
             ):
                 prior_response = None
             source = prior_response.generation if prior_response else None
             if source is None or source.sql != previous.last_sql or source.truncated:
                 candidates = (
                     [runs.get(request.parent_run_id, request.session_id)]
-                    if request.parent_run_id else runs.list_sessions(request.session_id)
+                    if request.parent_run_id
+                    else runs.list_sessions(request.session_id)
                 )
                 for record in candidates:
                     if record is None:
@@ -879,23 +888,21 @@ def create_app(
                     )
                     analytics_usage = _add_usage(analytics_usage, refine_usage)
                     if request_budget.model_calls > model_calls_before:
-                        analytics_ledger.append(CallLedgerEntry(
-                            component="analytics_planner",
-                            kind="MODEL",
-                            status="SUCCEEDED" if proposal.source == "model" else "FAILED",
-                            provider=request.provider,
-                            requested_model=request.model,
-                            effective_model=request.model,
-                            input_tokens=refine_usage.input_tokens,
-                            output_tokens=refine_usage.output_tokens,
-                            latency_ms=refine_ms,
-                        ))
-                    invented_derived = (
-                        proposal.source == "model"
-                        and bool(
-                            set(proposal.requested_analysis.derived_measures)
-                            - set(approved_metrics)
+                        analytics_ledger.append(
+                            CallLedgerEntry(
+                                component="analytics_planner",
+                                kind="MODEL",
+                                status="SUCCEEDED" if proposal.source == "model" else "FAILED",
+                                provider=request.provider,
+                                requested_model=request.model,
+                                effective_model=request.model,
+                                input_tokens=refine_usage.input_tokens,
+                                output_tokens=refine_usage.output_tokens,
+                                latency_ms=refine_ms,
+                            )
                         )
+                    invented_derived = proposal.source == "model" and bool(
+                        set(proposal.requested_analysis.derived_measures) - set(approved_metrics)
                     )
                     if proposal.source == "model" and (
                         not plan_fields_known(proposal, known_fields) or invented_derived
@@ -903,9 +910,7 @@ def create_app(
                         # An invented dimension or unverified derived formula is
                         # a failed refinement, never authorization to query
                         # unverified schema.
-                        proposal = deterministic_plan.model_copy(
-                            update={"source": "fallback"}
-                        )
+                        proposal = deterministic_plan.model_copy(update={"source": "fallback"})
                 analytics_planning_ms = round((perf_counter() - analytics_started) * 1000)
                 if not planner_enabled():
                     metrics_ledger().record(
@@ -947,9 +952,7 @@ def create_app(
                             recorded_at=_planner_now(),
                             session_id=request.session_id,
                             db_id=request.db_id,
-                            source=(
-                                proposal.source if proposal is not None else "fallback"
-                            ),
+                            source=(proposal.source if proposal is not None else "fallback"),
                             operation=proposal.operation if proposal else None,
                             reusability_decision=(
                                 requirement.decision if requirement is not None else None
@@ -978,13 +981,52 @@ def create_app(
                             call_ledger=analytics_ledger,
                         )
                     try:
-                        spec = plan_chart(
-                            viz_intent,
-                            question=request.message,
-                            columns=source.columns,
-                            rows=source.rows,
-                            truncated=source.truncated,
-                        )
+                        spec = None
+                        if len(source.columns) > 2 and viz_recommender_llm_enabled():
+                            model_calls_before = request_budget.model_calls
+                            proposals, model_usage, model_ms = await refine_charts_with_model(
+                                turn_completers.get(request.provider),
+                                provider=request.provider,
+                                model=request.model,
+                                question=request.message,
+                                columns=source.columns,
+                                rows=source.rows,
+                                budget=request_budget,
+                                required_chart_type=(
+                                    viz_intent.chart_type if viz_intent.explicit_type else None
+                                ),
+                            )
+                            analytics_usage = _add_usage(analytics_usage, model_usage)
+                            if request_budget.model_calls > model_calls_before:
+                                analytics_ledger.append(
+                                    CallLedgerEntry(
+                                        component="visualization_recommendation",
+                                        kind="MODEL",
+                                        status="SUCCEEDED" if proposals else "FAILED",
+                                        provider=request.provider,
+                                        requested_model=request.model,
+                                        effective_model=request.model,
+                                        input_tokens=model_usage.input_tokens,
+                                        output_tokens=model_usage.output_tokens,
+                                        latency_ms=model_ms,
+                                    )
+                                )
+                            if proposals is not None:
+                                spec = materialize_recommendation(
+                                    proposals.primary_chart,
+                                    question=request.message,
+                                    columns=source.columns,
+                                    rows=source.rows,
+                                    truncated=False,
+                                )
+                        if spec is None:
+                            spec = plan_chart(
+                                viz_intent,
+                                question=request.message,
+                                columns=source.columns,
+                                rows=source.rows,
+                                truncated=source.truncated,
+                            )
                         chart_presentation = chart_presentation.model_copy(
                             update={
                                 "chart_type": spec.chart_type,
@@ -1149,6 +1191,27 @@ def create_app(
                     "total": round((perf_counter() - started) * 1_000),
                 },
             )
+        if has_matching_state and interpretation.operation == "NEW_QUERY":
+            message = (
+                "This conversation is for follow-ups to its original question. "
+                "Start a new conversation for an independent question."
+            )
+            return ChatResponse(
+                session_id=request.session_id,
+                operation="NEW_QUERY",
+                resolved_question=request.message,
+                conversation_interpretation=interpretation,
+                state=previous,
+                message=message,
+                clarification_required=True,
+                clarification_question=message,
+                token_usage=conversation_usage,
+                call_ledger=conversation_ledger,
+                timings_ms={
+                    "conversation_interpretation": conversation_ms,
+                    "total": round((perf_counter() - started) * 1_000),
+                },
+            )
         operation, pending = resolve_turn(
             request.session_id,
             request.db_id,
@@ -1272,7 +1335,8 @@ def create_app(
             db_id=request.db_id,
             evidence="\n\n".join(
                 item for item in (request.evidence, governed_metric_evidence) if item
-            ) or None,
+            )
+            or None,
             visualization_requirement=sql_output_requirement(viz_intent),
             provider=request.provider,
             model=request.model,
@@ -1481,7 +1545,11 @@ def create_app(
             except Exception:
                 logger.warning("Chart recommendation failed", exc_info=True)
                 chart_recommendations = None
-            if viz_recommender_llm_enabled():
+            if (
+                viz_intent.requested
+                and len(generated.columns) > 2
+                and viz_recommender_llm_enabled()
+            ):
                 try:
                     model_calls_before = request_budget.model_calls
                     model_recommended, viz_usage, viz_ms = await refine_charts_with_model(
@@ -1492,20 +1560,27 @@ def create_app(
                         columns=generated.columns,
                         rows=generated.rows,
                         budget=request_budget,
+                        required_chart_type=(
+                            viz_intent.chart_type if viz_intent.explicit_type else None
+                        ),
                     )
-                    client_ledger = [
-                        CallLedgerEntry(
-                            component="visualization_recommendation",
-                            kind="MODEL",
-                            status="SUCCEEDED" if model_recommended is not None else "FAILED",
-                            provider=request.provider,
-                            requested_model=request.model,
-                            effective_model=request.model,
-                            input_tokens=viz_usage.input_tokens,
-                            output_tokens=viz_usage.output_tokens,
-                            latency_ms=viz_ms,
-                        )
-                    ] if request_budget.model_calls > model_calls_before else []
+                    client_ledger = (
+                        [
+                            CallLedgerEntry(
+                                component="visualization_recommendation",
+                                kind="MODEL",
+                                status="SUCCEEDED" if model_recommended is not None else "FAILED",
+                                provider=request.provider,
+                                requested_model=request.model,
+                                effective_model=request.model,
+                                input_tokens=viz_usage.input_tokens,
+                                output_tokens=viz_usage.output_tokens,
+                                latency_ms=viz_ms,
+                            )
+                        ]
+                        if request_budget.model_calls > model_calls_before
+                        else []
+                    )
                     chart_recommendations = merge_recommendations(
                         model_recommended, chart_recommendations
                     )
@@ -1516,9 +1591,6 @@ def create_app(
             if (
                 presentation is not None
                 and viz_intent.requested
-                and not viz_intent.explicit_type
-                and not viz_intent.x
-                and not viz_intent.y
                 and chart_recommendations is not None
             ):
                 try:
@@ -1529,18 +1601,20 @@ def create_app(
                         rows=generated.rows,
                         truncated=False,
                     )
-                    presentation = presentation.model_copy(update={
-                        "chart_spec": winning_spec,
-                        "chart_type": winning_spec.chart_type,
-                        "x": winning_spec.x,
-                        "y": winning_spec.y,
-                        "title": winning_spec.title,
-                        "x_label": winning_spec.x_label,
-                        "y_label": winning_spec.y_label,
-                        "number_format": winning_spec.number_format,
-                        "time_format": winning_spec.time_format,
-                        "chart_reason": "",
-                    })
+                    presentation = presentation.model_copy(
+                        update={
+                            "chart_spec": winning_spec,
+                            "chart_type": winning_spec.chart_type,
+                            "x": winning_spec.x,
+                            "y": winning_spec.y,
+                            "title": winning_spec.title,
+                            "x_label": winning_spec.x_label,
+                            "y_label": winning_spec.y_label,
+                            "number_format": winning_spec.number_format,
+                            "time_format": winning_spec.time_format,
+                            "chart_reason": "",
+                        }
+                    )
                 except VisualizationError:
                     logger.warning("Primary chart recommendation could not be materialized")
             database = (
@@ -1561,6 +1635,7 @@ def create_app(
                             response_state.approved_tables or None if response_state else None
                         ),
                         profile=profile,
+                        executed_sql=generated.sql,
                     )
                 except (DatabaseError, OSError, ValueError):
                     logger.warning("Filter discovery failed", exc_info=True)

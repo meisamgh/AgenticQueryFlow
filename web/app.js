@@ -1,10 +1,6 @@
 const $ = (selector) => document.querySelector(selector);
 const sessionId = localStorage.getItem("queryRoomSession") || crypto.randomUUID().replaceAll("-", "");
 localStorage.setItem("queryRoomSession", sessionId);
-document.addEventListener("DOMContentLoaded", () => {
-  const el = $("#sessionId");
-  if (el) { el.textContent = sessionId; el.title = `Conversation session: ${sessionId}`; }
-});
 
 const state = {
   busy: false, jobId: null, cancelled: false, currentQuestion: "", ready: false,
@@ -42,11 +38,18 @@ function attemptOutcome(attempt) {
   if (validation.valid === true) return "passed";
   if (postSafetyOptimizationCodes.has(validation.code)) return "not_selected";
   return "failed";
-}  async function api(path, options = {}) {
+}
+
+async function api(path, options = {}) {
   const response = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+  const raw = await response.text();
+  let body = null;
+  if (raw.trim()) {
+    try { body = JSON.parse(raw); }
+    catch { if (response.ok) throw new Error(`Invalid JSON response from ${path}.`); }
+  }
   if (!response.ok) {
-    const body = await response.json().catch(() => ({}));
-    let detail = body.detail;
+    let detail = body?.detail;
     if (Array.isArray(detail)) {
       detail = detail.map((item) => {
         const path = Array.isArray(item.loc) ? item.loc.join(".") : item.loc;
@@ -55,7 +58,7 @@ function attemptOutcome(attempt) {
     }
     throw new Error(detail || `Request failed (${response.status})`);
   }
-  return response.json();
+  return body;
 }
 
 async function initialize() {
@@ -63,23 +66,23 @@ async function initialize() {
   try {
     await api("/api/health");
     setHealth(true);
-    const databases = await api("/api/databases");
+    const [databases, models, uiConfig] = await Promise.all([
+      api("/api/databases"),
+      api(`/api/models?refresh=${Date.now()}`, { cache: "no-store" }),
+      api("/api/ui-config", { cache: "no-store" }),
+    ]);
     fillSelect(
       "#databaseSelect",
-      databases.filter((item) => item.configured),
+      databases.filter((item) => item.configured && item.db_id === uiConfig.default_db_id),
       "db_id",
       (item) => `${item.db_id} (${item.dialect})`,
-      null,
+      uiConfig.default_db_id,
     );
     [...$("#databaseSelect").options].forEach((option) => {
       const match = databases.find((item) => item.db_id === option.value);
       if (match) option.dataset.dialect = match.dialect;
     });
     await Promise.all([loadDatabaseSchema(), refreshHistory(), loadGlossary($("#databaseSelect").value)]);
-    const [models, uiConfig] = await Promise.all([
-      api(`/api/models?refresh=${Date.now()}`, { cache: "no-store" }),
-      api("/api/ui-config", { cache: "no-store" }),
-    ]);
     const configuredSql = models.find(item => item.provider === uiConfig.sql_provider
       && item.model === uiConfig.sql_model && item.configured);
     const configuredContext = uiConfig.context_mode !== "model1" || models.some(item =>
@@ -87,7 +90,8 @@ async function initialize() {
     state.modelConfig = uiConfig;
     state.ready = !!$("#databaseSelect").value && !!configuredSql && configuredContext;
     $("#sendButton").disabled = !state.ready || !!voiceInput?.busy;
-    if (!configuredSql) showError("The SQL model configured in .env is unavailable. Check TEXT2SQL_SQL_PROVIDER and TEXT2SQL_SQL_MODEL.");
+    if (!$("#databaseSelect").value) showError(`Database ${uiConfig.default_db_id} is not configured. Check TEXT2SQL_DEFAULT_DB_ID and TEXT2SQL_DATABASE_ROOT in .env.`);
+    else if (!configuredSql) showError("The SQL model configured in .env is unavailable. Check TEXT2SQL_SQL_PROVIDER and TEXT2SQL_SQL_MODEL.");
     else if (!configuredContext) showError("The context model configured in .env is unavailable. Check TEXT2SQL_CONTEXT_PROVIDER and TEXT2SQL_CONTEXT_MODEL.");
   } catch (error) {
     setHealth(false);
@@ -443,7 +447,7 @@ async function send(message, feedbackCategory = null) {
         message: message.trim(),
         parent_run_id: state.activeRunId,
         execute: true,
-        max_rows: 100,
+        max_rows: state.pendingVizRequest ? 500 : 100,
         feedback_category: feedbackCategory,
       }),
     });
@@ -454,9 +458,11 @@ async function send(message, feedbackCategory = null) {
     state.activeRunId = body.history_saved ? body.run_id : null;
     await appendAssistant(body, (performance.now() - started) / 1000);
     void refreshHistory();
+    return body;
   } catch (error) {
     progress.remove();
     showError(error.message);
+    return null;
   } finally {
     state.busy = false;
     voiceInput?.setQueryBusy(false);
@@ -498,6 +504,7 @@ function sameDisplayText(left, right) {
 function updateStatusPill(fragment, body, accepted, status) {
   const pill = fragment.querySelector(".status-pill");
   if (!pill) return;
+  if (accepted && status !== "CHART UNAVAILABLE") { pill.hidden = true; return; }
   const label = pill.querySelector(".status-pill-label");
   const slot = pill.querySelector("[data-icon]");
   let iconName = "check";
@@ -615,7 +622,7 @@ function editSemanticChip(anchor, dimension, current, runId, body, filterItem = 
   const title = document.createElement("label");
   title.className = "query-insight-title";
   title.textContent = "Change " + dimension.toLowerCase();
-  const contract = body.state?.semantic_contract || {};
+  const contract = body.state?.semantic_contract || body.generation?.semantic_contract || {};
   const verified = body.generation?.model_context?.tables || {};
   let suggestions = [];
   if (dimension === "Metric") suggestions = contract.measures || [];
@@ -808,16 +815,18 @@ function attachChartInvestigations(article, presentation, runId) {
     if (!matches.length) return;
     const value = matches[0][spec.x];
     const anchor = article.querySelector(".chart-slot");
-    const dimension = JSON.stringify(spec.x), selected = JSON.stringify(value);
+    const condition = Array.isArray(spec.x_components) && spec.x_components.length === 2
+      ? spec.x_components.map(name => `${JSON.stringify(name)} = ${JSON.stringify(matches[0][name])}`).join(" and ")
+      : `${JSON.stringify(spec.x)} = ${JSON.stringify(value)}`;
     const y = JSON.stringify(spec.y);
     insightMenu(anchor, String(spec.x) + ": " + String(value), "Explore this chart category using the original query.", [
       {label:"Break down this point", prompt:"For the previous chart, break down the " + y +
-        " measure where " + dimension + " = " + selected +
+        " measure where " + condition +
         " by a meaningful verified dimension. Preserve existing filters."},
       {label:"Compare with other periods or groups", prompt:"Compare the previous chart result at " +
-        dimension + " = " + selected + " with relevant neighboring periods or groups, maintaining its metric definition."},
+        condition + " with relevant neighboring periods or groups, maintaining its metric definition."},
       {label:"Show contributing records", prompt:"Show the underlying records contributing to the previous chart at " +
-        dimension + " = " + selected + ". Verify the source grain and joins; do not infer individual records from aggregates."}
+        condition + ". Verify the source grain and joins; do not infer individual records from aggregates."}
     ], runId);
   });
 }
@@ -825,13 +834,18 @@ function attachChartInvestigations(article, presentation, runId) {
 function renderChartInto(slot, presentation, generation) {
   slot._echart?.dispose?.();
   slot.replaceChildren();
-  slot.classList.add("chart-slot-ec");
-  const ec = window.QueryflowECharts?.render(slot, presentation, generation) || null;
-  slot._echart = ec;
-  if (ec) {
-    return { echarts: ec };
+  // Plotly measures the element during newPlot, so size it before rendering.
+  slot.classList.add("chart-slot-plotly");
+  let plotly = null;
+  try { plotly = window.QueryflowPlotly?.render(slot, presentation, generation) || null; }
+  catch (error) { console.warn(`Plotly rendering failed: ${error.message}`); }
+  const chart = plotly || window.QueryflowECharts?.render(slot, presentation, generation) || null;
+  slot.classList.toggle("chart-slot-plotly", Boolean(plotly));
+  slot.classList.toggle("chart-slot-ec", Boolean(chart && !plotly));
+  slot._echart = chart; // Existing chart-view controller accepts either renderer's handle.
+  if (chart) {
+    return { echarts: chart };
   }
-  slot.classList.remove("chart-slot-ec");
   const note = document.createElement("p");
   note.className = "chart-note";
   note.textContent = "Interactive charts are unavailable. SQL and the exact result table remain in their tabs.";
@@ -977,7 +991,7 @@ function wireDataScope(article, generation) {
   renderScope();
 }
 
-function wireChartSection(article, presentation, generation, runId) {
+function wireChartSection(article, presentation, generation, runId, recommendations = null) {
   const section = article.querySelector(".chart-section");
   const slot = article.querySelector(".chart-slot");
   if (!section || !slot) return;
@@ -993,6 +1007,9 @@ function wireChartSection(article, presentation, generation, runId) {
   try { stored = settingKey ? JSON.parse(sessionStorage.getItem(settingKey) || "null") : null; }
   catch { stored = null; }
   const settings = stored && typeof stored === "object" ? stored : {};
+  // Old chart sessions may contain date-window filters that no longer have a visible control.
+  delete settings.start;
+  delete settings.end;
   const chartPres = { ...presentation, chart_spec: original };
   function saveSettings() {
     if (settingKey) {
@@ -1016,7 +1033,19 @@ function wireChartSection(article, presentation, generation, runId) {
     });
   }
   function renderCurrent() {
-    const next = explorer?.apply(original, settings) || original;
+    const next = explorer?.apply(original, settings);
+    if (!next) {
+      article._echart?.dispose?.();
+      article._echart = null;
+      slot.replaceChildren();
+      const message = document.createElement("p");
+      message.className = "chart-note";
+      message.textContent = "This chart change would combine separate result rows. Ask a follow-up question to calculate it at the new grouping level.";
+      slot.append(message);
+      article._visibleChartSpec = null;
+      article._refreshDataScope?.();
+      return;
+    }
     if (!next.data.length) {
       article._echart?.dispose?.();
       article._echart = null;
@@ -1027,11 +1056,9 @@ function wireChartSection(article, presentation, generation, runId) {
       slot.append(message);
       article._visibleChartSpec = next;
       article._refreshDataScope?.();
-      section.querySelector(".chart-active-label").textContent = "No visible chart rows · display filters only; SQL unchanged";
       return;
     }
-    if (explorer?.isTime(next) && settings.zoom
-        && new Set(next.data.map(row => String(row[next.x]))).size > 25) {
+    if (settings.zoom && new Set(next.data.map(row => String(row[next.x]))).size > 2) {
       next.zoom_start = settings.zoom.start;
       next.zoom_end = settings.zoom.end;
     }
@@ -1043,7 +1070,6 @@ function wireChartSection(article, presentation, generation, runId) {
       activeParts.push(Object.entries(settings.rowFilters).map(([column, values]) =>
         `${column}: ${values.length <= 3 ? values.join(" | ") : `${values.length} values`}`).join(", "));
     if (settings.categories?.length) activeParts.push(settings.categories.join(", "));
-    if (settings.start || settings.end) activeParts.push([settings.start || "first", settings.end || "last"].join(" – "));
     if (settings.topN) activeParts.push(`Top ${settings.topN}`);
     if (settings.x && settings.x !== original.x) activeParts.push(`X: ${settings.x}`);
     if (settings.metrics?.length && (settings.metrics.length !== 1 || settings.metrics[0] !== original.y))
@@ -1058,9 +1084,6 @@ function wireChartSection(article, presentation, generation, runId) {
     const selectedMeasures = settings.metrics?.length ? settings.metrics : [original.y];
     section.querySelector(".chart-measures-current").textContent = selectedMeasures.length === 1
       ? selectedMeasures[0] : `${selectedMeasures.length} selected`;
-    section.querySelector(".chart-active-label").textContent = activeParts.length
-      ? `${activeParts.join(" · ")} · display only; SQL unchanged`
-      : "Current executed result · no display filters";
     section.querySelector(".chart-sub").textContent = next.chart_type.replaceAll("_", " ");
     article._echart = renderChartInto(slot, chartPres, generation).echarts;
     article._echart?.onZoom?.(range => {
@@ -1069,26 +1092,34 @@ function wireChartSection(article, presentation, generation, runId) {
     });
     attachChartInvestigations(article, chartPres, runId);
     const zoomActions = section.querySelector(".chart-zoom-actions");
-    zoomActions.hidden = !explorer?.isTime(next) || new Set(next.data.map(row => String(row[next.x]))).size <= 25;
-    const suggestions = section.querySelector(".chart-suggestions");
-    suggestions.replaceChildren();
+    zoomActions.hidden = new Set(next.data.map(row => String(row[next.x]))).size <= 2;
+    const zoomGuide = section.querySelector(".chart-zoom-guide");
+    zoomGuide.hidden = !(article._echart?.renderer === "plotly"
+      && next.time_format && next.time_format !== "raw"
+      && ["line", "multi_line", "step_line", "area", "stacked_area"].includes(next.chart_type)
+      && new Set(next.data.map(row => String(row[next.x]))).size > 1);
+    kinds.replaceChildren();
     if (explorer) {
-      const label = document.createElement("span");
-      label.textContent = "Suggested charts";
-      suggestions.append(label);
-      explorer.choices(next).forEach(type => {
+      const recommended = [recommendations?.primary_chart, ...(recommendations?.alternative_charts || [])]
+        .filter(item => item && explorer.choices(next).includes(item.chart_type));
+      const recommendedTypes = [...new Set(recommended.map(item => item.chart_type))];
+      const types = [...recommendedTypes, ...explorer.choices(next).filter(type => !recommendedTypes.includes(type))];
+      types.forEach(type => {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "chart-kind";
         button.textContent = type.replaceAll("_", " ");
+        button.title = `Show ${button.textContent} using these returned rows`;
         button.classList.toggle("active", type === next.chart_type);
         button.setAttribute("aria-pressed", String(type === next.chart_type));
         button.addEventListener("click", () => {
+          const proposal = recommended.find(item => item.chart_type === type);
+          if (proposal && article._chartViewState?.tryChart(proposal)) return;
           settings.chartType = type;
           saveSettings();
           renderCurrent();
         });
-        suggestions.append(button);
+        kinds.append(button);
       });
     }
     const active = activeParts.length;
@@ -1098,7 +1129,7 @@ function wireChartSection(article, presentation, generation, runId) {
   }
   article._echart = null;
   article._chartType = presentation.chart_type;
-  kinds.hidden = true;
+  kinds.hidden = !explorer;
   /* Shared chart-view state (chartViewState): one controller for the chart
      toolbar AND backend-suggested chips. `tryChart` re-validates a proposed
      shape through the same deterministic chart explorer — display only, and
@@ -1124,8 +1155,6 @@ function wireChartSection(article, presentation, generation, runId) {
         chartType: chart.chart_type,
         rowFilters: {},
         categories: [],
-        start: null,
-        end: null,
         topN: null,
       };
       const applied = explorer?.apply(original, merged);
@@ -1156,19 +1185,15 @@ function wireChartSection(article, presentation, generation, runId) {
     fillFilter(".chart-measures-filter", options.metric);
     fillFilter(".chart-x-filter", options.dimensions);
     fillFilter(".chart-series-filter", options.dimensions.filter(name => name !== original.x), "None");
-    fillFilter(".chart-start-filter", options.dates, "First date");
-    fillFilter(".chart-end-filter", options.dates, "Last date");
     section.querySelector(".chart-category-control").hidden = !options.categories.length;
     section.querySelector(".chart-metric-control").hidden = options.metric.length < 2;
     section.querySelector(".chart-measures-control").hidden = options.metric.length < 2;
     section.querySelector(".chart-x-control").hidden = options.dimensions.length < 2;
     section.querySelector(".chart-series-control").hidden = options.dimensions.length < 2;
-    section.querySelector(".chart-start-control").hidden = !options.dates.length;
-    section.querySelector(".chart-end-control").hidden = !options.dates.length;
     section.querySelector(".chart-top-control").hidden = explorer.isTime(original) || Boolean(original.series)
       || new Set(original.data.map(row => String(row[original.x]))).size !== original.data.length;
     const inputs = { metric: ".chart-metric-filter", x: ".chart-x-filter", series: ".chart-series-filter",
-      start: ".chart-start-filter", end: ".chart-end-filter", topN: ".chart-top-filter" };
+      topN: ".chart-top-filter" };
     const syncInputs = () => Object.entries(inputs).forEach(([key, selector]) => {
       const select = section.querySelector(selector);
       select.value = settings[key] ?? (key === "metric" ? original.y
@@ -1218,8 +1243,7 @@ function wireChartSection(article, presentation, generation, runId) {
     });
     section.querySelector(".chart-reset-filter").addEventListener("click", reset);
     section.querySelector(".chart-clear-filter").addEventListener("click", () => {
-      for (const key of ["categories", "start", "end", "topN"]) delete settings[key];
-      saveSettings(); syncInputs(); syncCategories(); renderCurrent();
+      reset();
     });
     section.querySelector(".chart-reset-zoom").addEventListener("click", () => {
       delete settings.zoom;
@@ -1302,8 +1326,10 @@ function themeBackgroundColor() {
   return getComputedStyle(document.body).backgroundColor || "#ffffff";
 }
 
-function exportChartPng(article) {
-  const dataUrl = exportedChartSource(article);
+async function exportChartPng(article) {
+  let dataUrl;
+  try { dataUrl = await exportedChartSource(article); }
+  catch { dataUrl = null; }
   if (!dataUrl) { toast("Chart export is unavailable while the chart library is offline."); return; }
   const link = document.createElement("a");
   link.href = dataUrl;
@@ -1455,6 +1481,164 @@ function renderAnswerPreview(fragment, body, mode) {
   preview.append(label, value);
 }
 
+const filterCapabilities = new Map();
+async function queryFilterCapabilities(dbId) {
+  const cached = filterCapabilities.get(dbId);
+  if (!cached || Date.now() - cached.at > 60_000) {
+    const promise = api(`/api/databases/${encodeURIComponent(dbId)}/analytics-capabilities`)
+      .catch(error => { filterCapabilities.delete(dbId); throw error; });
+    filterCapabilities.set(dbId, {at: Date.now(), promise});
+  }
+  return filterCapabilities.get(dbId).promise;
+}
+
+function wireQueryFilterBar(article, body, runId) {
+  const bar = article.querySelector(".query-filter-bar");
+  if (!bar || !runId || !window.QueryflowFilters) return;
+  const controls = bar.querySelector(".query-filter-controls");
+  const status = bar.querySelector(".query-filter-status");
+  const apply = bar.querySelector(".query-filter-apply");
+  const reset = bar.querySelector(".query-filter-reset");
+  const dbId = body.generation?.db_id || $("#databaseSelect").value;
+  const contract = body.state?.semantic_contract || body.generation?.semantic_contract || {};
+  const context = body.generation?.model_context || {};
+  const tables = new Set(window.QueryflowFilters.selectedTables(context));
+  const fields = window.QueryflowFilters.relevantFields(body).filter(item => item.control !== "date_range");
+  const selectedColumns = new Set(Object.entries(context.tables || context.execution_context?.tables || {})
+    .flatMap(([table, meta]) => (Array.isArray(meta.columns) ? meta.columns : Object.keys(meta.columns || {}))
+      .map(column => `${table}.${column}`)));
+  const editors = [];
+  const makeSelect = (label, items, current, kind) => {
+    const distinct = [...new Set(items.filter(Boolean).map(String))];
+    if (distinct.length < 2) return;
+    const wrap = document.createElement("label");
+    wrap.className = "query-filter-control";
+    const title = document.createElement("span"); title.textContent = label;
+    const select = document.createElement("select"); select.setAttribute("aria-label", label);
+    for (const value of distinct) {
+      const option = document.createElement("option");
+      option.value = value; option.textContent = readableResultLabel(value); select.append(option);
+    }
+    if (distinct.includes(String(current))) select.value = String(current);
+    const baseline = select.value;
+    wrap.append(title, select);
+    if (kind === "metric") controls.prepend(wrap); else controls.append(wrap);
+    editors.push({ read: () => select.value === baseline ? null : {kind, value: select.value},
+      reset: () => { select.value = baseline; } });
+  };
+  const addField = field => {
+    const name = field.column.toLowerCase();
+    const label = /country/.test(name) ? "Country" : "Category";
+    // A compact bar has one control per role; prefer the field already used by SQL.
+    if (controls.querySelector(`[data-filter-role="${label}"]`)) return;
+    const wrap = document.createElement("div");
+    wrap.className = "query-filter-control";
+    wrap.dataset.filterRole = label;
+    const title = document.createElement("span"); title.textContent = label;
+    wrap.append(title);
+    const existing = body.suggested_filters?.applied_values?.[field.field]
+      || window.QueryflowFilters.selectedValues(contract, field.field);
+    {
+      const menu = document.createElement("details"); menu.className = "query-filter-menu";
+      const summary = document.createElement("summary"); summary.textContent = existing.length ? existing.join(", ") : "All";
+      const search = document.createElement("input"); search.type = "search"; search.placeholder = "Search values";
+      search.setAttribute("aria-label", `Search ${label.toLowerCase()} values`);
+      const choices = document.createElement("div"); choices.className = "query-filter-values";
+      const selected = new Set(existing);
+      let loaded = false;
+      const renderValues = values => {
+        choices.replaceChildren();
+        const all = document.createElement("button"); all.type = "button"; all.textContent = "All";
+        all.addEventListener("click", () => { selected.clear(); summary.textContent = "All"; renderValues(values); });
+        choices.append(all);
+        for (const value of [...new Set([...selected, ...values])]) {
+          const option = document.createElement("label");
+          const check = document.createElement("input"); check.type = "checkbox"; check.value = value;
+          check.checked = selected.has(value);
+          check.addEventListener("change", () => {
+            if (check.checked) selected.add(value); else selected.delete(value);
+            summary.textContent = selected.size ? [...selected].join(", ") : "All";
+          });
+          option.append(check, document.createTextNode(value)); choices.append(option);
+        }
+      };
+      const load = async () => {
+        choices.textContent = "Loading values…";
+        try {
+          const result = await api(`/api/databases/${encodeURIComponent(dbId)}/filter-values?table=${encodeURIComponent(field.table)}&column=${encodeURIComponent(field.column)}&search=${encodeURIComponent(search.value.trim())}`);
+          renderValues(result.values || []);
+          if (result.more_available) {
+            const note = document.createElement("small"); note.textContent = "Search for more values"; choices.append(note);
+          } else if (!result.values?.length && !selected.size) choices.textContent = "No matching values";
+        } catch (error) { choices.textContent = `Values unavailable: ${error.message}`; }
+      };
+      menu.addEventListener("toggle", () => { if (menu.open && !loaded) { loaded = true; void load(); } });
+      let timer;
+      search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(load, 220); });
+      menu.append(summary, search, choices); wrap.append(menu);
+      editors.push({ read: () => {
+        const values = [...selected];
+        return values.length === existing.length && values.every(value => existing.includes(value))
+          ? null : {kind: "values", field: field.field, values};
+      }, reset: () => { selected.clear(); existing.forEach(value => selected.add(value));
+        summary.textContent = existing.length ? existing.join(", ") : "All"; if (loaded) void load(); } });
+      editors.at(-1).clear = () => existing.length ? {kind: "values", field: field.field, values: []} : null;
+    }
+    controls.append(wrap);
+  };
+  // Only expose roles backed by selected, verified schema fields.
+  fields.filter(item => /country/i.test(item.column)).forEach(addField);
+  fields.filter(item => !/country/i.test(item.column)).forEach(addField);
+  void queryFilterCapabilities(dbId).then(capabilities => {
+    const metricNames = [
+      ...(contract.measures || []),
+      ...(capabilities.available_kpis || []).filter(item => (item.columns || []).some(column => tables.has(String(column).split(".")[0]))).map(item => item.name),
+      ...(capabilities.measures || []).filter(item => selectedColumns.has(`${item.table}.${item.name}`))
+        .map(item => `${item.table}.${item.name}`),
+    ];
+    if (contract.measures?.length) makeSelect("Metric", metricNames, contract.measures[0], "metric");
+    const groups = [
+      ...(contract.grain || []),
+      ...(capabilities.dimensions || []).filter(item => selectedColumns.has(`${item.table}.${item.name}`) && !/id$/i.test(item.name))
+        .map(item => `${item.table}.${item.name}`),
+    ];
+    if (contract.grain?.length) makeSelect("Group By", groups, contract.grain[0], "group");
+    bar.hidden = !controls.children.length;
+  }).catch(error => { status.textContent = `Some filter choices could not load: ${error.message}`; });
+  bar.hidden = !controls.children.length;
+  apply.addEventListener("click", async () => {
+    const changes = editors.map(editor => editor.read()).filter(Boolean);
+    if (!changes.length) { status.textContent = "No changes to apply."; return; }
+    if ($("#databaseSelect").value !== dbId) { status.textContent = "Switch back to this result's database before applying filters."; return; }
+    if (state.busy) return;
+    apply.disabled = true; reset.disabled = true; status.textContent = "Updating query and results…";
+    try {
+      const prompt = window.QueryflowFilters.changePrompt(changes)
+        + (article.querySelector(".chart-section") ? " Keep the existing visualization on the refreshed result." : "");
+      const result = await sendFromAnswer(runId, prompt);
+      status.textContent = result?.generation?.accepted ? "Updated result appears below."
+        : "Update did not produce a new accepted result; original result is unchanged.";
+    } catch (error) { status.textContent = `Update failed: ${error.message}`; }
+    finally { apply.disabled = false; reset.disabled = false; }
+  });
+  reset.addEventListener("click", async () => {
+    const changes = editors.map(editor => editor.clear?.()).filter(Boolean);
+    editors.forEach(editor => editor.reset());
+    if (!changes.length) { status.textContent = "Selections reset."; return; }
+    if ($("#databaseSelect").value !== dbId) { status.textContent = "Switch back to this result's database before resetting filters."; return; }
+    if (state.busy) return;
+    apply.disabled = true; reset.disabled = true; status.textContent = "Removing query filters…";
+    try {
+      const prompt = window.QueryflowFilters.changePrompt(changes)
+        + (article.querySelector(".chart-section") ? " Keep the existing visualization on the refreshed result." : "");
+      const result = await sendFromAnswer(runId, prompt);
+      status.textContent = result?.generation?.accepted ? "Reset result appears below."
+        : "Reset did not produce a new accepted result; original result is unchanged.";
+    } catch (error) { status.textContent = `Reset failed: ${error.message}`; }
+    finally { apply.disabled = false; reset.disabled = false; }
+  });
+}
+
 async function appendAssistant(body, elapsed, options = {}) {
   const fragment = $("#assistantTemplate").content.cloneNode(true);
   const article = fragment.querySelector("article");
@@ -1493,9 +1677,8 @@ async function appendAssistant(body, elapsed, options = {}) {
   const presentation = body.presentation || null;
   const chartDataComplete = body.presentation_state?.data_complete !== false
     && !generation.truncated
-    && (!(presentation?.chart_spec) || presentation.chart_spec.source_row_count === 0
-      || (presentation.chart_spec.transformation && presentation.chart_spec.transformation !== "none")
-      || presentation.chart_spec.data.length >= Math.min(presentation.chart_spec.source_row_count, 500));
+    && (!(presentation?.chart_spec) || !presentation.chart_spec.source_row_count
+      || presentation.chart_spec.source_row_count === generation.rows?.length);
   if (mode === "chart" && chartDataComplete) {
     chartSection.hidden = false;
     const spec = presentation.chart_spec;
@@ -1503,16 +1686,6 @@ async function appendAssistant(body, elapsed, options = {}) {
     fragment.querySelector(".chart-sub").textContent = [
       spec.chart_type.replaceAll("_", " "), ...(spec.warnings || []),
     ].join(" · ");
-    const chartFoot = document.createElement("div");
-    chartFoot.className = "chart-foot";
-    const chartLegend = document.createElement("span");
-    chartLegend.className = "legend";
-    chartLegend.textContent = spec.y_label || generation.columns?.[1] || "Results";
-    const chartFootnote = document.createElement("span");
-    chartFootnote.className = "plot-footnote";
-    chartFootnote.textContent = `Generated on request · ${spec.data.length} result rows`;
-    chartFoot.append(chartLegend, chartFootnote);
-    chartSection.append(chartFoot);
   } else if (mode === "chart") {
     // A versioned "chart" state with incomplete data must never render a
     // partial chart; demand a fresh validated execution instead.
@@ -1546,6 +1719,12 @@ async function appendAssistant(body, elapsed, options = {}) {
   fragment.querySelector(".result-panel-pane").hidden = sqlNotAvailable || explanatory;
 
   const actions = fragment.querySelector(".answer-actions");
+  if (body.clarification_required && body.operation === "NEW_QUERY" && body.state) {
+    actions.append(actionButton("Start new conversation", "plus", () => {
+      if (!$("#messageInput").value.trim()) $("#messageInput").value = body.resolved_question || "";
+      $("#resetButton").click();
+    }));
+  }
   if (accepted && !explanatory && !sqlNotAvailable) {
     const sqlActions = fragment.querySelector(".sql-actions");
     const runId = body.run_id || options.run?.run_id || null;
@@ -1606,8 +1785,8 @@ async function appendAssistant(body, elapsed, options = {}) {
     article.dataset.runId = body.run_id || "";
     wireDataScope(article, generation);
   }
-  if (mode === "chart") wireChartSection(article, presentation, generation, body.run_id);
-  if (accepted && !explanatory && !body.clarification_required) renderBackendSuggestions(article, body);
+  if (mode === "chart") wireChartSection(article, presentation, generation, body.run_id, body.chart_recommendations);
+  if (accepted && !options.restored) wireQueryFilterBar(article, body, body.run_id);
   if (accepted && !explanatory && !body.clarification_required) {
     wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length)});
   }
@@ -2280,204 +2459,6 @@ function renderTable(container, columns, rows) {
   container.append(table);
 }
 
-/* Backend-verified suggestions: chart recommendations and safe filters found
-   on the executed result. SQL-backed filters go through the normal
-   conversation pipeline; client filters only ever narrow already-fetched
-   rows. High-cardinality fields rely on bounded server-side search instead
-   of presenting 25 values as the full domain. */
-function itemValueOptions(item, search) {
-  const params = new URLSearchParams({
-    table: item.table || "",
-    column: item.column || "",
-  });
-  if (search) params.set("search", search);
-  return fetch(
-    `/api/databases/${encodeURIComponent($("#databaseSelect").value)}/filter-values`
-    + `?${params.toString()}`,
-  ).then((response) => {
-    if (!response.ok) throw new Error(`Value request failed (${response.status})`);
-    return response.json();
-  });
-}
-
-function suggestionValueMenu(anchor, item, values, article, runId) {
-  const panel = document.createElement("div");
-  const title = document.createElement("strong");
-  title.className = "query-insight-title";
-  title.textContent = `Filter by ${item.label || item.field}`;
-  const caption = document.createElement("p");
-  caption.textContent = item.exec_mode === "CLIENT_FILTER"
-    ? "Hide all other rows on this page. SQL unchanged."
-    : `Runs a new, validated SQL through the normal pipeline (${item.join_path?.length ? `joining via ${item.join_path.join(" then ")}` : "the approved tables"}).`;
-  panel.append(title, caption);
-  if (item.control === "search") {
-    /* High-cardinality field: bounded server-side search, never the claim
-       that the listed values are the complete domain. */
-    const searchRow = document.createElement("p");
-    searchRow.className = "query-insight-search-row";
-    const input = document.createElement("input");
-    input.type = "search";
-    input.maxLength = 64;
-    input.placeholder = `Search ${item.label || item.field}…`;
-    const go = document.createElement("button");
-    go.type = "button";
-    go.className = "query-insight-action muted";
-    go.textContent = "Search values";
-    go.addEventListener("click", () => {
-      const term = input.value.trim();
-      if (!term) return;
-      go.disabled = true;
-      itemValueOptions(item, term)
-        .then(payload => {
-          suggestionValueMenu(anchor, item, payload.values.slice(0, 25), article, runId);
-        })
-        .catch(error => { showError(error.message); go.disabled = false; });
-    });
-    searchRow.append(input, go);
-    panel.append(searchRow);
-  }
-  values.forEach((value) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "query-insight-action";
-    button.textContent = value;
-    button.addEventListener("click", () => {
-      dismissInsight();
-      if (state.busy || !state.ready) return;
-      if (item.exec_mode === "CLIENT_FILTER") {
-        article._setClientFilter?.({ column: item.field, value });
-      } else {
-        sendFromAnswer(
-          runId,
-          `Restrict the results to ${item.column || item.field} being ${JSON.stringify(value)}.`,
-        ).catch(error => showError(error.message));
-      }
-    });
-    panel.append(button);
-  });
-  if (!values.length) {
-    const empty = document.createElement("p");
-    empty.className = "query-insight-empty";
-    empty.textContent = "No matching values found. Try another search.";
-    panel.append(empty);
-  }
-  if (article._clearClientFilter && article._hasClientFilter?.()) {
-    const clear = document.createElement("button");
-    clear.type = "button";
-    clear.className = "query-insight-action muted";
-    clear.textContent = "Clear row filter";
-    clear.addEventListener("click", () => {
-      dismissInsight();
-      article._clearClientFilter();
-    });
-    panel.append(clear);
-  }
-  placeInsight(anchor, panel);
-}
-
-function renderBackendSuggestions(article, body) {
-  const section = article.querySelector(".backend-suggestions");
-  if (!section) return;
-  const runId = article.dataset.runId || body.run_id || null;
-  const recommendations = body.chart_recommendations;
-  const filters = body.suggested_filters;
-  const generation = body.generation || {};
-  if (!recommendations && !filters) return;
-  const strip = document.createElement("div");
-  strip.className = "backend-suggestion-strip";
-  if (recommendations) {
-    const label = document.createElement("span");
-    label.className = "suggestion-group-label";
-    label.textContent = "Suggested charts";
-    strip.append(label);
-    const charts = [recommendations.primary_chart, ...(recommendations.alternative_charts || [])];
-    charts.forEach((chart) => {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.className = "suggestion-chip chart-chip";
-      button.textContent = chart.chart_type.replaceAll("_", " ");
-      button.title = chart.reason || "";
-      if (chart === recommendations.primary_chart) button.classList.add("primary");
-      button.addEventListener("click", () => {
-        if (state.busy || !state.ready) return;
-        // Validated recommendation over the executed result: apply the typed
-        // chart action locally (no model call, no SQL) whenever the result
-        // already contains every required column.
-        if (article._chartViewState?.tryChart({
-          x: chart.x,
-          y: chart.y,
-          y_measures: chart.y_measures || [chart.y],
-          series: chart.series,
-          chart_type: chart.chart_type,
-        })) return;
-        const measures = (chart.y_measures && chart.y_measures.length > 1)
-          ? chart.y_measures.join(", ") : chart.y;
-        sendFromAnswer(
-          runId,
-          `Plot ${chart.x} against ${measures} as a ${chart.chart_type.replaceAll("_", " ")} chart.`,
-        ).catch(error => showError(error.message));
-      });
-      strip.append(button);
-    });
-  }
-  if (filters) {
-    const actionable = [
-      ...(filters.client_filters || []),
-      ...(filters.sql_filters || []),
-    ];
-    if (actionable.length) {
-      const label = document.createElement("span");
-      label.className = "suggestion-group-label";
-      label.textContent = "Filter fields";
-      strip.append(label);
-      actionable.slice(0, 6).forEach((item) => {
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "suggestion-chip filter-chip";
-        button.textContent = item.label || item.field;
-        if (item.exec_mode === "CLIENT_FILTER") button.classList.add("rows");
-        button.title = `${item.reason}${item.cardinality != null ? ` · ${item.cardinality} distinct values` : ""}`;
-        button.addEventListener("click", (event) => {
-          const anchor = event.currentTarget;
-          if (item.exec_mode === "CLIENT_FILTER") {
-            // Client filters live in the executed result, not in any table.
-            const index = (generation.columns || []).indexOf(item.field);
-            const rows = generation.rows || [];
-            const values = index < 0 ? [] : [
-              ...new Set(rows.map(row => row[index] == null ? "" : String(row[index]))),
-            ].filter(Boolean).sort();
-            if (!values.length) {
-              showError("No values for this field in the executed result.");
-              return;
-            }
-            suggestionValueMenu(anchor, item, values.slice(0, 25), article, runId);
-            return;
-          }
-          itemValueOptions(item)
-            .then((payload) => suggestionValueMenu(
-              anchor, item, payload.values.slice(0, 25), article, runId,
-            ))
-            .catch(error => showError(error.message));
-        });
-        strip.append(button);
-      });
-    }
-    const unavailable = (filters.unavailable_filters || []).length;
-    if (unavailable) {
-      const muted = document.createElement("span");
-      muted.className = "suggestion-unavailable";
-      muted.textContent = `${unavailable} field${unavailable === 1 ? "" : "s"} not filterable (sensitive or too broad)`;
-      muted.title = (filters.unavailable_filters || [])
-        .map(item => `${item.field}: ${item.reason}`).join("\n");
-      strip.append(muted);
-    }
-  }
-  if (!strip.childElementCount) return;
-  section.append(strip);
-  section.hidden = false;
-  hydrateIcons(section);
-}
-
 function downloadCsv(columns, rows) {
   if (!columns.length) return;
   const escape = (value) => {
@@ -2694,7 +2675,8 @@ function summarizeRun(run) {
 
 async function refreshHistory() {
   try {
-    state.history = await api(`/api/history?session_id=${encodeURIComponent(sessionId)}&limit=50`);
+    state.history = (await api(`/api/history?session_id=${encodeURIComponent(sessionId)}&limit=50`))
+      .filter(run => run.db_id === $("#databaseSelect").value);
     renderHistory();
   } catch {
     state.history = [];
@@ -2752,8 +2734,8 @@ async function openRun(run) {
     const records = await api(`/api/history/${encodeURIComponent(run.run_id)}/turns?session_id=${encodeURIComponent(sessionId)}`);
     const record = records[records.length - 1];
     if (!record) return;
+    if (record.db_id !== $("#databaseSelect").value) throw new Error("This conversation belongs to another database.");
     await loadGlossary(record.db_id);
-    $("#databaseSelect").value = record.db_id;
     await loadDatabaseSchema();
     $("#messages").replaceChildren();
     for (const turn of records) {
@@ -2768,9 +2750,9 @@ async function openRun(run) {
 
 async function continueRun(runId, focus = true) {
   const savedState = await api(`/api/history/${encodeURIComponent(runId)}/continue?session_id=${encodeURIComponent(sessionId)}`, {method: "POST"});
+  if (savedState.db_id !== $("#databaseSelect").value) throw new Error("This conversation belongs to another database.");
   state.activeRunId = runId;
   state.restorePending = false;
-  $("#databaseSelect").value = savedState.db_id;
   renderHistory();
   if (focus) {
     $("#messageInput").placeholder = "Continue this conversation or correct the previous query…";
@@ -2948,12 +2930,21 @@ document.addEventListener("pointerdown", event => {
   if (activeInsight && !activeInsight.contains(event.target)) dismissInsight();
 });
 $("#clearHistory").addEventListener("click", async () => {
+  if (state.busy) return;
   try {
+    await api("/api/chat", {
+      method: "POST",
+      body: JSON.stringify({ session_id: sessionId, db_id: $("#databaseSelect").value, message: "Reset context" }),
+    });
     await api(`/api/history?session_id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
   } catch (error) { showError(`Could not clear history: ${error.message}`); return; }
   state.history = [];
   state.activeRunId = null;
   state.restorePending = false;
+  $("#messages").replaceChildren();
+  $("#emptyState").hidden = false;
+  $("#threadIntro").hidden = true;
+  $("#threadBreadcrumb").textContent = "Live database";
   renderHistory();
 });
 
@@ -2975,12 +2966,6 @@ $("#resetButton").addEventListener("click", async () => {
 
 initialize();
 
-$("#databaseSelect").addEventListener("change", async () => {
-  state.activeRunId = null;
-  state.restorePending = false;
-  await loadDatabaseSchema();
-  await loadGlossary($("#databaseSelect").value);
-});
 document.querySelectorAll(".side-nav a[data-view]").forEach(link => {
   link.addEventListener("click", event => {
     event.preventDefault();

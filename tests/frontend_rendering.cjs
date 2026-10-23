@@ -9,13 +9,64 @@ const markup = fs.readFileSync(`${__dirname}/../web/index.html`, 'utf8');
 const explorerContext = vm.createContext({window: {}});
 vm.runInContext(fs.readFileSync(`${__dirname}/../web/chart_explorer.js`, 'utf8'), explorerContext);
 const explorer = explorerContext.window.QueryflowChartExplorer;
-test('database and connection live in the header; composer keeps voice controls but no model selectors', () => {
+const filtersContext = vm.createContext({window: {}});
+vm.runInContext(fs.readFileSync(`${__dirname}/../web/query_filters.js`, 'utf8'), filtersContext);
+const queryFilters = filtersContext.window.QueryflowFilters;
+test('query filter controls use selected schema and verified catalog, not profile samples', () => {
+  const body = {
+    resolved_question: 'Show orders by country and date',
+    generation: {model_context: {tables: {orders: {columns: {country: {}, order_date: {}}}}}},
+    suggested_filters: {
+      sql_filters: [
+        {field: 'orders.country', table: 'orders', column: 'country', exec_mode: 'SQL_FILTER'},
+        {field: 'users.region', table: 'users', column: 'region', exec_mode: 'SQL_FILTER'},
+      ],
+      client_filters: [{field: 'order_date', control: 'date_range', exec_mode: 'CLIENT_FILTER'}],
+    },
+  };
+  assert.deepEqual(Array.from(queryFilters.relevantFields(body), item => item.field),
+    ['orders.country']);
+  assert.deepEqual(Array.from(queryFilters.selectedValues({filters: [
+    {operand: 'orders.country', operator: 'IN', value: ['DE', 'FR']},
+  ]}, 'orders.country')), ['DE', 'FR']);
+  assert.ok(source.includes('body.suggested_filters?.applied_values?.[field.field]'));
+  assert.ok(markup.includes('class="query-filter-bar"'));
+  assert.ok(source.includes('/filter-values?table='));
+  assert.ok(source.includes('/analytics-capabilities'));
+});
+test('query filter changes rerun the governed conversation and never mutate chart rows alone', () => {
+  const prompt = queryFilters.changePrompt([
+    {kind: 'values', field: 'orders.country', values: ['DE', "O'Reilly"]},
+  ]);
+  assert.ok(prompt.includes('"orders.country"'));
+  assert.ok(prompt.includes('"O\'Reilly"'));
+  assert.ok(prompt.includes('one validated read-only SQL query'));
+  const bar = source.slice(source.indexOf('function wireQueryFilterBar('), source.indexOf('async function appendAssistant('));
+  assert.ok(bar.includes('sendFromAnswer(runId, prompt)'));
+  assert.ok(bar.includes('result?.generation?.accepted'));
+  assert.ok(bar.includes('Updating query and results'));
+  assert.ok(bar.includes('Removing query filters'));
+  assert.ok(bar.includes('No matching values'));
+  assert.ok(!bar.includes('article._setChartViewRowFilters'));
+});
+test('success badge is hidden and plot choices are centered inside the answer', () => {
+  assert.ok(source.includes('if (accepted && status !== "CHART UNAVAILABLE") { pill.hidden = true;'));
+  const section = markup.split('<div class="chart-section"')[1].split('<div class="chart-slot"')[0];
+  assert.ok(section.includes('class="recommended-plots"'));
+  assert.ok(section.indexOf('class="recommended-plots"') > section.indexOf('</header>'));
+  assert.ok(styles.includes('.recommended-plots { display: flex; align-items: center; justify-content: center;'));
+  assert.ok(source.includes('body.chart_recommendations'));
+});
+test('database is configured privately and the header hides the session ID', () => {
   const composer = markup.split('<form class="composer"')[1].split('</form>')[0];
   const header = markup.split('<header class="topbar">')[1].split('</header>')[0];
-  for (const id of ['databaseSelect', 'connectionCard', 'healthStatus', 'sessionId']) {
+  for (const id of ['databaseSelect', 'connectionCard', 'healthStatus']) {
     assert.ok(header.includes(`id="${id}"`), `${id} is missing from the header`);
     assert.ok(!composer.includes(`id="${id}"`), `${id} should not remain in the composer`);
   }
+  assert.ok(header.includes('id="databaseSelect" hidden'));
+  assert.ok(!markup.includes('id="sessionId"'));
+  assert.ok(source.includes('item.db_id === uiConfig.default_db_id'));
   for (const id of ['voiceButton', 'sendButton']) {
     assert.ok(composer.includes(`id="${id}"`), `${id} is missing from the composer`);
   }
@@ -25,12 +76,27 @@ test('database and connection live in the header; composer keeps voice controls 
   assert.ok(!markup.includes('id="heroExamples"'));
   assert.ok(!markup.includes('Enter to send'));
 });
-test('suggested row filters share chart state and zero matches stay empty', () => {
+test('empty success responses clear history and Clear resets the visible conversation', async () => {
+  const apiSource = source.slice(source.indexOf('async function api('), source.indexOf('async function initialize('));
+  let status = 204;
+  const apiContext = vm.createContext({fetch: async () => ({ok: true, status, text: async () => ''})});
+  vm.runInContext(`${apiSource}\nglobalThis.testApi = api;`, apiContext);
+  assert.equal(await apiContext.testApi('/api/history', {method: 'DELETE'}), null);
+  status = 200;
+  assert.equal(await apiContext.testApi('/api/history', {method: 'DELETE'}), null);
+  const clear = source.slice(source.indexOf('$("#clearHistory").addEventListener('), source.indexOf('$("#resetButton").addEventListener('));
+  assert.ok(clear.includes('$("#messages").replaceChildren()'));
+  assert.ok(clear.includes('$("#emptyState").hidden = false'));
+  assert.ok(clear.includes('state.history = []'));
+  const chartClear = source.slice(source.indexOf('section.querySelector(".chart-clear-filter").addEventListener('),
+    source.indexOf('section.querySelector(".chart-reset-zoom").addEventListener('));
+  assert.ok(chartClear.includes('reset();'));
+});
+test('display row filters share chart state and zero matches stay empty', () => {
   assert.ok(source.includes('article._setChartViewRowFilters = filters => article._chartViewState.setRowFilters(filters)'));
   assert.ok(source.includes('return filtered;'));
   assert.ok(!source.includes('return filtered.length ? filtered : rows;'));
-  assert.ok(source.includes('suggestionValueMenu(anchor, item, payload.values.slice(0, 25), article, runId);'));
-  assert.ok(!source.includes('placeInsight(anchor, suggestionValueMenu('));
+  assert.ok(!source.includes('renderBackendSuggestions('));
 });
 test('browser checks exact environment model pair and sends no model overrides', () => {
   const initialize = source.slice(source.indexOf('async function initialize('), source.indexOf('function setHealth('));
@@ -236,6 +302,85 @@ test('ECharts uses the verified histogram bin column', () => {
   const option = context.window.QueryflowECharts.buildOption(spec);
   assert.deepEqual([...option.xAxis.data], ['10', '20']);
 });
+test('ECharts preserves all 50 points in chronological order and exposes zoom', () => {
+  const dates = Array.from({length: 50}, (_, index) => ({
+    Date: new Date(Date.UTC(2026, 0, index + 1)).toISOString().slice(0, 10),
+    Revenue: index,
+  })).reverse();
+  const option = context.window.QueryflowECharts.buildOption({chart_type: 'line',
+    x: 'Date', y: 'Revenue', time_format: 'day', data: dates});
+  assert.equal(option.series[0].data.length, 50);
+  assert.equal(option.series[0].data[0], 0);
+  assert.equal(option.series[0].data[49], 49);
+  assert.equal(option.dataZoom.length, 2);
+});
+test('ECharts renders missing points as gaps, keeps zero and negative values, and rejects unsafe stacks', () => {
+  const base = {x: 'Month', y: 'Revenue', time_format: 'month', data: [
+    {Month: '2026-01', Revenue: 0}, {Month: '2026-02', Revenue: null},
+    {Month: '2026-03', Revenue: -2},
+  ]};
+  const option = context.window.QueryflowECharts.buildOption({...base, chart_type: 'line'});
+  assert.deepEqual([...option.series[0].data], [0, null, -2]);
+  assert.equal(option.yAxis.scale, false);
+  assert.notEqual(option.tooltip.valueFormatter(0.00000002), '0');
+  assert.equal(context.window.QueryflowECharts.buildOption({...base, chart_type: 'stacked_bar', series: 'Country'}), null);
+  const constant = context.window.QueryflowECharts.buildOption({...base, chart_type: 'bar', data: [
+    {Month: '2026-01', Revenue: 0}, {Month: '2026-02', Revenue: 0},
+  ]});
+  assert.deepEqual([...constant.series[0].data], [0, 0]);
+  assert.equal(constant.yAxis.scale, false);
+});
+test('chart explorer refuses an axis switch that would silently drop separate rows', () => {
+  const spec = {chart_type: 'grouped_bar', x: 'Month', y: 'Revenue', series: 'Country',
+    source_columns: ['Month', 'Country', 'Revenue'], data: [
+      {Month: 'Jan', Country: 'DE', Revenue: 10},
+      {Month: 'Jan', Country: 'FR', Revenue: 20},
+    ]};
+  assert.equal(explorer.apply(spec, {series: ''}), null);
+  assert.equal(spec.data.length, 2);
+});
+test('date-range controls reject impossible dates instead of guessing their order', () => {
+  assert.equal(explorer.chronological('2026-02-31'), null);
+  assert.equal(explorer.chronological('202613'), null);
+  assert.ok(explorer.chronological('2026-02-28') < explorer.chronological('2026-03-01'));
+});
+test('answer chart omits redundant source explanation and keeps narrow layout rules', () => {
+  assert.ok(!markup.includes('class="chart-details"'));
+  assert.ok(!markup.includes('class="chart-active-view"'));
+  assert.ok(!source.includes('Based on ${spec.source_row_count'));
+  assert.ok(styles.includes('.chart-slot-ec, .chart-slot-plotly { height: 320px'));
+  assert.ok(source.includes('max_rows: state.pendingVizRequest ? 500 : 100'));
+  assert.ok(source.includes('source_row_count === generation.rows?.length'));
+});
+test('ECharts resizes with its container and cleans up responsive observers', () => {
+  let observed, disconnected = false, resizeCalls = 0, disposed = false;
+  const oldObserver = context.ResizeObserver;
+  const oldEcharts = context.window.echarts;
+  const oldAdd = context.window.addEventListener;
+  const oldRemove = context.window.removeEventListener;
+  context.ResizeObserver = class {
+    constructor(callback) { this.callback = callback; }
+    observe(node) { observed = node; this.callback(); }
+    disconnect() { disconnected = true; }
+  };
+  context.window.echarts = {init: () => ({setOption() {}, resize() { resizeCalls++; },
+    dispose() { disposed = true; }, on() {}})};
+  context.window.addEventListener = () => {};
+  context.window.removeEventListener = () => {};
+  const container = {};
+  const mounted = context.window.QueryflowECharts.render(container, {chart_spec: {
+    chart_type: 'bar', x: 'Category', y: 'Value', data: [{Category: 'A', Value: 2}],
+  }});
+  assert.equal(observed, container);
+  assert.equal(resizeCalls, 1);
+  mounted.dispose();
+  assert.equal(disconnected, true);
+  assert.equal(disposed, true);
+  context.ResizeObserver = oldObserver;
+  context.window.echarts = oldEcharts;
+  context.window.addEventListener = oldAdd;
+  context.window.removeEventListener = oldRemove;
+});
 test('eight-column complete results offer compatible chart alternatives and metrics', () => {
   const rows = ['2026-01', '2026-02'].flatMap((Month, index) => ['DE', 'FR'].map((Country, group) => ({
     Month, Country, Revenue: 100 + index + group, Cost: 30 + index, Profit: 70 + group,
@@ -288,15 +433,18 @@ test('stack recommendations reject ratios and accept complete additive time seri
   assert.ok([...explorer.choices({...base, y: 'Revenue'})].includes('stacked_bar'));
   assert.ok(![...explorer.choices({...base, y: 'ConversionRate'})].includes('stacked_bar'));
 });
-test('time zoom counts unique chronological points and excludes ordinary categories', () => {
+test('zoom counts unique positions and also handles dense ordinary categories', () => {
   const make = (count, time) => ({chart_type: time ? 'line' : 'bar', x: 'Period', y: 'Value',
     time_format: time ? 'day' : 'raw', data: Array.from({length: count}, (_, index) => ({
       Period: time ? new Date(Date.UTC(2026, 0, index + 1)).toISOString().slice(0, 10) : `Group ${index}`,
       Value: index + 1,
     }))});
-  assert.equal(context.window.QueryflowECharts.buildOption(make(25, true)).dataZoom.length, 0);
+  assert.equal(context.window.QueryflowECharts.buildOption(make(2, true)).dataZoom.length, 0);
+  assert.equal(context.window.QueryflowECharts.buildOption(make(25, true)).dataZoom.length, 1);
   assert.equal(context.window.QueryflowECharts.buildOption(make(26, true)).dataZoom.length, 2);
-  assert.equal(context.window.QueryflowECharts.buildOption(make(30, false)).dataZoom.length, 0);
+  assert.equal(context.window.QueryflowECharts.buildOption(make(30, false)).dataZoom.length, 2);
+  assert.equal(context.window.QueryflowECharts.buildOption({...make(30, false), chart_type: 'horizontal_bar'}).dataZoom.length, 2);
+  assert.ok(!fs.readFileSync(`${__dirname}/../web/echarts_view.js`, 'utf8').includes('spec.chart_type !== "horizontal_bar"'));
   const multi = make(26, true);
   multi.chart_type = 'multi_line'; multi.series = 'Country';
   multi.data = multi.data.flatMap(row => [{...row, Country: 'DE'}, {...row, Country: 'FR'}]);
@@ -347,11 +495,13 @@ test('two-finger pinch zooms eligible time series without blocking ordinary touc
   assert.deepEqual(removed.sort(), ['touchcancel', 'touchend', 'touchmove', 'touchstart']);
   const shortListeners = new Map();
   const shortContainer = {...container, addEventListener: (name, callback) => shortListeners.set(name, callback)};
-  context.window.QueryflowECharts.render(shortContainer, {chart_spec: {...spec, data: spec.data.slice(0, 25)}}).dispose();
-  assert.equal(shortListeners.size, 0, 'short series retain normal touch behavior');
+  context.window.QueryflowECharts.render(shortContainer, {chart_spec: {...spec, data: spec.data.slice(0, 2)}}).dispose();
+  assert.equal(shortListeners.size, 0, 'one- or two-point charts retain normal touch behavior');
 });
 test('chart UI stays within the response; visual controls do not call query APIs', () => {
-  assert.ok(markup.includes('class="chart-suggestions"'));
+  assert.ok(markup.includes('class="chart-kinds"'));
+  assert.ok(!markup.includes('class="chart-suggestions"'));
+  assert.ok(!markup.includes('class="backend-suggestions"'));
   assert.ok(markup.includes('class="chart-filter-panel"'));
   assert.ok(markup.includes('class="chart-category-filter" multiple'));
   assert.ok(markup.includes('class="chart-reset-zoom"'));
@@ -359,11 +509,22 @@ test('chart UI stays within the response; visual controls do not call query APIs
   assert.ok(!chartWiring.includes('await api('));
   assert.ok(!chartWiring.includes('send('));
 });
+test('conversation spacing is compact and chart switching stays in the header', () => {
+  assert.ok(styles.includes('.user-message { margin-bottom: 12px; }'));
+  assert.ok(styles.includes('margin-top: 8px; padding: 4px'));
+  const wiring = source.slice(source.indexOf('function wireChartSection('), source.indexOf('function toast('));
+  assert.ok(wiring.includes('kinds.append(button)'));
+  assert.ok(!wiring.includes('section.querySelector(".chart-suggestions")'));
+  const answer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function actionButton('));
+  assert.ok(!answer.includes('renderBackendSuggestions('));
+});
 test('filter parameters use compact accessible label-value chips', () => {
-  for (const name of ['chart-x-control', 'chart-series-control', 'chart-start-control',
-    'chart-end-control', 'chart-top-control']) {
+  for (const name of ['chart-x-control', 'chart-series-control', 'chart-top-control']) {
     assert.ok(markup.includes(`chart-parameter-chip ${name}`));
   }
+  assert.ok(!markup.includes('chart-start-control'));
+  assert.ok(!markup.includes('chart-end-control'));
+  assert.ok(source.includes('item.db_id === uiConfig.default_db_id'));
   assert.ok(markup.includes('chart-parameter-chip chart-choice-chip chart-category-control'));
   assert.ok(markup.includes('chart-parameter-chip chart-choice-chip chart-measures-control'));
   assert.ok(markup.includes('class="chart-query-parameters"'));
@@ -598,6 +759,19 @@ test('scatter-point investigation uses the observed x value when ECharts omits i
   article._echart.select({name: '', value: [32, 104]});
   assert.deepEqual(observations, [{heading: 'age: 32', runId: 'source-run'}]);
 });
+test('combined Year-Month chart click drills into original columns, not a synthetic SQL field', () => {
+  let options;
+  context.insightMenu = (_anchor, _heading, _description, items) => { options = items; };
+  const article = {_echart: {onSelect(callback) { this.select = callback; }},
+    querySelector: () => new Element()};
+  context.attachChartInvestigations(article, {chart_spec: {
+    chart_type: 'line', x: 'Year-Month', x_components: ['Year', 'Month'], y: 'Revenue',
+    data: [{Year: 2025, Month: 12, 'Year-Month': '2025-12', Revenue: 10}],
+  }}, 'source-run');
+  article._echart.select({rawX:'2025-12'});
+  assert.match(options[0].prompt, /"Year" = 2025 and "Month" = 12/);
+  assert.ok(!options[0].prompt.includes('"Year-Month" ='));
+});
 test('historical investigation restores its source run before sending', async () => {
   const calls = [];
   context.state = {activeRunId: 'latest'};
@@ -753,4 +927,10 @@ test('history summaries expose the original question and truthful status', () =>
   assert.equal(summary.title, 'How many orders per customer?');
   assert.equal(summary.failed, true);
   assert.match(summary.subtitle, /ADD_FILTER · 0 rows · failed · /);
+});
+
+test('independent questions offer a new-conversation action instead of continuing the thread', () => {
+  assert.ok(source.includes('body.clarification_required && body.operation === "NEW_QUERY"'));
+  assert.ok(source.includes('actionButton("Start new conversation"'));
+  assert.ok(source.includes('$("#resetButton").click()'));
 });

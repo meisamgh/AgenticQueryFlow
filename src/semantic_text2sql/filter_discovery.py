@@ -12,6 +12,9 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from sqlglot import exp, parse_one
+from sqlglot.errors import ParseError
+
 from semantic_text2sql.models import (
     ColumnInfo,
     ColumnProfile,
@@ -29,6 +32,74 @@ _MULTI_SELECT_LIMIT = 12
 _DATE_NAME = r"(?:^|_)(?:date|time|month|year|week|quarter|day)(?:$|_)"
 
 _UNSAFE_NAME = r"(?:^|_)(?:id|code|uuid|guid|token|password|email|phone|address|ssn)(?:$|_)"
+
+
+def applied_sql_values(sql: str, schema: SchemaInfo) -> dict[str, list[str]]:
+    """Read only unambiguous literal equality/IN predicates in executed SQL.
+
+    This is UI preselection, not a claim that these are all SQL filters. Derived
+    predicates, functions, subquery values and ambiguous aliases are omitted.
+    """
+    try:
+        tree = parse_one(sql, read=schema.dialect)
+    except (ParseError, ValueError):
+        return {}
+    if tree is None:
+        return {}
+    known = {table.name: {column.name for column in table.columns} for table in schema.tables}
+    alias_to_table: dict[str, str | None] = {}
+    for table in tree.find_all(exp.Table):
+        if table.name not in known:
+            continue
+        alias = table.alias_or_name
+        if alias in alias_to_table and alias_to_table[alias] != table.name:
+            alias_to_table[alias] = None
+        else:
+            alias_to_table[alias] = table.name
+        alias_to_table[table.name] = table.name
+
+    def field_name(column: exp.Column) -> str | None:
+        if column.table:
+            table = alias_to_table.get(column.table)
+            return f"{table}.{column.name}" if table and column.name in known[table] else None
+        matches = [name for name, columns in known.items() if column.name in columns]
+        return f"{matches[0]}.{column.name}" if len(matches) == 1 else None
+
+    found: dict[str, list[str]] = {}
+    for where in tree.find_all(exp.Where):
+        for node in where.find_all(exp.EQ, exp.In):
+            parent = node.parent
+            unsafe_boolean_context = False
+            while parent is not None and parent is not where:
+                if isinstance(parent, (exp.Or, exp.Not)):
+                    unsafe_boolean_context = True
+                    break
+                parent = parent.parent
+            if unsafe_boolean_context:
+                continue
+            left = node.this
+            if not isinstance(left, exp.Column):
+                continue
+            field = field_name(left)
+            if field is None:
+                continue
+            if isinstance(node, exp.EQ):
+                literal = node.expression
+                values = (
+                    [literal.this]
+                    if isinstance(literal, exp.Literal) and literal.is_string else []
+                )
+            else:
+                values = [
+                    item.this for item in node.expressions
+                    if isinstance(item, exp.Literal) and item.is_string
+                ]
+                if len(values) != len(node.expressions):
+                    values = []
+            if values:
+                found.setdefault(field, [])
+                found[field].extend(value for value in values if value not in found[field])
+    return found
 
 
 def _result_control(name: str, distinct: int) -> str | None:
@@ -70,6 +141,7 @@ def discover_filters(
     truncated: bool,
     approved_tables: list[str] | None = None,
     profile: DatabaseProfile | None = None,
+    executed_sql: str | None = None,
 ) -> FilterCatalog:
     """Classify trustworthy filters from the result and verified metadata.
 
@@ -77,6 +149,8 @@ def discover_filters(
     client-filter that hides rows.
     """
     catalog = FilterCatalog()
+    if executed_sql:
+        catalog.applied_values = applied_sql_values(executed_sql, schema)
     result_columns = {
         name: index for index, name in enumerate(columns)
     }

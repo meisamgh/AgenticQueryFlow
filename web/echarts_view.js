@@ -27,9 +27,10 @@ window.QueryflowECharts = (function () {
     if (value == null || value === "") return "";
     const number = Number(value);
     if (!Number.isFinite(number)) return String(value);
+    if (!compact && number !== 0 && Math.abs(number) < 0.000001) return number.toExponential(3);
     return new Intl.NumberFormat(undefined, compact
       ? { notation: "compact", maximumFractionDigits: 1 }
-      : { maximumFractionDigits: 2 }).format(number);
+      : { maximumFractionDigits: Math.abs(number) > 0 && Math.abs(number) < 0.01 ? 12 : 6 }).format(number);
   }
   function label(value) { return String(value ?? ""); }
   function unique(values) { return [...new Set(values.map(label))]; }
@@ -39,10 +40,17 @@ window.QueryflowECharts = (function () {
       : /^\d{4}$/.test(raw) ? `${raw}-01-01`
       : /^\d{4}-\d{2}$/.test(raw) ? `${raw}-01` : raw;
   }
+  function dateStamp(value) {
+    const canonical = canonicalDate(value);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(canonical)) return null;
+    const stamp = Date.parse(`${canonical}T00:00:00Z`);
+    return Number.isFinite(stamp) && new Date(stamp).toISOString().slice(0, 10) === canonical
+      ? stamp : null;
+  }
   function friendlyDate(value, format) {
     if (format === "raw") return label(value);
-    const parsed = Date.parse(`${canonicalDate(value)}T00:00:00Z`);
-    if (!Number.isFinite(parsed)) return label(value);
+    const parsed = dateStamp(value);
+    if (parsed === null) return label(value);
     const options = format === "year" ? { year: "numeric" }
       : format === "month" ? { year: "numeric", month: "short" }
       : { year: "numeric", month: "short", day: "numeric" };
@@ -58,7 +66,9 @@ window.QueryflowECharts = (function () {
     const measures = Array.isArray(spec.y_measures) && spec.y_measures.length
       ? spec.y_measures : [y];
     if (!x || !y || data.some(row => !(x in row) || !(y in row))) return null;
-    if (measures.some(name => data.some(row => !(name in row) || row[name] == null || !Number.isFinite(Number(row[name]))))) return null;
+    const gapsAllowed = new Set(["line", "multi_line", "step_line", "area", "bar", "horizontal_bar", "grouped_bar"]);
+    if (measures.some(name => data.some(row => !(name in row)
+      || (row[name] == null ? !gapsAllowed.has(type) : !Number.isFinite(Number(row[name])))))) return null;
     const text = cssVar("--text", "#20212b");
     const muted = cssVar("--text-muted", "#5c6170");
     const border = cssVar("--border-strong", "#dcdbe2");
@@ -67,8 +77,10 @@ window.QueryflowECharts = (function () {
       animation: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
       color: palette(),
       textStyle: { color: text, fontFamily: "Inter, sans-serif" },
-      tooltip: { trigger: "item", renderMode: "richText", backgroundColor: cssVar("--sql-bg", "#1d2130"),
-        textStyle: { color: cssVar("--sql-text", "#dce4ff") } },
+      tooltip: { trigger: "item", renderMode: "richText", confine: true,
+        backgroundColor: cssVar("--sql-bg", "#1d2130"),
+        textStyle: { color: cssVar("--sql-text", "#dce4ff") },
+        valueFormatter: value => value == null ? "Missing" : formatNumber(value, false) },
       aria: { enabled: true, decal: { show: false } },
     };
     const format = value => formatNumber(value, compact);
@@ -123,26 +135,30 @@ window.QueryflowECharts = (function () {
         series: [{ type: "boxplot", data: data.map(box =>
           [box.min, box.q1, box.median, box.q3, box.max]) }] };
     }
-    const temporal = spec.time_format !== "raw" && data.every(row => Number.isFinite(Date.parse(
-      `${canonicalDate(row[x])}T00:00:00Z`)));
+    const temporal = spec.time_format !== "raw" && data.every(row => dateStamp(row[x]) !== null);
+    const numericOrdered = !temporal && ["line", "multi_line", "step_line", "area", "stacked_area"].includes(type)
+      && data.every(row => typeof row[x] === "number" && Number.isFinite(row[x]));
     const category = unique(data.map(row => row[x])).sort((a, b) => temporal
-      ? Date.parse(`${canonicalDate(a)}T00:00:00Z`) - Date.parse(`${canonicalDate(b)}T00:00:00Z`) : 0);
+      ? dateStamp(a) - dateStamp(b) : numericOrdered ? Number(a) - Number(b) : 0);
     const horizontal = type === "horizontal_bar";
     const numericX = ["scatter", "bubble"].includes(type);
     const grouped = ["multi_line", "stacked_area", "grouped_bar", "stacked_bar", "percent_stacked_bar"].includes(type);
     const lineType = ["line", "multi_line", "step_line", "area", "stacked_area"].includes(type);
-    const valueAxis = { type: "value", axisLabel: { formatter: format, color: muted },
+    const valueAxis = { type: "value", scale: false, axisLabel: { formatter: format, color: muted },
       splitLine: { lineStyle: { color: border, type: "dashed" } } };
+    const shortLabel = value => { const full = label(value); return full.length > 20 ? `${full.slice(0, 19)}…` : full; };
     const categoryAxis = { type: "category", data: category.map(value => friendlyDate(value, spec.time_format)),
-      name: spec.x_label, axisLabel: { color: muted, hideOverlap: true, rotate: category.length > 8 ? 30 : 0 } };
+      name: spec.x_label, axisLabel: { color: muted, hideOverlap: true,
+        formatter: shortLabel, rotate: !temporal && category.length > 8 ? 30 : 0 } };
     const option = { ...base,
       grid: { left: 35, right: 35, top: 35, bottom: 55, containLabel: true },
-      xAxis: horizontal ? valueAxis : numericX ? valueAxis : categoryAxis,
+      xAxis: horizontal ? valueAxis : numericX ? { ...valueAxis, name: spec.x_label } : categoryAxis,
       yAxis: horizontal ? categoryAxis : { ...valueAxis, name: spec.y_label },
-      dataZoom: temporal && category.length > 25 && !numericX
-        ? [{ type: "slider", xAxisIndex: 0, bottom: 12, height: 22, filterMode: "filter",
-          start: spec.zoom_start ?? 0, end: spec.zoom_end ?? 100 },
-        { type: "inside", xAxisIndex: 0, filterMode: "filter",
+      dataZoom: category.length > 2 && !numericX
+        ? [...(category.length > 25 ? [{ type: "slider", [horizontal ? "yAxisIndex" : "xAxisIndex"]: 0,
+          [horizontal ? "right" : "bottom"]: 12, [horizontal ? "width" : "height"]: 22,
+          filterMode: "filter", start: spec.zoom_start ?? 0, end: spec.zoom_end ?? 100 }] : []),
+        { type: "inside", [horizontal ? "yAxisIndex" : "xAxisIndex"]: 0, filterMode: "filter",
           start: spec.zoom_start ?? 0, end: spec.zoom_end ?? 100 }] : [],
       legend: { show: spec.legend !== false && (grouped || measures.length > 1), type: "scroll", top: 0, textStyle: { color: muted } },
       series: [],
@@ -155,6 +171,7 @@ window.QueryflowECharts = (function () {
       option.series = [{ type: "scatter", symbolSize: type === "bubble"
         ? item => Math.max(5, Math.min(45, Math.sqrt(Math.max(0, Number(item[2]))) * 3)) : 11,
       data: data.map(row => [row[x], row[y], type === "bubble" ? row[spec.size] : null]) }];
+      option.tooltip.formatter = point => `${spec.x_label || x}: ${formatNumber(point.value[0], false)}\n${spec.y_label || y}: ${formatNumber(point.value[1], false)}`;
     } else if (measures.length > 1 && !group && ["multi_line", "grouped_bar"].includes(type)) {
       option.series = measures.map(name => {
         const points = new Map(data.map(row => [label(row[x]), row[name]]));
@@ -184,7 +201,7 @@ window.QueryflowECharts = (function () {
       option.yAxis.name = "Share (%)";
       option.yAxis.max = 100;
     }
-    if (option.dataZoom.length) option.grid.bottom = 68;
+    if (option.dataZoom.some(item => item.type === "slider")) option.grid[horizontal ? "right" : "bottom"] = 68;
     return option;
   }
 
@@ -193,6 +210,7 @@ window.QueryflowECharts = (function () {
     const spec = presentation.chart_spec;
     const option = buildOption(spec);
     if (!option) return null;
+    const horizontal = spec.chart_type === "horizontal_bar";
     const chart = window.echarts.init(container, null, { renderer: "canvas" });
     chart.setOption(option);
     const pinchEnabled = option.dataZoom.length > 0;
@@ -207,11 +225,15 @@ window.QueryflowECharts = (function () {
       if (initialDistance < 8) return;
       const zoom = chart.getOption()?.dataZoom?.[0] || option.dataZoom[0];
       const bounds = container.getBoundingClientRect();
-      const midpoint = (event.touches[0].clientX + event.touches[1].clientX) / 2;
+      const midpoint = horizontal
+        ? (event.touches[0].clientY + event.touches[1].clientY) / 2
+        : (event.touches[0].clientX + event.touches[1].clientX) / 2;
       pinch = {
         distance: initialDistance,
         start: Number(zoom.start ?? 0), end: Number(zoom.end ?? 100),
-        anchor: Math.max(0, Math.min(1, (midpoint - bounds.left) / Math.max(1, bounds.width))),
+        anchor: Math.max(0, Math.min(1, horizontal
+          ? (midpoint - bounds.top) / Math.max(1, bounds.height)
+          : (midpoint - bounds.left) / Math.max(1, bounds.width))),
       };
     };
     const touchMove = event => {
@@ -255,8 +277,8 @@ window.QueryflowECharts = (function () {
         rawX: ["scatter", "bubble"].includes(spec.chart_type)
           ? spec.data[point.dataIndex]?.[spec.x]
           : [...new Set(spec.data.map(row => label(row[spec.x])))].sort((a, b) =>
-              spec.time_format !== "raw"
-                ? Date.parse(`${canonicalDate(a)}T00:00:00Z`) - Date.parse(`${canonicalDate(b)}T00:00:00Z`) : 0)[point.dataIndex],
+              spec.time_format !== "raw" && dateStamp(a) !== null && dateStamp(b) !== null
+                ? dateStamp(a) - dateStamp(b) : 0)[point.dataIndex],
       })); },
       onZoom(callback) { chart.on("datazoom", () => {
         const zoom = chart.getOption()?.dataZoom?.[0];

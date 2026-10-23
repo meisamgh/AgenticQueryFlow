@@ -16,7 +16,7 @@ import re
 from time import perf_counter
 from typing import Any
 
-from pydantic import Field, ValidationError
+from pydantic import Field
 
 from semantic_text2sql.models import (
     ChartRecommendations as ChartRecommendations,
@@ -30,13 +30,14 @@ from semantic_text2sql.models import (
 from semantic_text2sql.models import (
     RecommendedChart as RecommendedChart,
 )
-from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded
+from semantic_text2sql.runtime import RequestBudget
 from semantic_text2sql.visualization import (
     VisualizationError,
     VisualizationIntent,
     _column_roles,
     measure_unit,
     plan_chart,
+    requested_plot_columns,
 )
 
 _TIME_WORDS = re.compile(r"\bover\s+time\b|\btrend\b|\bgrowth\b", re.I)
@@ -50,9 +51,8 @@ _IDENTIFIER_NAME = re.compile(
 
 
 def _mentioned_measures(names: list[str], question: str) -> int:
-    return sum(
-        1 for name in names if re.search(rf"\b{re.escape(name)}\b", question, re.I)
-    )
+    return sum(1 for name in names if re.search(rf"\b{re.escape(name)}\b", question, re.I))
+
 
 _TYPE_BASE: dict[ChartType, float] = {
     "line": 0.85,
@@ -88,8 +88,7 @@ def _identifier_like(name: str, values: list[Any]) -> bool:
     if len(numeric_values) == len(values) and len(numeric_values) > 2:
         distinct = sorted(set(numeric_values))
         return (
-            len(distinct) == len(numeric_values)
-            and distinct[-1] - distinct[0] == len(distinct) - 1
+            len(distinct) == len(numeric_values) and distinct[-1] - distinct[0] == len(distinct) - 1
         )
     return False
 
@@ -114,6 +113,7 @@ def _intent_for(candidate: RecommendedChart) -> dict[str, Any]:
         "requested": True,
         "chart_type": candidate.chart_type,
         "x": candidate.x,
+        "x_components": candidate.x_components,
         "y": candidate.y,
         "series": candidate.series,
         "y_measures": candidate.y_measures,
@@ -130,6 +130,19 @@ def _mentioned(columns: list[str], text: str) -> str | None:
         )
     ]
     return max(matches, key=len) if matches else None
+
+
+def _chart_matches_request(
+    chart: RecommendedChart, requested: set[str], *, strict: bool = False
+) -> bool:
+    if not requested:
+        return True
+    used = {chart.y, *chart.y_measures}
+    used.update(chart.x_components or [chart.x])
+    if chart.series:
+        used.add(chart.series)
+    # A named plot column must be displayed, not silently replaced by a different one.
+    return requested <= used and (not strict or used <= requested)
 
 
 def recommend_charts(
@@ -150,6 +163,10 @@ def recommend_charts(
         return None
     named_rows = [dict(zip(columns, row, strict=True)) for row in rows]
     numeric, temporal, category = _column_roles(columns, rows)
+    requested_columns = requested_plot_columns(question, columns)
+    strict_columns = bool(re.search(r"\b(?:plot|chart|visuali[sz]e|draw)\b", question, re.I)
+                          and len(requested_columns) >= 2
+                          and requested_columns.intersection(numeric))
     mentioned = _mentioned(columns, question)
     measures = [
         name
@@ -157,6 +174,16 @@ def recommend_charts(
         if not _identifier_like(name, [row[columns.index(name)] for row in rows])
     ]
     usable = measures or numeric
+    year_column = next(
+        (name for name in columns if re.fullmatch(r"(?:calendar_)?year", name, re.I)), None
+    )
+    month_column = next(
+        (name for name in columns if re.fullmatch(r"(?:calendar_)?month", name, re.I)), None
+    )
+    if year_column and month_column:
+        usable = [name for name in usable if name not in {year_column, month_column}]
+        if not usable:
+            usable = [name for name in numeric if name not in {year_column, month_column}]
     if not usable:
         return None
 
@@ -183,6 +210,7 @@ def recommend_charts(
         y: str | None,
         *,
         series: str | None = None,
+        x_components: list[str] | None = None,
         y_measures: list[str] | None = None,
         boost: float = 0.0,
         reason: str = "",
@@ -202,6 +230,7 @@ def recommend_charts(
                 RecommendedChart(
                     chart_type=chart_type,
                     x=x or y,
+                    x_components=list(x_components or []),
                     y=y,
                     series=series,
                     y_measures=list(y_measures or []),
@@ -212,6 +241,16 @@ def recommend_charts(
             )
         )
 
+    if year_column and month_column:
+        primary = primary_measure(mentioned)
+        add_candidate(
+            "line",
+            "Year-Month",
+            primary,
+            x_components=[year_column, month_column],
+            boost=0.45,
+            reason="Year and Month form a verified monthly timeline without aggregating rows",
+        )
     if temporal:
         time_axis = temporal[0]
         clusters = _measure_clusters(usable)
@@ -222,9 +261,7 @@ def recommend_charts(
         )
         primary = primary_measure(mentioned)
         measure_boost = (
-            0.35
-            if wide_family and _mentioned_measures(wide_family, question) >= 2
-            else 0.1
+            0.35 if wide_family and _mentioned_measures(wide_family, question) >= 2 else 0.1
         )
         if wide_family and primary in wide_family:
             add_candidate(
@@ -277,22 +314,22 @@ def recommend_charts(
                     primary,
                     series=top_category,
                     boost=0.1,
-                    reason=
-                    "grouped bars isolate each "
+                    reason="grouped bars isolate each "
                     f"{top_category.replace('_', ' ')} within every period",
                 )
-                if (
-                    _nonnegative(named_rows, primary)
-                    and measure_unit(primary) not in {"ratio", None}
-                ):
+                if _nonnegative(named_rows, primary) and measure_unit(primary) not in {
+                    "ratio",
+                    None,
+                }:
                     add_candidate(
                         "stacked_area",
                         time_axis,
                         primary,
                         series=top_category,
-                        reason=
-                        f"stacking additive contributions per {top_category.replace('_', ' ')} "
-                        "keeps the total meaningful",
+                        reason=(
+                            "stacking additive contributions per "
+                            f"{top_category.replace('_', ' ')} keeps the total meaningful"
+                        ),
                     )
     elif category and len(usable) >= 1:
         axis = category[0]
@@ -315,9 +352,7 @@ def recommend_charts(
             default=None,
         )
         measure_boost = (
-            0.35
-            if wide_family and _mentioned_measures(wide_family, question) >= 2
-            else 0.1
+            0.35 if wide_family and _mentioned_measures(wide_family, question) >= 2 else 0.1
         )
         if wide_family and primary in wide_family:
             add_candidate(
@@ -400,7 +435,7 @@ def recommend_charts(
         add_candidate(
             "histogram",
             None,
-            usable[0],
+            primary_measure(mentioned),
             boost=boost,
             reason="an observation-distribution chart is the only faithful view",
         )
@@ -411,16 +446,19 @@ def recommend_charts(
         key = (
             candidate.chart_type,
             candidate.x,
+            tuple(candidate.x_components),
             candidate.y,
             candidate.series,
             tuple(candidate.y_measures),
         )
-        if key in seen:
+        if key in seen or not _chart_matches_request(
+            candidate, requested_columns, strict=strict_columns
+        ):
             continue
         try:
             spec = plan_chart(
                 VisualizationIntent(**_intent_for(candidate)),
-                question=question,
+                question="",
                 columns=columns,
                 rows=rows,
                 truncated=truncated,
@@ -448,15 +486,13 @@ def build_recommendation_intent(recommendation: RecommendedChart) -> Visualizati
 # --- optional LLM candidate-generation stage ---------------------------------
 
 VIZ_RECOMMENDER_LLM_ENABLED_ENV = "TEXT2SQL_VIZ_RECOMMENDER_LLM_ENABLED"
-VIZ_RECOMMENDER_LLM_ENABLED = os.environ.get(
-    VIZ_RECOMMENDER_LLM_ENABLED_ENV, "false"
-).casefold() == "true"
+VIZ_RECOMMENDER_LLM_ENABLED = (
+    os.environ.get(VIZ_RECOMMENDER_LLM_ENABLED_ENV, "true").casefold() == "true"
+)
 
 
 def viz_recommender_llm_enabled() -> bool:
-    return os.environ.get(
-        VIZ_RECOMMENDER_LLM_ENABLED_ENV, "false"
-    ).casefold() == "true"
+    return os.environ.get(VIZ_RECOMMENDER_LLM_ENABLED_ENV, "true").casefold() == "true"
 
 
 class LLMChartProposal(StrictModel):
@@ -464,6 +500,7 @@ class LLMChartProposal(StrictModel):
 
     chart_type: ChartType
     x: str | None = None
+    x_components: list[str] = Field(default_factory=list, max_length=2)
     y: str | None = None
     y_measures: list[str] = Field(default_factory=list, max_length=8)
     series: str | None = None
@@ -474,24 +511,27 @@ class LLMChartProposals(StrictModel):
     """Model output contract: never JavaScript, never ECharts options, never SQL."""
 
     primary_chart: LLMChartProposal
-    alternative_charts: list[LLMChartProposal] = Field(
-        default_factory=list, max_length=3
-    )
+    alternative_charts: list[LLMChartProposal] = Field(default_factory=list, max_length=3)
 
 
 _VIZ_PROMPT = """Propose faithful charts for one executed analytical result.
 Return ONLY one JSON object with exactly these keys:
-{{"primary_chart": {{"chart_type": str, "x": str|null, "y": str,
+{{"primary_chart": {{"chart_type": str, "x": str|null, "x_components": [str], "y": str,
 "y_measures": [str], "series": str|null, "reason": str}},
 "alternative_charts": [same shape, up to 3]}}
 Allowed chart_type values: {chart_types}.
 Rules:
 - Only use columns from "Columns"; never invent columns, values or measures.
+- Use only explicitly requested plot columns when the question names two or more.
+- For separate Year and Month columns, you may set x="Year-Month" and
+  x_components=["Year", "Month"] for a monthly time axis. Otherwise x_components=[].
+- Do not aggregate, fill gaps, or compute a new measure.
 - y and every y_measures entry must be a numeric measure column.
 - Prefer multiple measures only when their units are comparable (see "Units").
 - Explain the business reason in one short sentence ("reason").
 - No JavaScript, no ECharts options, no SQL.
 Question: {question}
+Required chart type (if specified by the user): {required_chart_type}
 Columns (name: role, unit, distinct values): {profile}
 Row count: {rows_count}
 Bounded sample (first rows): {sample}
@@ -507,9 +547,11 @@ def _result_profile(
     lines: list[str] = []
     for name in columns:
         if name in numeric:
-            role = "measure" if not _identifier_like(
-                name, [row[name] for row in named_rows]
-            ) else "identifier-like numeric"
+            role = (
+                "measure"
+                if not _identifier_like(name, [row[name] for row in named_rows])
+                else "identifier-like numeric"
+            )
         elif name in temporal:
             role = "temporal"
         elif name in category:
@@ -531,12 +573,24 @@ def _validated_rank_chart(
     question: str,
     truncated: bool,
     score: float,
+    required_chart_type: ChartType | None = None,
 ) -> RecommendedChart | None:
     """Validate one LLM proposal through the deterministic chart pipeline."""
     named_columns = set(columns)
+    if required_chart_type is not None and proposal.chart_type != required_chart_type:
+        return None
+    requested_columns = requested_plot_columns(question, columns)
+    components = proposal.x_components
+    if components and (len(components) != 2 or proposal.x != "Year-Month"):
+        return None
     referenced = {
         value
-        for value in [proposal.x, proposal.y, proposal.series, *proposal.y_measures]
+        for value in [
+            proposal.y,
+            proposal.series,
+            *proposal.y_measures,
+            *(components or ([proposal.x] if proposal.x is not None else [])),
+        ]
         if value is not None
     }
     if not referenced <= named_columns:
@@ -546,6 +600,7 @@ def _validated_rank_chart(
     candidate = RecommendedChart(
         chart_type=proposal.chart_type,
         x=proposal.x or proposal.y,
+        x_components=list(components),
         y=proposal.y,
         series=proposal.series,
         y_measures=list(proposal.y_measures),
@@ -553,19 +608,22 @@ def _validated_rank_chart(
         reason=proposal.reason,
         score=score,
     )
+    strict_columns = bool(re.search(r"\b(?:plot|chart|visuali[sz]e|draw)\b", question, re.I)
+                          and len(requested_columns) >= 2
+                          and requested_columns.intersection(_column_roles(columns, rows)[0]))
+    if not _chart_matches_request(candidate, requested_columns, strict=strict_columns):
+        return None
     try:
         spec = plan_chart(
             build_recommendation_intent(candidate),
-            question=question,
+            question="",
             columns=columns,
             rows=rows,
             truncated=truncated,
         )
     except VisualizationError:
         return None
-    return candidate.model_copy(
-        update={"title": spec.title, "score": round(score, 3)}
-    )
+    return candidate.model_copy(update={"title": spec.title, "score": round(score, 3)})
 
 
 async def refine_charts_with_model(  # noqa: ANN201 - union return
@@ -579,6 +637,7 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     truncated: bool = False,
     timeout_seconds: float = 12.0,
     budget: RequestBudget | None = None,
+    required_chart_type: ChartType | None = None,
 ) -> tuple[ChartRecommendations | None, TokenUsage, int]:
     """One bounded model call proposing charts for an executed result.
 
@@ -594,6 +653,7 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     prompt = _VIZ_PROMPT.format(
         chart_types=", ".join(sorted(_TYPE_BASE)),
         question=question,
+        required_chart_type=required_chart_type or "model may choose",
         profile=profile,
         rows_count=len(rows),
         sample=sample,
@@ -614,17 +674,7 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
             )
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw).strip(), flags=re.IGNORECASE)
         parsed = LLMChartProposals.model_validate(json.loads(text))
-    except (
-        ValueError,
-        TypeError,
-        AttributeError,
-        ValidationError,
-        json.JSONDecodeError,
-        OSError,
-        TimeoutError,
-        asyncio.exceptions.TimeoutError,
-        RequestBudgetExceeded,
-    ):
+    except Exception:  # noqa: BLE001 - optional chart advice never aborts a completed query
         return None, usage, round((perf_counter() - started) * 1000)
 
     primary = _validated_rank_chart(
@@ -634,11 +684,21 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
         question=question,
         truncated=truncated,
         score=1.0,
+        required_chart_type=required_chart_type,
     )
     if primary is None:
         return None, usage, round((perf_counter() - started) * 1000)
     alternatives: list[RecommendedChart] = []
-    seen = {(primary.chart_type, primary.x, primary.y, primary.series, tuple(primary.y_measures))}
+    seen = {
+        (
+            primary.chart_type,
+            primary.x,
+            tuple(primary.x_components),
+            primary.y,
+            primary.series,
+            tuple(primary.y_measures),
+        )
+    }
     llm_score = 0.95
     for proposal in parsed.alternative_charts:
         validated = _validated_rank_chart(
@@ -648,12 +708,14 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
             question=question,
             truncated=truncated,
             score=llm_score,
+            required_chart_type=required_chart_type,
         )
         if validated is None:
             continue
         key = (
             validated.chart_type,
             validated.x,
+            tuple(validated.x_components),
             validated.y,
             validated.series,
             tuple(validated.y_measures),
@@ -681,12 +743,26 @@ def merge_recommendations(
         return model_recommended
     merged_alternatives = [model_recommended.primary_chart, *model_recommended.alternative_charts]
     used = {
-        (item.chart_type, item.x, item.y, item.series, tuple(item.y_measures))
+        (
+            item.chart_type,
+            item.x,
+            tuple(item.x_components),
+            item.y,
+            item.series,
+            tuple(item.y_measures),
+        )
         for item in merged_alternatives
     }
     backfill = [deterministic.primary_chart, *deterministic.alternative_charts]
     for item in backfill:
-        key = (item.chart_type, item.x, item.y, item.series, tuple(item.y_measures))
+        key = (
+            item.chart_type,
+            item.x,
+            tuple(item.x_components),
+            item.y,
+            item.series,
+            tuple(item.y_measures),
+        )
         if key in used or len(merged_alternatives) >= 4:
             continue
         used.add(key)
@@ -708,7 +784,7 @@ def materialize_recommendation(
     """Convert a recommendation into the validated chart contract."""
     return plan_chart(
         build_recommendation_intent(recommendation),
-        question=question,
+        question="",
         columns=columns,
         rows=rows,
         truncated=truncated,

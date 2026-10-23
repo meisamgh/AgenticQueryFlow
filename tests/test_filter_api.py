@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.api import create_app
+from semantic_text2sql.filter_discovery import applied_sql_values
 from semantic_text2sql.models import SchemaInfo
 from semantic_text2sql.postgres import PostgresRegistry
 
@@ -20,13 +21,45 @@ class FixedSQLModel:
         return self.sql, 1
 
 
-def _client(registry, monkeypatch, tmp_path):  # type: ignore[no-untyped-def]
+def test_applied_filter_values_come_from_sql_not_sample_profile(registry) -> None:  # type: ignore[no-untyped-def]
+    schema = registry.inspect("shop")
+    assert applied_sql_values(
+        "SELECT c.country FROM customers AS c "
+        "WHERE c.country IN ('Germany', 'Italy') AND c.country != 'Spain'",
+        schema,
+    ) == {"customers.country": ["Germany", "Italy"]}
+    assert applied_sql_values("SELECT country FROM customers WHERE country = 1", schema) == {}
+    assert applied_sql_values(
+        "SELECT country FROM customers WHERE country NOT IN ('Germany')", schema
+    ) == {}
+    assert applied_sql_values(
+        "SELECT country FROM customers WHERE country = 'Germany' OR country = 'Italy'", schema
+    ) == {}
+
+
+def _client(registry, monkeypatch, tmp_path, sql=None):  # type: ignore[no-untyped-def]
     monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
     monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
     monkeypatch.setenv("TEXT2SQL_GLOSSARY_ROOT", str(tmp_path / "glossaries"))
     return TestClient(create_app(TextToSQLAgent(registry, FixedSQLModel(
-        "SELECT country, COUNT(*) AS customer_count FROM customers GROUP BY country"
+        sql or "SELECT country, COUNT(*) AS customer_count FROM customers GROUP BY country"
     ))))
+
+
+def test_chat_filter_catalog_preselects_accepted_sql_literal(
+    registry, monkeypatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    client = _client(registry, monkeypatch, tmp_path,
+                     "SELECT country FROM customers WHERE country = 'Germany'")
+    response = client.post("/api/chat", json={
+        "session_id": "applied-filter-session", "db_id": "shop",
+        "provider": "agentrouter", "model": "test-model",
+        "message": "Show customers in Germany.",
+    })
+    assert response.status_code == 200
+    body = response.json()
+    assert body["generation"]["accepted"] is True
+    assert body["suggested_filters"]["applied_values"] == {"customers.country": ["Germany"]}
 
 
 def test_filter_values_returns_bounded_distinct_values(

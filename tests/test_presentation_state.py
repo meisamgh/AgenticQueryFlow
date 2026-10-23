@@ -2,7 +2,7 @@
 
 Covered scenarios:
 1. Chart persistence across analytical corrections ("Only Germany").
-2. A new independent question resets to SQL + table (no inherited chart).
+2. A new independent question requires a new conversation (no inherited chart).
 3. Unsupported/truncated charts degrade truthfully without SQL regeneration.
 4. Saved history restores the typed presentation state without rerunning SQL.
 """
@@ -78,7 +78,9 @@ def test_analytical_correction_inherits_chart_mode(monkeypatch, registry, tmp_pa
     assert model.calls > first_calls or second["generation"]["sql"] != first["generation"]["sql"]
 
 
-def test_new_independent_question_does_not_inherit_chart(monkeypatch, registry, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_new_independent_question_requires_new_conversation(
+    monkeypatch, registry, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
     client, _ = _client(monkeypatch, registry, tmp_path, sql=COUNTS_SQL)
 
     plotted = client.post("/api/chat", json={
@@ -92,9 +94,18 @@ def test_new_independent_question_does_not_inherit_chart(monkeypatch, registry, 
     assert independent.status_code == 200
     fresh = independent.json()
     assert fresh["operation"] == "NEW_QUERY"
-    assert fresh["presentation"]["chart_spec"] is None
-    assert fresh["presentation_state"]["mode"] == "sql"
-    assert fresh["presentation_state"]["chart_type"] is None
+    assert fresh["clarification_required"] is True
+    assert "Start a new conversation" in fresh["message"]
+    assert fresh["generation"] is None
+
+    # The UI's New conversation action resets context before a fresh root question.
+    reset = client.post("/api/chat", json={**BASE, "message": "Reset context"})
+    assert reset.json()["operation"] == "RESET_CONTEXT"
+    independent = client.post("/api/chat", json={
+        **BASE, "message": "List each country with its customer count.",
+    }).json()
+    assert independent["operation"] == "NEW_QUERY"
+    assert independent["presentation"]["chart_spec"] is None
 
 
 def test_truncated_result_never_produces_a_chart(monkeypatch, registry, tmp_path) -> None:  # type: ignore[no-untyped-def]
