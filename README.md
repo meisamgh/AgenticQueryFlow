@@ -7,7 +7,7 @@ bounded evidence-gathering recovery agent. In assistant mode, the existing deter
 validator controls presentation and the top-layer model writes the client-facing answer.
 
 <p align="center">
-  <img src="ChatGPT Image Sep 9, 2026, 10_01_37 PM.png" alt="Semantic Text-to-SQL architecture" width="1000" />
+  <img src="Arch-pic" alt="Semantic Text-to-SQL architecture" width="1000" />
 </p>
 
 _Visual overview of the query workflow. The architecture and runtime boundaries documented below
@@ -15,7 +15,7 @@ are authoritative._
 
 ## Demo
 
-https://github.com/user-attachments/assets/ac593a9c-802f-44c7-875d-02c9b4e0ca1f
+https://github.com/user-attachments/assets/99608fc4-5d31-419d-af3f-6cd446d09372
 
 ## Architecture
 
