@@ -440,6 +440,22 @@ def recommend_charts(
             reason="an observation-distribution chart is the only faithful view",
         )
 
+    # Row-level results can have repeated names/categories but a unique ID.
+    # Use that ID only as a low-priority axis; never aggregate repeated labels.
+    if len(rows) <= 30 and usable:
+        for axis in numeric:
+            values = [row[columns.index(axis)] for row in rows]
+            if (
+                _identifier_like(axis, values)
+                and all(value is not None for value in values)
+                and len(set(values)) == len(values)
+            ):
+                add_candidate(
+                    "bar", axis, primary_measure(mentioned), boost=-0.3,
+                    reason=f"one bar per unique {axis.replace('_', ' ')} preserves each result row",
+                )
+                break
+
     ranked: list[RecommendedChart] = []
     seen: set[tuple[Any, ...]] = set()
     for score, candidate in sorted(candidates, key=lambda item: item[0], reverse=True):

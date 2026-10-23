@@ -224,6 +224,23 @@ def test_model_can_select_combined_time_axis_but_not_unrequested_columns() -> No
     assert recommended.alternative_charts == []
 
 
+def test_model_chart_prompt_receives_only_a_bounded_row_sample() -> None:
+    class CapturingModel:
+        async def complete_detailed(self, *, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            assert "Row count: 20" in prompt
+            assert "row_4" in prompt
+            assert "row_5" not in prompt
+            assert "row_19" not in prompt
+            return "{}", TokenUsage()
+
+    recommendation, _, _ = asyncio.run(refine_charts_with_model(
+        CapturingModel(), provider="agentrouter", model="test",
+        question="Plot the values", columns=["category", "value"],
+        rows=[[f"row_{index}", float(index)] for index in range(20)],
+    ))
+    assert recommendation is None
+
+
 def test_truncated_result_yields_no_recommendation() -> None:
     columns, rows = _columns(MONTHLY_REVENUE, ["month", "revenue"])
     assert recommend_charts("Plot it", columns, rows, truncated=True) is None

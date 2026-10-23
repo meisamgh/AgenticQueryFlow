@@ -1002,8 +1002,32 @@ def create_app(
                                     truncated=False,
                                 )
                         if spec is None:
+                            # A chart-type-only follow-up changes presentation, not
+                            # the analytical axes. Re-inferring axes from a wide
+                            # result can incorrectly reject a chart that is already
+                            # visible to the user.
+                            previous_chart = (
+                                prior_response.presentation.chart_spec
+                                if prior_response and prior_response.presentation
+                                else None
+                            )
+                            chart_intent = viz_intent
+                            if (
+                                previous_chart is not None
+                                and viz_intent.explicit_type
+                                and not any((
+                                    viz_intent.x, viz_intent.y, viz_intent.series,
+                                    viz_intent.size, viz_intent.time_grain,
+                                    viz_intent.x_components, viz_intent.y_measures,
+                                ))
+                            ):
+                                chart_intent = viz_intent.model_copy(update={
+                                    "x": previous_chart.x,
+                                    "y": previous_chart.y,
+                                    "x_components": previous_chart.x_components,
+                                })
                             spec = plan_chart(
-                                viz_intent,
+                                chart_intent,
                                 question=request.message,
                                 columns=source.columns,
                                 rows=source.rows,

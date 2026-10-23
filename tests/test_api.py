@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 from typing import Any
 
@@ -88,6 +89,82 @@ def test_visualization_followups_reuse_complete_results_without_new_sql(
     assert incomplete.json()["generation"]["truncated"] is True
     assert incomplete.json()["presentation"]["chart_spec"] is None
     assert "truncated" in incomplete.json()["presentation"]["chart_reason"]
+
+    limited_followup = client.post("/api/chat", json={
+        **base, "session_id": "small-viz", "message": "Plot it.",
+    }).json()
+    assert limited_followup["clarification_required"] is True
+    assert "exceeded its row limit" in limited_followup["message"]
+
+
+def test_chart_type_change_reuses_previous_axes_without_model_or_sql(
+    registry, monkeypatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
+    monkeypatch.setenv("TEXT2SQL_GLOSSARY_ROOT", str(tmp_path / "glossaries"))
+    model = FixedSQLModel(
+        "SELECT order_id, customer_id, amount FROM orders ORDER BY order_id"
+    )
+    client = TestClient(create_app(TextToSQLAgent(registry, model)))
+    base = {"session_id": "change-chart-type", "db_id": "shop",
+            "provider": "agentrouter", "model": "test-model"}
+    first = client.post("/api/chat", json={
+        **base, "message": "Show order amounts."
+    }).json()
+    plotted = client.post("/api/chat", json={
+        **base, "message": "Make it a scatter plot."
+    }).json()
+    original = plotted["presentation"]["chart_spec"]
+    assert original is not None, first["message"]
+    assert original["chart_type"] == "scatter"
+    calls = model.calls
+
+    changed = client.post("/api/chat", json={
+        **base, "message": "Change this plot to a bar chart."
+    }).json()
+    chart = changed["presentation"]["chart_spec"]
+    assert chart is not None, changed["message"]
+    assert chart["chart_type"] == "bar"
+    assert (chart["x"], chart["y"]) == (original["x"], original["y"])
+    assert changed["generation"]["sql"] == first["generation"]["sql"]
+    assert changed["call_ledger"] == []
+    assert model.calls == calls
+
+def test_five_column_plot_followup_uses_full_ram_result_not_history_preview_or_model(
+    registry, monkeypatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    with sqlite3.connect(registry.resolve("shop")) as connection:
+        connection.executemany(
+            "INSERT INTO orders VALUES (?, 1, ?, 'complete')",
+            [(number, float(number * number)) for number in range(13, 35)],
+        )
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
+    monkeypatch.setenv("TEXT2SQL_GLOSSARY_ROOT", str(tmp_path / "glossaries"))
+    model = FixedSQLModel(
+        "SELECT o.order_id, c.name, c.country, o.amount, o.status "
+        "FROM orders AS o JOIN customers AS c ON c.customer_id = o.customer_id "
+        "ORDER BY o.order_id"
+    )
+    history = RunHistoryStore(None)
+    client = TestClient(create_app(TextToSQLAgent(registry, model), run_history=history))
+    base = {"session_id": "five-column-viz", "db_id": "shop",
+            "provider": "agentrouter", "model": "test-model"}
+    first = client.post("/api/chat", json={**base, "message": "Show the orders."}).json()
+    assert first["generation"]["accepted"] is True
+    assert len(first["generation"]["columns"]) == 5
+    assert len(first["generation"]["rows"]) > 20
+    assert len(history.list_sessions(base["session_id"])[0].rows_preview) == 20
+    model_calls = model.calls
+
+    chart = client.post("/api/chat", json={**base, "message": "Plot it."}).json()
+    assert chart["operation"] == "VISUALIZE"
+    assert chart["presentation"]["chart_spec"] is not None, chart["message"]
+    assert len(chart["presentation"]["chart_spec"]["data"]) == len(first["generation"]["rows"])
+    assert chart["generation"]["rows"] == first["generation"]["rows"]
+    assert chart["call_ledger"] == []
+    assert model.calls == model_calls
 
 
 def test_multi_column_plot_followup_uses_ram_without_model_or_sql(

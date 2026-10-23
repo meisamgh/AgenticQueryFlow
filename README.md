@@ -78,11 +78,17 @@ explanations, filters, and plots use the latest accepted query when relevant; a 
 fresh query state within the same chat, without inheriting the previous SQL or chart.
 The inspector separates verified context, schema, recovery trace, measured pipeline timing,
 and token usage into dedicated tabs.
+The browser requests up to 500 read-only result rows, which the server holds in bounded RAM for
+later "plot it" follow-ups. A visualization-only follow-up uses those rows and deterministic
+chart selection: it does not recall data through an LLM or regenerate SQL. Results exceeding the
+row limit are not plotted as if complete. Saved history retains only a 20-row preview, so a server
+restart requires rerunning the question before plotting it.
 For an explicit plot request with more than two returned columns, the selected model may propose
 chart axes from the executed result
 (including a validated Year+Month display axis). Proposed charts are checked against actual
 columns and rows; when the user names specific plot columns, the chart uses only those columns.
-The model cannot create measures or aggregate rows for display. Two-column results use the
+The optional chart model sees column roles and at most five sample rows, never the full result.
+It cannot create measures or aggregate rows for display. Two-column results use the
 deterministic chart planner without an extra model call. Model recommendation is enabled by
 default for wider explicit plot requests and can be disabled with
 `TEXT2SQL_VIZ_RECOMMENDER_LLM_ENABLED=false`.
