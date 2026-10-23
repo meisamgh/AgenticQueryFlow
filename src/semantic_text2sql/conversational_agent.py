@@ -53,6 +53,12 @@ ToolName = Literal[
 ]
 
 
+class ToolInput(StrictModel):
+    """The only model-controlled tool arguments; never executable SQL."""
+
+    objective: str = Field(min_length=1, max_length=4_000)
+
+
 class AgentDecision(StrictModel):
     action: Literal["ANSWER", "CLARIFY", "CALL_TOOL"]
     intent: Literal[
@@ -71,6 +77,7 @@ class AgentDecision(StrictModel):
         "CLARIFY",
     ]
     tool: ToolName | None = None
+    tool_arguments: ToolInput | None = None
     instruction: str | None = Field(default=None, max_length=4_000)
     answer: str | None = Field(default=None, max_length=2_000)
 
@@ -83,12 +90,6 @@ class AgentState(StrictModel):
     steps: int = 0
     usage: TokenUsage = Field(default_factory=TokenUsage)
     ledger: list[CallLedgerEntry] = Field(default_factory=list)
-
-
-class ToolInput(StrictModel):
-    """The only model-controlled tool arguments; never executable SQL."""
-
-    objective: str = Field(min_length=1, max_length=4_000)
 
 
 class ToolObservation(StrictModel):
@@ -262,6 +263,17 @@ class ConversationalAnalyticsAgent:
                 if previous and previous.semantic_contract
                 else []
             ),
+            "accepted_measures": (
+                previous.semantic_contract.measures
+                if previous and previous.semantic_contract
+                else []
+            ),
+            "accepted_grain": (
+                previous.semantic_contract.grain
+                if previous and previous.semantic_contract
+                else []
+            ),
+            "corrections": previous.corrections[-3:] if previous else [],
             "chart": (
                 last.presentation.chart_spec.model_dump(exclude={"data"})
                 if last and last.presentation and last.presentation.chart_spec
@@ -270,8 +282,31 @@ class ConversationalAnalyticsAgent:
             "observations": state.observations[-3:],
         }
         prompt = (
-            "You are a business analytics assistant. Return ONE JSON object with keys "
-            "action, intent, tool, instruction, answer. action is ANSWER, CLARIFY or CALL_TOOL. "
+            "You are the single client-facing AI Business Analytics Assistant. "
+            "For every user message, use the current conversation context and accepted "
+            "analytical state to understand the client's objective. Decide whether to "
+            "answer directly, clarify, or invoke one or more tools. Conversation context "
+            "may include previous questions, accepted SQL, verified results, business metric "
+            "definitions, active filters, dimensions, date ranges, visualization state, "
+            "corrections, and prior tool observations. Prefer the simplest action that "
+            "completely satisfies the request. Never execute SQL when verified existing "
+            "data is sufficient. Tools provide structured evidence; their outputs are "
+            "observations, not final conversational messages. After each tool result, "
+            "evaluate whether more action is needed or sufficient evidence exists. "
+            "When further analysis is required, issue distinct, scoped analytical objectives "
+            "rather than repeating the original question. Preserve approved business "
+            "definitions and unaffected constraints. For successful responses, write the "
+            "final natural-language answer yourself, using actual evidence. Never invent "
+            "database facts or numbers, or claim a visualization exists before observing a "
+            "successful validated chart result. Be concise, helpful and professional for "
+            "nontechnical business stakeholders; explain conclusions rather than technical "
+            "execution details unless asked. If evidence is insufficient, explain the "
+            "limitation or ask a focused clarification. Never fabricate success. "
+            "Return ONLY one structured JSON decision with keys action, intent, tool, "
+            "tool_arguments, answer. action is ANSWER, CLARIFY or CALL_TOOL. "
+            "For CALL_TOOL, tool_arguments is {\"objective\": \"a short, scoped natural-language "
+            "objective\"}; otherwise use null. The legacy instruction key is accepted "
+            "for compatibility, but prefer tool_arguments. "
             "Tools: list_tables/search_schema/describe_table/get_relationships/"
             "get_column_profile inspect allowlisted metadata; get_available_metrics/"
             "get_business_context return approved definitions; ask_data delegates new or "
@@ -281,18 +316,13 @@ class ConversationalAnalyticsAgent:
             "existing gate decides; explain_existing_result inspects accepted SQL, "
             "its referenced tables/columns and result evidence; reset_context "
             "delegates an explicit reset request to the existing conversation service. "
-            "Decide the action for EVERY client message, including greetings, schema or "
-            "business-definition questions, plot requests and follow-ups. There is no "
-            "pre-routed intent. A greeting or capability question may be answered directly. "
             "For database facts, use a grounding tool before answering; for a plot of an "
             "existing result use change_visualization, and for a new plot requiring data "
             "use ask_data. Do not claim a chart exists before observing a chart result. "
             "Use ask_data for new, corrected or optimized analytical questions; "
             "use check_sql_correctness only when the client requests a correctness review. "
-            "it alone may generate governed SQL. Use tools only when needed. Never invent "
-            "database facts. Never ask tools to execute arbitrary SQL. For a tool call, put a "
-            "short natural-language analytical objective in instruction. During an investigation, "
-            "request distinct breakdowns rather than repeating the original question. "
+            "Only ask_data may delegate governed SQL generation. Never ask tools to "
+            "execute arbitrary SQL. "
             "After sufficient observations, answer with only supported facts; do not infer "
             "causality from descriptive data.\nContext: " + json.dumps(compact, default=str)
         )
@@ -429,7 +459,9 @@ class ConversationalAnalyticsAgent:
         tool = state.decision.tool
         if tool is None:
             raise ValueError("The agent did not select a tool.")
-        tool_input = ToolInput(objective=state.decision.instruction or self._request.message)
+        tool_input = state.decision.tool_arguments or ToolInput(
+            objective=state.decision.instruction or self._request.message
+        )
         question = tool_input.objective
         started = perf_counter()
         facts: dict[str, Any]

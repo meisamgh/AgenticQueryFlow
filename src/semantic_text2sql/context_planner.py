@@ -47,6 +47,11 @@ approved business concepts, and extra metadata types needed. Do not define outpu
 measures, aggregation, grouping, grain, ranking, derived metrics, or temporal operations. Never
 generate SQL and never recommend JOIN, EXISTS, CTE, DISTINCT, or another implementation strategy.
 Use only candidate table and column identifiers. Keep metadata requests minimal and specific.
+Use the resolved question and trusted evidence as authoritative. For follow-ups or corrections,
+preserve approved business definitions and unaffected requirements from the previous accepted
+context. Select enough context to answer the whole request, but do not add unrelated schema or
+invent database facts. Candidate schema, glossary entries, and previous context are inputs to
+selection, not a final answer to the client.
 Select a business concept only when it appears in RELEVANT APPROVED GLOSSARY and directly helps the
 resolved question. If that section is None or an empty list, return business_concepts as [].
 

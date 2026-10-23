@@ -75,6 +75,8 @@ def test_agentrouter_uses_anthropic_messages_contract() -> None:
     assert captured["body"]["model"] == "claude-opus-5"  # type: ignore[index]
     prompt = captured["body"]["messages"][0]["content"]  # type: ignore[index]
     assert "CORRECTNESS-FIRST EFFICIENCY RULES" in prompt
+    assert "Preserve approved business definitions and all unaffected constraints" in prompt
+    assert "Do not guess unsupported database facts" in prompt
     assert "never use SELECT * unless" in prompt
     assert "concise, stable, meaningful `AS` alias" in prompt
     assert "prefer EXISTS" in prompt

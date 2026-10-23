@@ -37,9 +37,11 @@ class Completer:
     def __init__(self, decisions: list[dict[str, Any]]) -> None:
         self.decisions = iter(decisions)
         self.calls = 0
+        self.prompts: list[str] = []
 
     async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
         self.calls += 1
+        self.prompts.append(prompt)
         return json.dumps(next(self.decisions)), TokenUsage(input_tokens=10, output_tokens=5)
 
 
@@ -108,6 +110,27 @@ def test_agent_can_inspect_then_answer_without_sql(registry: Any, tmp_path: Any)
     assert response.message == "The database contains a customers table."
     assert completer.calls == 2
     assert calls == []
+
+
+def test_agent_policy_and_structured_tool_objective(registry: Any, tmp_path: Any) -> None:
+    calls: list[str] = []
+    completer = Completer([
+        {"action": "CALL_TOOL", "intent": "EXPLORE_SCHEMA", "tool": "search_schema",
+         "tool_arguments": {"objective": "Find customer tables and their columns"},
+         "answer": None},
+        {"action": "ANSWER", "intent": "EXPLORE_SCHEMA", "tool": None,
+         "tool_arguments": None, "answer": "The schema search is complete."},
+    ])
+    agent = _agent(registry, tmp_path, completer, calls)
+    response = asyncio.run(agent.run(ChatRequest(
+        session_id="structured", db_id="shop", message="Which customer tables exist?"
+    )))
+    assert response.message == "The schema search is complete."
+    assert calls == []
+    assert "single client-facing AI Business Analytics Assistant" in completer.prompts[0]
+    assert "Never execute SQL when verified existing data is sufficient" in completer.prompts[0]
+    assert "tool_arguments" in completer.prompts[0]
+    assert "search_schema" in completer.prompts[1]
 
 
 def test_agent_delegates_analytical_question_and_explains_it(registry: Any, tmp_path: Any) -> None:

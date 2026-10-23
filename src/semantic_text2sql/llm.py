@@ -955,6 +955,11 @@ SELECT or WITH...SELECT statement. Return SQL only: no JSON, markdown, comments,
 alternative queries.
 The question and trusted evidence are authoritative. Use only tables, columns, and relationships
 in VERIFIED_CONTEXT; aliases created inside the SQL are allowed. {dialect_rules}
+Preserve approved business definitions and all unaffected constraints when the question is a
+follow-up or correction. Treat context and historical examples as grounding, not as permission
+to add unrequested filters, metrics, or result columns. Do not guess unsupported database facts,
+identifiers, or value mappings. If repairing SQL, fix the cited failure while preserving the
+user's analytical objective and the already-verified constraints.
 Generation approach: {style_rules}
 
 CORRECTNESS-FIRST EFFICIENCY RULES:

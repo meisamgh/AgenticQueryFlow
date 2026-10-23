@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from pydantic import ValidationError
 
 from semantic_text2sql.context import build_context_plan, model_context_payload
 from semantic_text2sql.context_planner import (
+    plan_context_detailed,
     reconcile_context_contract,
     verify_context_request,
 )
@@ -81,6 +84,27 @@ def _profile() -> DatabaseProfile:
             ),
         ],
     )
+
+
+def test_context_selector_preserves_accepted_constraints_without_generating_sql() -> None:
+    class Completer:
+        prompt = ""
+
+        async def complete(self, model: str, prompt: str) -> str:
+            self.prompt = prompt
+            return (
+                '{"selected_tables": ["customers"], '
+                '"selected_columns": {"customers": ["CustomerID"]}, '
+                '"business_concepts": [], "metadata_requests": []}'
+            )
+
+    completer = Completer()
+    selection, _ = asyncio.run(plan_context_detailed(
+        completer, "test-model", "Count customers", None, _schema(), None,
+    ))
+    assert selection.selected_tables == ["customers"]
+    assert "preserve approved business definitions and unaffected requirements" in completer.prompt
+    assert "Never\ngenerate SQL" in completer.prompt
 
 
 def _unit_price_contract(question: str):  # type: ignore[no-untyped-def]
