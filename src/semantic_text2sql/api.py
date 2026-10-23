@@ -96,7 +96,11 @@ from semantic_text2sql.provider_registry import configured_model_options, suppor
 from semantic_text2sql.recovery_events import recovery_events
 from semantic_text2sql.result_cache import RecentResult
 from semantic_text2sql.run_history import RunHistoryStore, RunRecord, build_run_record
-from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded
+from semantic_text2sql.runtime import (
+    RequestBudget,
+    RequestBudgetExceeded,
+    active_request_budget,
+)
 from semantic_text2sql.semantic_catalog import SemanticCatalogStore, compose_document
 from semantic_text2sql.semantic_catalog_validation import (
     postgres_runner,
@@ -213,6 +217,11 @@ def create_app(
         "justdowork": justdowork,
         "codecraft": codecraft,
     }
+    def conversational_agent_enabled() -> bool:
+        return (
+            os.environ.get("TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED", "false").casefold()
+            == "true"
+        )
     app = FastAPI(
         title="Semantic Text-to-SQL v5",
         version="0.5.0",
@@ -791,6 +800,7 @@ def create_app(
         return await asyncio.to_thread(active_agent.check, request)
 
     async def process_chat(request: ChatRequest) -> ChatResponse:
+        assistant_enabled = conversational_agent_enabled()
         if enforce_model_catalog and not supports_model(request.provider, request.model):
             raise HTTPException(
                 status_code=422,
@@ -814,7 +824,7 @@ def create_app(
         analytics_ledger: list[CallLedgerEntry] = []
         visualization_usage = TokenUsage()
         governed_metric_evidence: str | None = None
-        request_budget = RequestBudget(
+        request_budget = active_request_budget() or RequestBudget(
             timeout_seconds=float(os.environ.get("TEXT2SQL_REQUEST_TIMEOUT_SECONDS", "180")),
             max_model_calls=int(os.environ.get("TEXT2SQL_REQUEST_MAX_MODEL_CALLS", "6")),
             max_database_calls=int(os.environ.get("TEXT2SQL_REQUEST_MAX_DATABASE_CALLS", "24")),
@@ -895,6 +905,7 @@ def create_app(
                 if (
                     planner_enabled()
                     and planner_llm_enabled()
+                    and not assistant_enabled
                     and proposal is not None
                     and plan_needs_refinement(proposal)
                 ):
@@ -984,7 +995,7 @@ def create_app(
                             ),
                             requery=requery_requested,
                             latency_ms=analytics_planning_ms,
-                            planner_llm_enabled=planner_llm_enabled(),
+                            planner_llm_enabled=planner_llm_enabled() and not assistant_enabled,
                         )
                     )
                 if not requery_requested:
@@ -1130,7 +1141,7 @@ def create_app(
         conversation_started = perf_counter()
         conversation_usage = TokenUsage()
         interpretation: TurnInterpretation | None = None
-        if previous is not None and requires_model_interpretation(
+        if not assistant_enabled and previous is not None and requires_model_interpretation(
             request.message,
             has_matching_state,
             request.feedback_category,
@@ -1297,6 +1308,8 @@ def create_app(
             explanation_usage = TokenUsage()
             explanation_model_succeeded = False
             try:
+                if assistant_enabled:
+                    raise ValueError("The top-layer assistant owns the final explanation.")
                 explanation, explanation_usage = await explain_turn_detailed(
                     turn_completers[request.provider],
                     model=request.model,
@@ -1534,7 +1547,7 @@ def create_app(
         ):
             set_session_stage(request.session_id, "presentation")
             presentation, presentation_usage, presentation_entries = await present_result(
-                turn_completers.get(request.provider),
+                None if assistant_enabled else turn_completers.get(request.provider),
                 question=pending.resolved_question,
                 sql=generated.sql or "",
                 columns=generated.columns,
@@ -1569,6 +1582,7 @@ def create_app(
                 viz_intent.requested
                 and len(generated.columns) > 2
                 and viz_recommender_llm_enabled()
+                and not assistant_enabled
             ):
                 try:
                     model_calls_before = request_budget.model_calls
@@ -1781,7 +1795,7 @@ def create_app(
             remember_result(request, response)
             return response
 
-    async def execute_chat(request: ChatRequest) -> ChatResponse:
+    async def execute_chat(request: ChatRequest, *, persist: bool = True) -> ChatResponse:
         if request.parent_run_id:
             parent = runs.get(request.parent_run_id, request.session_id)
             if parent is None or parent.db_id != request.db_id:
@@ -1801,7 +1815,12 @@ def create_app(
         response = await process_chat(request)
         if previous and previous.db_id == request.db_id and response.operation != "NEW_QUERY":
             response = response.model_copy(update={"previous_sql": previous.last_sql})
-        return await save_response(request, response)
+        return await save_response(request, response) if persist else response
+
+    async def assistant_sql_handler(request: ChatRequest) -> ChatResponse:
+        # The top model still has to produce its final answer. Save the
+        # completed turn once, after that answer has been attached.
+        return await execute_chat(request, persist=False)
 
     bridge = ConversationalAnalyticsBridge(
         database=sqlite,
@@ -1816,12 +1835,13 @@ def create_app(
         completers=turn_completers,
         get_state=conversations.get,
         get_last_response=lambda session_id, db_id: recent_results.get((session_id, db_id)),
-        sql_handler=execute_chat,
+        sql_handler=assistant_sql_handler,
+        investigation_handler=execute_chat,
     )
 
     @app.post("/api/chat", response_model=ChatResponse)
     async def chat(request: ChatRequest) -> ChatResponse:
-        if os.environ.get("TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED", "false").casefold() == "true":
+        if conversational_agent_enabled():
             response = await conversational_agent.run(request)
             return response if response.history_saved else await save_response(request, response)
         if os.environ.get("TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED", "false").casefold() != "true":

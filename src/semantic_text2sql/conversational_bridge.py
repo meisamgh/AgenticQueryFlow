@@ -48,7 +48,14 @@ class MetadataToolInput(StrictModel):
 
 
 class MetadataToolOutput(StrictModel):
-    tool: Literal["search_schema", "get_business_context"]
+    tool: Literal[
+        "list_tables",
+        "search_schema",
+        "describe_table",
+        "get_relationships",
+        "get_column_profile",
+        "get_business_context",
+    ]
     evidence_id: str
     facts: list[str] = Field(default_factory=list, max_length=30)
     found: bool
@@ -165,6 +172,72 @@ class ConversationalAnalyticsBridge:
         if self.postgres is not None and db_id in self.postgres.configured_ids():
             return self.postgres
         raise DatabaseError("DATABASE_NOT_FOUND", "The selected database is not configured.")
+
+    async def inspect_metadata(
+        self,
+        db_id: str,
+        tool: Literal[
+            "list_tables",
+            "search_schema",
+            "describe_table",
+            "get_relationships",
+            "get_column_profile",
+        ],
+        target: str = "",
+    ) -> MetadataToolOutput:
+        """Return facts for the requested metadata capability, not a generic search."""
+        schema = await asyncio.to_thread(self._registry(db_id).inspect, db_id)
+        profile = self.profiles.load(schema.dialect, db_id)
+        tokens = {part.casefold() for part in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", target)}
+        selected = [item for item in schema.tables if item.name.casefold() in tokens]
+        if tool == "list_tables":
+            facts = [f"{item.name}: {len(item.columns)} columns" for item in schema.tables[:30]]
+        elif tool == "describe_table":
+            facts = [
+                f"{item.name}: "
+                + ", ".join(
+                    f"{column.name} ({column.data_type}, "
+                    f"{'primary key' if column.primary_key else 'ordinary column'})"
+                    for column in item.columns
+                )
+                for item in selected[:3]
+            ]
+        elif tool == "get_relationships":
+            facts = [
+                f"{link.from_table}.{link.from_column} → {link.to_table}.{link.to_column}"
+                for link in schema.relationships
+                if not selected
+                or link.from_table in {item.name for item in selected}
+                or link.to_table in {item.name for item in selected}
+            ][:30]
+        elif tool == "get_column_profile":
+            facts = []
+            if profile is not None:
+                for column in profile.columns:
+                    if column.column.casefold() not in tokens:
+                        continue
+                    if selected and column.table not in {item.name for item in selected}:
+                        continue
+                    facts.append(
+                        f"{column.table}.{column.column}: type={column.database_type}; "
+                        f"semantic_type={column.semantic_type}; "
+                        f"observed_format={column.observed_format or 'unknown'}; "
+                        f"observed_nulls={column.null_count > 0}"
+                    )
+                    if len(facts) >= 8:
+                        break
+        elif tool == "search_schema":
+            return await self.search_schema(MetadataToolInput(db_id=db_id, question=target))
+        else:
+            raise ValueError(f"Unsupported metadata tool: {tool}")
+        if not facts:
+            facts = ["No matching verified metadata was found."]
+        return MetadataToolOutput(
+            tool=tool,
+            evidence_id=_evidence_id(tool, db_id, facts),
+            facts=facts,
+            found=not facts[0].startswith("No matching"),
+        )
 
     async def search_schema(self, tool_input: MetadataToolInput) -> MetadataToolOutput:
         """Read allowlisted schema; use the existing retriever for column questions."""

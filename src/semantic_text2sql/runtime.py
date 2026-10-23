@@ -3,14 +3,15 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable
+from collections.abc import Awaitable, Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from threading import Lock
 from time import monotonic
 from typing import TypeVar
 
 T = TypeVar("T")
-
 
 class RequestBudgetExceeded(TimeoutError):
     pass
@@ -63,3 +64,21 @@ def _close_unstarted(operation: Awaitable[object]) -> None:
     close = getattr(operation, "close", None)
     if callable(close):
         close()
+
+
+_ACTIVE_BUDGET: ContextVar[RequestBudget | None] = ContextVar(
+    "text2sql_active_request_budget", default=None
+)
+
+
+def active_request_budget() -> RequestBudget | None:
+    return _ACTIVE_BUDGET.get()
+
+
+@contextmanager
+def use_request_budget(budget: RequestBudget) -> Iterator[None]:
+    token = _ACTIVE_BUDGET.set(budget)
+    try:
+        yield
+    finally:
+        _ACTIVE_BUDGET.reset(token)

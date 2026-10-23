@@ -3,8 +3,8 @@
 A conversational Text-to-SQL application for SQLite and allowlisted PostgreSQL databases. The
 normal path retrieves and grounds a compact schema, generates read-only SQL, and executes it.
 Failures, empty or unexpected `NULL` results, and explicit correctness reviews can activate a
-bounded evidence-gathering recovery agent. For ordinary successful results, the selected model
-chooses a chart before writing a plain-language answer.
+bounded evidence-gathering recovery agent. In assistant mode, the existing deterministic chart
+validator controls presentation and the top-layer model writes the client-facing answer.
 
 <p align="center">
   <img src="ChatGPT Image Sep 9, 2026, 10_01_37 PM.png" alt="Semantic Text-to-SQL architecture" width="1000" />
@@ -19,17 +19,16 @@ https://github.com/user-attachments/assets/ac593a9c-802f-44c7-875d-02c9b4e0ca1f
 
 ## Architecture
 
-An opt-in [V6 conversational bridge](docs/V6_CONVERSATIONAL_BRIDGE.md) routes clear schema and
-approved-glossary questions to bounded metadata tools through LangGraph. All analytical questions
-continue through the existing `/api/chat` SQL workflow. Set
-`TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED=true` to enable it; the default remains the current
-conversation path. This bridge is an incremental integration, not the full V6 agent described in
-the design document.
-An experimental adaptive LangGraph assistant can be enabled separately with
-`TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED=true`. It chooses bounded metadata and
-analytical tools while delegating every data query to the governed Text-to-SQL
-pipeline. See the bridge document for configuration and current limitations;
-it is not yet recommended for shared production deployment.
+The [V6.2 conversational assistant](docs/V6_2_CONVERSATIONAL_ASSISTANT.md) is enabled by
+`TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED=true` (set in `.env.example`). When enabled, its
+top-layer model decides the action for every conversation turn, including greetings, schema
+questions, plot follow-ups and analytical questions. Bounded tools ground factual answers;
+the chart-reusability gate and SQL safety checks remain deterministic. Analytical
+questions still use the same governed Text-to-SQL engine; the assistant cannot execute SQL
+directly. Set the flag to `false` to retain the older path. The earlier
+[V6 bridge](docs/V6_CONVERSATIONAL_BRIDGE.md) remains available as a separate fallback.
+The assistant is not yet recommended for multi-user production deployment; see the documented
+limitations and evaluation requirements.
 Local cold/warm and transport measurements, including their limitations, are
 documented in [Performance](docs/PERFORMANCE.md).
 
@@ -50,11 +49,11 @@ Selected SQL model -> SQLGlot safety -> EXPLAIN -> read-only execution
  ordinary result               failure / anomalous result /
        |                       explicit correctness review
        v                              |
- selected model chooses chart          v
+ validated chart selection             v
        |                       bounded recovery agent
  validate chart against rows          | inspect_schema / inspect_values /
        |                       | query_database -> REPAIR / INFORM / ESCALATE
- selected model explains result        |       |
+ top-layer model explains result       |       |
        |                               +-- focused SQL retry when justified
        v
  SQL + exact rows + answer + optional chart + context + attempt/usage history
@@ -63,12 +62,13 @@ Selected SQL model -> SQLGlot safety -> EXPLAIN -> read-only execution
 The default context method is retrieval-only. Users may select optional Model 1 context selection
 and choose the SQL model separately. Model 1 selects context; it does not write SQL. Historical SQL
 examples are disabled by default and, when enabled, are admitted only after compatibility checks.
-The same selected SQL model handles chart choice and result explanation; the chart is never used as
-evidence that the generated SQL is business-correct.
+The legacy path can still use the selected SQL model for chart choice and result explanation.
+In V6.2 assistant mode these extra presentation-model calls are skipped; the top-layer model
+explains the validated result. A chart is never evidence that SQL is business-correct.
 
 ### Stakeholder answers and charts
 
-For an ordinary successful result, the selected model first proposes `bar`, `line`, `scatter`, or
+In the legacy presentation path, the selected model may propose `bar`, `line`, `scatter`, or
 `none` from the question, accepted SQL and up to 40 returned rows. Code verifies the proposed
 columns, numeric values, date axis and row grain; invalid choices become `none`, not another
 guessed chart. A second model call then explains the result using that validated choice. The UI

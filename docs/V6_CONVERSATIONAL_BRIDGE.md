@@ -1,37 +1,9 @@
 # V6 conversational bridge
 
-## Experimental adaptive assistant
-
-`TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED=true` enables a separate, opt-in LangGraph
-reason/act loop above the same governed `/api/chat` SQL path. It is disabled by
-default. Configure `TEXT2SQL_ASSISTANT_TIMEOUT_SECONDS` (default 60),
-`TEXT2SQL_ASSISTANT_MAX_MODEL_CALLS` (default 4), and
-`TEXT2SQL_ASSISTANT_MAX_DATABASE_CALLS` (default 4). The selected request model
-is the orchestration model unless `TEXT2SQL_ASSISTANT_PROVIDER` and
-`TEXT2SQL_ASSISTANT_MODEL` override it. Provider credentials remain in the existing
-provider configuration. The assistant can answer greetings and chart-type changes through
-safe fast paths, choose metadata and analytical tools, and use up to three tool
-steps. It delegates data questions to the existing Text-to-SQL chat handler;
-the agent itself never runs model-authored SQL.
-
-The request-local LangGraph state holds the current decision, up to three compact
-tool observations, token usage, call ledger, and eventual response. Accepted
-analytical state remains in `ConversationStore` and `RunHistoryStore`; unsuccessful
-metadata or agent responses do not replace accepted SQL. The tool capability
-names are `list_tables`, `search_schema`, `describe_table`, `get_relationships`,
-`get_column_profile`, `get_available_metrics`, `get_business_context`, `ask_data`,
-`analyze_result`, `check_sql_correctness`, `change_visualization`,
-`present_result`, and `explain_existing_result`. Schema and profile access is
-limited to the request's configured database. Analytical tools call the existing
-chat service, not a direct database connection.
-
-This is an **experimental integration**, not the complete agent described by the
-V6 design. In particular, delegated SQL calls still have their own inner
-request budget, and result explanations and visualization recommendation may
-still use separate models. Tool schemas, multi-user authorization, analytical
-state consolidation, and evidence-grounded multi-step RCA need further work
-and frozen A/B evaluation before enabling it for shared deployment. The older
-`TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED` path remains available independently.
+The newer top-layer assistant is described in
+[V6.2 conversational assistant](V6_2_CONVERSATIONAL_ASSISTANT.md). This document
+describes only the earlier deterministic metadata bridge, still available as a
+separate fallback when the assistant is disabled.
 
 This is the first, opt-in integration seam between the V6 conversational-agent design and the
 existing production Text-to-SQL workflow. It is not a replacement SQL engine or a claim that the
