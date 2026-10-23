@@ -90,6 +90,39 @@ def test_visualization_followups_reuse_complete_results_without_new_sql(
     assert "truncated" in incomplete.json()["presentation"]["chart_reason"]
 
 
+def test_multi_column_plot_followup_uses_ram_without_model_or_sql(
+    registry, monkeypatch, tmp_path
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
+    monkeypatch.setenv("TEXT2SQL_GLOSSARY_ROOT", str(tmp_path / "glossaries"))
+    # Grouped rows keep one measure per category so the deterministic
+    # recommender can chart them without inventing client-side aggregation
+    # over this row-grain result.
+    model = FixedSQLModel(
+        "SELECT c.name AS name, c.country AS country, "
+        "SUM(o.amount) AS total_amount, COUNT(*) AS order_count "
+        "FROM orders AS o JOIN customers AS c ON c.customer_id = o.customer_id "
+        "GROUP BY c.name, c.country"
+    )
+    client = TestClient(
+        create_app(TextToSQLAgent(registry, model), run_history=RunHistoryStore(None))
+    )
+    base = {"session_id": "multi-column-viz", "db_id": "shop",
+            "provider": "agentrouter", "model": "test-model"}
+    first = client.post("/api/chat", json={**base, "message": "Show the orders."}).json()
+    assert first["generation"]["accepted"] is True
+    assert len(first["generation"]["columns"]) == 4
+    model_calls = model.calls
+
+    chart = client.post("/api/chat", json={**base, "message": "Plot it."}).json()
+    assert chart["operation"] == "VISUALIZE"
+    assert chart["presentation"]["chart_spec"] is not None, chart["message"]
+    assert chart["generation"]["rows"] == first["generation"]["rows"]
+    assert chart["call_ledger"] == []
+    assert model.calls == model_calls
+
+
 def test_database_catalog_reports_both_dialects(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.delenv("POSTGRES_BOOKS_DSN", raising=False)
     monkeypatch.delenv("TEXT2SQL_POSTGRES_DATABASES", raising=False)
@@ -405,17 +438,17 @@ def test_web_chat_application_is_served() -> None:
     result_position = page.text.index('class="panel-card result-panel-pane"')
     versions_position = page.text.index('class="versions-panel"')
     recovery_position = page.text.index('class="recovery-panel"')
-    # Run details (attempts, tokens, timings) moved from the answer template
-    # into the inspector's validation section; the message stays clean.
+    # Run details remain in the inspector; the answer template stays clean.
     assert 'class="technical-details"' not in page.text
-    validation_position = page.text.index('id="validationContent"')
+    tokens_position = page.text.index('id="tokensContent"')
+    assert 'id="pipelineContent"' in page.text
     attempts_position = script.text.index('class="attempts-panel')
     assert 'class="attempts-panel' not in page.text
     assert attempts_position > 0
-    # The inspector (with validation run details) is defined before the
+    # The inspector (with token and pipeline details) is defined before the
     # answer template in the document, and the answer keeps only its own
     # closable panels inline.
-    assert validation_position < sql_position
+    assert tokens_position < sql_position
     assert (
         sql_position
         < result_position

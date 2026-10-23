@@ -12,7 +12,7 @@ const explorer = explorerContext.window.QueryflowChartExplorer;
 const filtersContext = vm.createContext({window: {}});
 vm.runInContext(fs.readFileSync(`${__dirname}/../web/query_filters.js`, 'utf8'), filtersContext);
 const queryFilters = filtersContext.window.QueryflowFilters;
-test('query filter controls use selected schema and verified catalog, not profile samples', () => {
+test('query filter utilities remain available without a visible filter bar', () => {
   const body = {
     resolved_question: 'Show orders by country and date',
     generation: {model_context: {tables: {orders: {columns: {country: {}, order_date: {}}}}}},
@@ -29,25 +29,17 @@ test('query filter controls use selected schema and verified catalog, not profil
   assert.deepEqual(Array.from(queryFilters.selectedValues({filters: [
     {operand: 'orders.country', operator: 'IN', value: ['DE', 'FR']},
   ]}, 'orders.country')), ['DE', 'FR']);
-  assert.ok(source.includes('body.suggested_filters?.applied_values?.[field.field]'));
-  assert.ok(markup.includes('class="query-filter-bar"'));
-  assert.ok(source.includes('/filter-values?table='));
-  assert.ok(source.includes('/analytics-capabilities'));
+  assert.ok(!markup.includes('class="query-filter-bar"'));
+  assert.ok(!source.includes('wireQueryFilterBar('));
 });
-test('query filter changes rerun the governed conversation and never mutate chart rows alone', () => {
+test('query filter prompt utility still requests a governed query', () => {
   const prompt = queryFilters.changePrompt([
     {kind: 'values', field: 'orders.country', values: ['DE', "O'Reilly"]},
   ]);
   assert.ok(prompt.includes('"orders.country"'));
   assert.ok(prompt.includes('"O\'Reilly"'));
   assert.ok(prompt.includes('one validated read-only SQL query'));
-  const bar = source.slice(source.indexOf('function wireQueryFilterBar('), source.indexOf('async function appendAssistant('));
-  assert.ok(bar.includes('sendFromAnswer(runId, prompt)'));
-  assert.ok(bar.includes('result?.generation?.accepted'));
-  assert.ok(bar.includes('Updating query and results'));
-  assert.ok(bar.includes('Removing query filters'));
-  assert.ok(bar.includes('No matching values'));
-  assert.ok(!bar.includes('article._setChartViewRowFilters'));
+  assert.ok(!markup.includes('query-filter-apply'));
 });
 test('success badge is hidden and plot choices are centered inside the answer', () => {
   assert.ok(source.includes('if (accepted && status !== "CHART UNAVAILABLE") { pill.hidden = true;'));
@@ -88,9 +80,7 @@ test('empty success responses clear history and Clear resets the visible convers
   assert.ok(clear.includes('$("#messages").replaceChildren()'));
   assert.ok(clear.includes('$("#emptyState").hidden = false'));
   assert.ok(clear.includes('state.history = []'));
-  const chartClear = source.slice(source.indexOf('section.querySelector(".chart-clear-filter").addEventListener('),
-    source.indexOf('section.querySelector(".chart-reset-zoom").addEventListener('));
-  assert.ok(chartClear.includes('reset();'));
+  assert.ok(!source.includes('section.querySelector(".chart-clear-filter")'));
 });
 test('display row filters share chart state and zero matches stay empty', () => {
   assert.ok(source.includes('article._setChartViewRowFilters = filters => article._chartViewState.setRowFilters(filters)'));
@@ -150,11 +140,35 @@ test('single-value answer uses a readable label and exact grouped number', () =>
   assert.ok(preview.includes('readableResultLabel(columns[0])'));
   assert.ok(preview.includes('formatKpiValue(rows[0][0])'));
 });
-test('inspector has separate context, schema, recovery and details tabs', () => {
-  for (const tab of ['understanding', 'schema', 'recovery', 'validation']) {
+test('inspector has separate context, schema, recovery, pipeline and tokens tabs', () => {
+  for (const tab of ['understanding', 'schema', 'recovery', 'pipeline', 'tokens']) {
     assert.ok(markup.includes(`data-inspector-tab="${tab}"`));
   }
+  assert.ok(!markup.includes('data-inspector-tab="validation"'));
+  assert.ok(markup.includes('id="pipelineContent"'));
+  assert.ok(markup.includes('id="tokensContent"'));
+  assert.ok(source.includes('renderPipelineDetails(pipelineTarget'));
+  assert.ok(source.includes('renderTokenAccounting(tech'));
+  assert.ok(source.includes('pipelineTarget.append(attemptsCard)'));
+  assert.ok(styles.includes('.pipeline-bar-fill'));
   assert.ok(markup.includes('id="inspectorBackdrop"'));
+});
+test('pipeline bars represent measured stage time and leave missing stages unmeasured', () => {
+  const makeNode = () => ({children: [], style: {}, append(...items) { this.children.push(...items); },
+    replaceChildren() { this.children = []; }, setAttribute() {}});
+  const container = makeNode();
+  const fragment = {querySelector: () => container};
+  const pipeline = vm.runInNewContext(`${source.slice(source.indexOf('function renderPipelineDetails('),
+    source.indexOf('function showError('))}; renderPipelineDetails`, {
+    document: {createElement: makeNode},
+  });
+  pipeline(fragment, {total: 2000, routing: 500}, {}, {});
+  assert.equal(container.children[0].children[1].textContent, '2.0 s');
+  const routing = container.children.find(row => row.children[0]?.textContent === 'Routing');
+  assert.equal(routing.children[2].children[0].style.width, '25%');
+  const unknown = container.children.find(row => row.children[0]?.textContent === 'Context planning');
+  assert.equal(unknown.children[1].textContent, 'Not reported');
+  assert.equal(unknown.children[2].children[0].style.width, '0%');
 });
 test('context inspector follows the flat prototype layout using live response facts', () => {
   assert.ok(markup.includes('<span>Context inspector</span>'));
@@ -349,7 +363,9 @@ test('answer chart omits redundant source explanation and keeps narrow layout ru
   assert.ok(!markup.includes('class="chart-active-view"'));
   assert.ok(!source.includes('Based on ${spec.source_row_count'));
   assert.ok(styles.includes('.chart-slot-ec, .chart-slot-plotly { height: 320px'));
-  assert.ok(source.includes('max_rows: state.pendingVizRequest ? 500 : 100'));
+  // The client always keeps the bounded full result (max 500 rows) in server
+  // RAM so an explicit "Plot it" follow-up never needs new SQL.
+  assert.ok(source.includes('max_rows: 500,'));
   assert.ok(source.includes('source_row_count === generation.rows?.length'));
 });
 test('ECharts resizes with its container and cleans up responsive observers', () => {
@@ -502,8 +518,7 @@ test('chart UI stays within the response; visual controls do not call query APIs
   assert.ok(markup.includes('class="chart-kinds"'));
   assert.ok(!markup.includes('class="chart-suggestions"'));
   assert.ok(!markup.includes('class="backend-suggestions"'));
-  assert.ok(markup.includes('class="chart-filter-panel"'));
-  assert.ok(markup.includes('class="chart-category-filter" multiple'));
+  assert.ok(!markup.includes('class="chart-filter-panel"'));
   assert.ok(markup.includes('class="chart-reset-zoom"'));
   const chartWiring = source.slice(source.indexOf('function wireChartSection('), source.indexOf('function toast('));
   assert.ok(!chartWiring.includes('await api('));
@@ -518,19 +533,12 @@ test('conversation spacing is compact and chart switching stays in the header', 
   const answer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function actionButton('));
   assert.ok(!answer.includes('renderBackendSuggestions('));
 });
-test('filter parameters use compact accessible label-value chips', () => {
-  for (const name of ['chart-x-control', 'chart-series-control', 'chart-top-control']) {
-    assert.ok(markup.includes(`chart-parameter-chip ${name}`));
-  }
-  assert.ok(!markup.includes('chart-start-control'));
-  assert.ok(!markup.includes('chart-end-control'));
+test('chart filter and parameter controls are removed while zoom remains', () => {
   assert.ok(source.includes('item.db_id === uiConfig.default_db_id'));
-  assert.ok(markup.includes('chart-parameter-chip chart-choice-chip chart-category-control'));
-  assert.ok(markup.includes('chart-parameter-chip chart-choice-chip chart-measures-control'));
-  assert.ok(markup.includes('class="chart-query-parameters"'));
-  assert.ok(styles.includes('.chart-filter-controls .chart-parameter-chip'));
-  assert.ok(styles.includes('.chart-choice-menu'));
-  assert.ok(source.includes('section.querySelector(".chart-category-current").textContent'));
+  assert.ok(!markup.includes('chart-query-parameters'));
+  assert.ok(!markup.includes('chart-parameter-chip'));
+  assert.ok(markup.includes('chart-reset-zoom'));
+  assert.ok(source.includes('article._echart?.resetZoom?.()'));
 });
 
 vm.runInContext(source.slice(source.indexOf('function renderTable('), source.indexOf('function downloadCsv(')), context);
@@ -731,16 +739,15 @@ test('grouped chart click keeps the raw date and series after display filtering'
   assert.equal(selected.seriesName, 'FR');
   mounted.dispose();
 });
-test('data scope and query-backed filters are separate from tab switching', () => {
+test('data scope and tab switching do not expose query parameters', () => {
   assert.ok(markup.includes('class="data-source-tab"'));
   assert.ok(markup.includes('class="data-visible-tab"'));
-  assert.ok(markup.includes('class="chart-apply-query"'));
+  assert.ok(!markup.includes('class="chart-apply-query"'));
   const scope = source.slice(source.indexOf('function wireDataScope('), source.indexOf('function wireChartSection('));
   assert.ok(!scope.includes('sendFromAnswer('));
   assert.ok(!scope.includes('api('));
   const chart = source.slice(source.indexOf('function wireChartSection('), source.indexOf('function toast('));
-  assert.ok(chart.includes('await sendFromAnswer(runId,'));
-  assert.ok(chart.includes('availableFields.includes(field)'));
+  assert.ok(!chart.includes('await sendFromAnswer(runId,'));
 });
 test('scatter-point investigation uses the observed x value when ECharts omits its name', () => {
   const observations = [];
@@ -875,7 +882,7 @@ test('recovery timeline reflects the real trace and stays honest about outcomes'
 });
 
 test('inspector recovery trace follows recorded signal, probes and decision', () => {
-  const helper = source.slice(source.indexOf('function inspectorRecoverySteps('), source.indexOf('function renderInspectorPerformance('));
+  const helper = source.slice(source.indexOf('function inspectorRecoverySteps('), source.indexOf('function renderInspectorTokenSummary('));
   const inspector = vm.runInNewContext(`${helper}; inspectorRecoverySteps`, {
     sameDisplayText: (left, right) => left === right,
   });
@@ -929,8 +936,7 @@ test('history summaries expose the original question and truthful status', () =>
   assert.match(summary.subtitle, /ADD_FILTER · 0 rows · failed · /);
 });
 
-test('independent questions offer a new-conversation action instead of continuing the thread', () => {
-  assert.ok(source.includes('body.clarification_required && body.operation === "NEW_QUERY"'));
-  assert.ok(source.includes('actionButton("Start new conversation"'));
-  assert.ok(source.includes('$("#resetButton").click()'));
+test('independent questions stay in the chat without a forced reset action', () => {
+  assert.ok(!source.includes('actionButton("Start new conversation"'));
+  assert.ok(source.includes('async function appendAssistant('));
 });

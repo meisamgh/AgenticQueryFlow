@@ -38,6 +38,7 @@ from semantic_text2sql.conversation import (
     requires_model_interpretation,
     resolve_turn,
 )
+from semantic_text2sql.conversational_bridge import ConversationalAnalyticsBridge
 from semantic_text2sql.data_requirement_validator import validate_reusability
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.explanation import deterministic_explanation, explain_turn_detailed
@@ -981,39 +982,20 @@ def create_app(
                             call_ledger=analytics_ledger,
                         )
                     try:
+                        # A visualization-only follow-up reads the complete result held
+                        # in RAM. Chart selection is deterministic; no model recalls rows
+                        # or regenerates the accepted SQL.
                         spec = None
-                        if len(source.columns) > 2 and viz_recommender_llm_enabled():
-                            model_calls_before = request_budget.model_calls
-                            proposals, model_usage, model_ms = await refine_charts_with_model(
-                                turn_completers.get(request.provider),
-                                provider=request.provider,
-                                model=request.model,
-                                question=request.message,
-                                columns=source.columns,
-                                rows=source.rows,
-                                budget=request_budget,
-                                required_chart_type=(
-                                    viz_intent.chart_type if viz_intent.explicit_type else None
-                                ),
+                        if not viz_intent.explicit_type:
+                            recommendations = recommend_charts(
+                                request.message,
+                                source.columns,
+                                source.rows,
+                                truncated=False,
                             )
-                            analytics_usage = _add_usage(analytics_usage, model_usage)
-                            if request_budget.model_calls > model_calls_before:
-                                analytics_ledger.append(
-                                    CallLedgerEntry(
-                                        component="visualization_recommendation",
-                                        kind="MODEL",
-                                        status="SUCCEEDED" if proposals else "FAILED",
-                                        provider=request.provider,
-                                        requested_model=request.model,
-                                        effective_model=request.model,
-                                        input_tokens=model_usage.input_tokens,
-                                        output_tokens=model_usage.output_tokens,
-                                        latency_ms=model_ms,
-                                    )
-                                )
-                            if proposals is not None:
+                            if recommendations is not None:
                                 spec = materialize_recommendation(
-                                    proposals.primary_chart,
+                                    recommendations.primary_chart,
                                     question=request.message,
                                     columns=source.columns,
                                     rows=source.rows,
@@ -1071,10 +1053,13 @@ def create_app(
                 # semantic changes route through the accepted text-to-SQL
                 # pipeline with the chart output hint.
             else:
-                # An incomplete saved preview cannot support a trustworthy chart.
+                # Never turn a bounded preview into a misleading complete chart.
                 clarification = (
-                    "The complete previous result is unavailable. "
-                    "Ask the original question again with the plot request."
+                    "The previous result exceeded its row limit, so plotting it would omit "
+                    "data. Narrow the question and include the plot request."
+                    if source is not None and source.truncated
+                    else "The previous result is no longer in server memory. Rerun the "
+                    "original question with the plot request."
                 )
                 return ChatResponse(
                     session_id=request.session_id,
@@ -1184,27 +1169,6 @@ def create_app(
                 message=clarification,
                 clarification_required=True,
                 clarification_question=clarification,
-                token_usage=conversation_usage,
-                call_ledger=conversation_ledger,
-                timings_ms={
-                    "conversation_interpretation": conversation_ms,
-                    "total": round((perf_counter() - started) * 1_000),
-                },
-            )
-        if has_matching_state and interpretation.operation == "NEW_QUERY":
-            message = (
-                "This conversation is for follow-ups to its original question. "
-                "Start a new conversation for an independent question."
-            )
-            return ChatResponse(
-                session_id=request.session_id,
-                operation="NEW_QUERY",
-                resolved_question=request.message,
-                conversation_interpretation=interpretation,
-                state=previous,
-                message=message,
-                clarification_required=True,
-                clarification_question=message,
                 token_usage=conversation_usage,
                 call_ledger=conversation_ledger,
                 timings_ms={
@@ -1708,6 +1672,16 @@ def create_app(
             return PresentationState(mode="sql", source_run_id=response.run_id)
         return response.presentation_state
 
+    def remember_result(request: ChatRequest, response: ChatResponse) -> None:
+        """Retain bounded executed rows for chart follow-ups, independent of history."""
+        if not response.generation or not response.generation.accepted:
+            return
+        key = (request.session_id, request.db_id)
+        recent_results.pop(key, None)
+        recent_results[key] = response
+        if len(recent_results) > 100:
+            recent_results.pop(next(iter(recent_results)))
+
     async def save_response(request: ChatRequest, response: ChatResponse) -> ChatResponse:
         if response.operation == "RESET_CONTEXT":
             recent_results.pop((request.session_id, request.db_id), None)
@@ -1744,23 +1718,14 @@ def create_app(
                     "history_saved": True,
                 }
             )
-            if (
-                saved_response.generation
-                and saved_response.generation.accepted
-                and not saved_response.generation.truncated
-            ):
-                key = (request.session_id, request.db_id)
-                recent_results.pop(key, None)
-                recent_results[key] = saved_response
-                if len(recent_results) > 100:
-                    recent_results.pop(next(iter(recent_results)))
+            remember_result(request, saved_response)
             return saved_response
         except Exception:  # History failures must not discard a completed query response.
             logger.warning("run_history_record_failed", exc_info=True)
+            remember_result(request, response)
             return response
 
-    @app.post("/api/chat", response_model=ChatResponse)
-    async def chat(request: ChatRequest) -> ChatResponse:
+    async def execute_chat(request: ChatRequest) -> ChatResponse:
         if request.parent_run_id:
             parent = runs.get(request.parent_run_id, request.session_id)
             if parent is None or parent.db_id != request.db_id:
@@ -1781,6 +1746,27 @@ def create_app(
         if previous and previous.db_id == request.db_id and response.operation != "NEW_QUERY":
             response = response.model_copy(update={"previous_sql": previous.last_sql})
         return await save_response(request, response)
+
+    bridge = ConversationalAnalyticsBridge(
+        database=sqlite,
+        postgres=postgres,
+        profiles=profiles,
+        glossaries=glossaries,
+        retriever=hybrid_retriever,
+        sql_handler=execute_chat,
+    )
+
+    @app.post("/api/chat", response_model=ChatResponse)
+    async def chat(request: ChatRequest) -> ChatResponse:
+        if os.environ.get("TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED", "false").casefold() != "true":
+            return await execute_chat(request)
+        try:
+            outcome = await bridge.run(request)
+        except DatabaseError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        if outcome.route == "sql":
+            return outcome.response
+        return await save_response(request, outcome.response)
 
     @app.post("/api/history/{run_id}/rerun", response_model=ChatResponse)
     async def rerun_history(run_id: str, session_id: str) -> ChatResponse:

@@ -19,6 +19,13 @@ https://github.com/user-attachments/assets/ac593a9c-802f-44c7-875d-02c9b4e0ca1f
 
 ## Architecture
 
+An opt-in [V6 conversational bridge](docs/V6_CONVERSATIONAL_BRIDGE.md) routes clear schema and
+approved-glossary questions to bounded metadata tools through LangGraph. All analytical questions
+continue through the existing `/api/chat` SQL workflow. Set
+`TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED=true` to enable it; the default remains the current
+conversation path. This bridge is an incremental integration, not the full V6 agent described in
+the design document.
+
 ```text
 Question -> conversation resolver
                  |
@@ -66,8 +73,11 @@ Time-series plots include drag/wheel zoom, a touch pinch gesture, and a range-sl
 when there are enough points. Chart export uses the active renderer. The plot receives the
 validated result rows without browser-side aggregation or dropping missing values.
 
-Each conversation follows one original analytical question. Corrections, explanations, filters,
-and plot follow-ups stay in that thread; an unrelated question prompts **New conversation**.
+Each chat can contain multiple independent analytical questions. Follow-ups, corrections,
+explanations, filters, and plots use the latest accepted query when relevant; a new question starts
+fresh query state within the same chat, without inheriting the previous SQL or chart.
+The inspector separates verified context, schema, recovery trace, measured pipeline timing,
+and token usage into dedicated tabs.
 For an explicit plot request with more than two returned columns, the selected model may propose
 chart axes from the executed result
 (including a validated Year+Month display axis). Proposed charts are checked against actual
@@ -153,23 +163,17 @@ multi-user authorization boundary.
   Data shows the executed rows and CSV export. The separate saved-question and branch buttons
   have been removed; conversation history remains available.
 - See a model-selected chart and plain-language answer when the returned data supports them.
-- For a complete chart result, switch among compatible recommended plots in the answer, change a displayed
-  metric/category, or show Top N without another SQL call. Long chronological series
-  have zoom controls; a zoom or display filter never changes the underlying query result.
+- For a complete chart result, switch among compatible recommended plots in the answer without another SQL call. Long chronological series
+  have zoom controls; chart zoom never changes the underlying query result.
   Explicit plot requests allow up to 500 bounded result rows; larger results are flagged as
   truncated and are not plotted. Missing line/bar measures remain visible as gaps, never zeros;
   stacked and composition charts reject missing measures. An axis change that would collapse
   separate rows requires a new validated query instead of silently dropping data.
   Chart warnings remain visible beside the chart; the SQL and Data tabs show the source query and rows.
-- Display filters over complete saved rows update the visible chart and Data view together.
-  The compact query filter bar instead loads relevant metric, grouping and categorical
-  choices from verified schema/glossary metadata and bounded live distinct-value search. Apply
-  or Reset sends a follow-up through the existing SQL generation, validation and execution path;
-  it does not edit SQL in the browser or silently filter an aggregate. The prior result remains
-  visible if the follow-up fails. Simple string equality/IN filters are preselected from the
-  accepted SQL using SQLGlot; ambiguous or derived predicates are not guessed. Charts with three
-  or more category points support touch pinch zoom, including horizontal bars.
-  Zero matches show an empty view, while Source Data and the accepted SQL remain unchanged.
+- Ask for filter, metric, or grouping changes in a conversational follow-up. The visible filter and
+  parameter panels have been removed; the existing SQL generation, validation, and execution path
+  handles such changes. Charts with three or more category points support touch pinch zoom,
+  including horizontal bars. Zero matches show an empty view, while Source Data and the accepted SQL remain unchanged.
 - Follow live backend stages and a timestamped activity log, including recovery schema/value
   checks and read-only probes. Timings are observations, not predicted completion percentages.
 - Cancel a running request; the configured database and model remain fixed during execution.

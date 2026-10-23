@@ -447,7 +447,8 @@ async function send(message, feedbackCategory = null) {
         message: message.trim(),
         parent_run_id: state.activeRunId,
         execute: true,
-        max_rows: state.pendingVizRequest ? 500 : 100,
+        // Keep the bounded full result available in server RAM for a later "Plot it".
+        max_rows: 500,
         feedback_category: feedbackCategory,
       }),
     });
@@ -1000,37 +1001,18 @@ function wireChartSection(article, presentation, generation, runId, recommendati
   const menu = section.querySelector(".chart-menu");
   const explorer = window.QueryflowChartExplorer;
   const original = presentation.chart_spec;
-  const panel = section.querySelector(".chart-explorer");
-  const options = explorer?.filters(original);
   const settingKey = runId ? `queryflow-chart-${runId}` : null;
   let stored = null;
   try { stored = settingKey ? JSON.parse(sessionStorage.getItem(settingKey) || "null") : null; }
   catch { stored = null; }
-  const settings = stored && typeof stored === "object" ? stored : {};
-  // Old chart sessions may contain date-window filters that no longer have a visible control.
-  delete settings.start;
-  delete settings.end;
+  // Do not revive filters from older sessions after removing their controls.
+  const settings = stored && typeof stored === "object"
+    ? {chartType: stored.chartType, zoom: stored.zoom} : {};
   const chartPres = { ...presentation, chart_spec: original };
   function saveSettings() {
     if (settingKey) {
       try { sessionStorage.setItem(settingKey, JSON.stringify(settings)); } catch { /* private browsing */ }
     }
-  }
-  function fillFilter(selector, values, emptyLabel = null) {
-    const select = section.querySelector(selector);
-    select.replaceChildren();
-    if (emptyLabel) {
-      const empty = document.createElement("option");
-      empty.value = "";
-      empty.textContent = emptyLabel;
-      select.append(empty);
-    }
-    values.forEach(value => {
-      const option = document.createElement("option");
-      option.value = String(value);
-      option.textContent = String(value);
-      select.append(option);
-    });
   }
   function renderCurrent() {
     const next = explorer?.apply(original, settings);
@@ -1065,25 +1047,6 @@ function wireChartSection(article, presentation, generation, runId, recommendati
     chartPres.chart_spec = next;
     article._visibleChartSpec = next;
     article._refreshDataScope?.();
-    const activeParts = [];
-    if (settings.rowFilters && Object.keys(settings.rowFilters).length)
-      activeParts.push(Object.entries(settings.rowFilters).map(([column, values]) =>
-        `${column}: ${values.length <= 3 ? values.join(" | ") : `${values.length} values`}`).join(", "));
-    if (settings.categories?.length) activeParts.push(settings.categories.join(", "));
-    if (settings.topN) activeParts.push(`Top ${settings.topN}`);
-    if (settings.x && settings.x !== original.x) activeParts.push(`X: ${settings.x}`);
-    if (settings.metrics?.length && (settings.metrics.length !== 1 || settings.metrics[0] !== original.y))
-      activeParts.push(settings.metrics.join(" + "));
-    if (settings.series !== undefined && settings.series !== original.series)
-      activeParts.push(`Series: ${settings.series || "none"}`);
-    if (settings.chartType && settings.chartType !== original.chart_type)
-      activeParts.push(settings.chartType.replaceAll("_", " "));
-    section.querySelector(".chart-category-current").textContent = settings.categories?.length
-      ? settings.categories.length === 1 ? settings.categories[0] : `${settings.categories.length} selected`
-      : "All";
-    const selectedMeasures = settings.metrics?.length ? settings.metrics : [original.y];
-    section.querySelector(".chart-measures-current").textContent = selectedMeasures.length === 1
-      ? selectedMeasures[0] : `${selectedMeasures.length} selected`;
     section.querySelector(".chart-sub").textContent = next.chart_type.replaceAll("_", " ");
     article._echart = renderChartInto(slot, chartPres, generation).echarts;
     article._echart?.onZoom?.(range => {
@@ -1122,10 +1085,6 @@ function wireChartSection(article, presentation, generation, runId, recommendati
         kinds.append(button);
       });
     }
-    const active = activeParts.length;
-    const count = section.querySelector(".chart-filter-count");
-    count.hidden = active === 0;
-    count.textContent = active ? String(active) : "";
   }
   article._echart = null;
   article._chartType = presentation.chart_type;
@@ -1178,102 +1137,11 @@ function wireChartSection(article, presentation, generation, runId, recommendati
     },
   };
   article._setChartViewRowFilters = filters => article._chartViewState.setRowFilters(filters);
-  if (explorer && options && panel) {
-    panel.hidden = false;
-    fillFilter(".chart-category-filter", options.categories);
-    fillFilter(".chart-metric-filter", options.metric);
-    fillFilter(".chart-measures-filter", options.metric);
-    fillFilter(".chart-x-filter", options.dimensions);
-    fillFilter(".chart-series-filter", options.dimensions.filter(name => name !== original.x), "None");
-    section.querySelector(".chart-category-control").hidden = !options.categories.length;
-    section.querySelector(".chart-metric-control").hidden = options.metric.length < 2;
-    section.querySelector(".chart-measures-control").hidden = options.metric.length < 2;
-    section.querySelector(".chart-x-control").hidden = options.dimensions.length < 2;
-    section.querySelector(".chart-series-control").hidden = options.dimensions.length < 2;
-    section.querySelector(".chart-top-control").hidden = explorer.isTime(original) || Boolean(original.series)
-      || new Set(original.data.map(row => String(row[original.x]))).size !== original.data.length;
-    const inputs = { metric: ".chart-metric-filter", x: ".chart-x-filter", series: ".chart-series-filter",
-      topN: ".chart-top-filter" };
-    const syncInputs = () => Object.entries(inputs).forEach(([key, selector]) => {
-      const select = section.querySelector(selector);
-      select.value = settings[key] ?? (key === "metric" ? original.y
-        : key === "x" ? original.x : key === "series" ? original.series || "" : "");
-      if (!select.value && key === "metric") select.value = original.y;
-      if (!select.value && key === "x") select.value = original.x;
-    });
-    const syncMeasures = () => {
-      const selected = new Set(settings.metrics || [original.y]);
-      [...section.querySelector(".chart-measures-filter").options].forEach(option => {
-        option.selected = selected.has(option.value);
-      });
-      section.querySelector(".chart-legend-filter").checked = settings.legend !== false;
-    };
-    const syncCategories = () => {
-      const selected = new Set(settings.categories || []);
-      [...section.querySelector(".chart-category-filter").options].forEach(option => {
-        option.selected = selected.has(option.value);
-      });
-    };
-    const reset = () => {
-      Object.keys(settings).forEach(key => delete settings[key]);
-      saveSettings();
-      syncInputs();
-      syncCategories();
-      syncMeasures();
-      renderCurrent();
-    };
-    section.querySelector(".chart-apply-filter").addEventListener("click", () => {
-      Object.entries(inputs).forEach(([key, selector]) => {
-        const value = section.querySelector(selector).value;
-        settings[key] = key === "topN" ? (value ? Number(value) : null) : value || null;
-      });
-      settings.categories = [...section.querySelector(".chart-category-filter").selectedOptions]
-        .map(option => option.value);
-      settings.metrics = [...section.querySelector(".chart-measures-filter").selectedOptions]
-        .map(option => option.value);
-      if (settings.metrics.length && !explorer.compatibleMeasures(settings.metrics, original)) {
-        toast("These measures have incompatible units. Choose measures with the same verified unit.");
-        return;
-      }
-      settings.legend = section.querySelector(".chart-legend-filter").checked;
-      section.querySelectorAll(".chart-choice-chip").forEach(choice => { choice.open = false; });
-      delete settings.zoom;
-      saveSettings();
-      renderCurrent();
-    });
-    section.querySelector(".chart-reset-filter").addEventListener("click", reset);
-    section.querySelector(".chart-clear-filter").addEventListener("click", () => {
-      reset();
-    });
-    section.querySelector(".chart-reset-zoom").addEventListener("click", () => {
-      delete settings.zoom;
-      saveSettings();
-      article._echart?.resetZoom?.();
-    });
-    syncInputs();
-    syncCategories();
-    syncMeasures();
-    const fields = generation.model_context?.tables || generation.model_context?.execution_context?.tables || {};
-    const availableFields = [...new Set([
-      ...Object.entries(fields).flatMap(([table, meta]) =>
-        (Array.isArray(meta.columns) ? meta.columns : Object.keys(meta.columns || {}))
-          .map(column => `${table}.${column}`)),
-      ...browserTables.flatMap(table => (table.columns || []).map(column => `${table.name}.${column.name}`)),
-    ])].sort();
-    fillFilter(".chart-query-field", availableFields);
-    section.querySelector(".chart-query-parameters").hidden = !availableFields.length;
-    section.querySelector(".chart-apply-query").addEventListener("click", async () => {
-      const field = section.querySelector(".chart-query-field").value;
-      const operator = section.querySelector(".chart-query-operator").value;
-      const value = section.querySelector(".chart-query-value").value.trim();
-      if (!availableFields.includes(field) || !value || !["=", "!=", ">", "<"].includes(operator)) {
-        toast("Choose a verified field, operator and value."); return;
-      }
-      try {
-        await sendFromAnswer(runId, `Add the filter ${JSON.stringify(field)} ${operator} ${JSON.stringify(value)} to the previous query. Preserve every other accepted requirement. Verify the value and regenerate safely.`);
-      } catch (error) { showError(error.message); }
-    });
-  }
+  section.querySelector(".chart-reset-zoom").addEventListener("click", () => {
+    delete settings.zoom;
+    saveSettings();
+    article._echart?.resetZoom?.();
+  });
   renderCurrent();
   /* Theme switches recolor the shared token palette, so live charts repaint. */
   article._chartRerender = renderCurrent;
@@ -1298,9 +1166,9 @@ function wireChartSection(article, presentation, generation, runId, recommendati
       } else if (action === "expand") {
         openChartFullscreen(article, chartPres, generation);
       } else if (action === "inspect") {
-        revealInspector("validation");
-        const validation = $("#validationSection");
-        if (validation) { validation.open = true; validation.scrollIntoView({ behavior: "smooth", block: "start" }); }
+        revealInspector("pipeline");
+        const pipeline = $("#pipelineSection");
+        if (pipeline) { pipeline.open = true; pipeline.scrollIntoView({ behavior: "smooth", block: "start" }); }
       }
     });
   });
@@ -1481,163 +1349,6 @@ function renderAnswerPreview(fragment, body, mode) {
   preview.append(label, value);
 }
 
-const filterCapabilities = new Map();
-async function queryFilterCapabilities(dbId) {
-  const cached = filterCapabilities.get(dbId);
-  if (!cached || Date.now() - cached.at > 60_000) {
-    const promise = api(`/api/databases/${encodeURIComponent(dbId)}/analytics-capabilities`)
-      .catch(error => { filterCapabilities.delete(dbId); throw error; });
-    filterCapabilities.set(dbId, {at: Date.now(), promise});
-  }
-  return filterCapabilities.get(dbId).promise;
-}
-
-function wireQueryFilterBar(article, body, runId) {
-  const bar = article.querySelector(".query-filter-bar");
-  if (!bar || !runId || !window.QueryflowFilters) return;
-  const controls = bar.querySelector(".query-filter-controls");
-  const status = bar.querySelector(".query-filter-status");
-  const apply = bar.querySelector(".query-filter-apply");
-  const reset = bar.querySelector(".query-filter-reset");
-  const dbId = body.generation?.db_id || $("#databaseSelect").value;
-  const contract = body.state?.semantic_contract || body.generation?.semantic_contract || {};
-  const context = body.generation?.model_context || {};
-  const tables = new Set(window.QueryflowFilters.selectedTables(context));
-  const fields = window.QueryflowFilters.relevantFields(body).filter(item => item.control !== "date_range");
-  const selectedColumns = new Set(Object.entries(context.tables || context.execution_context?.tables || {})
-    .flatMap(([table, meta]) => (Array.isArray(meta.columns) ? meta.columns : Object.keys(meta.columns || {}))
-      .map(column => `${table}.${column}`)));
-  const editors = [];
-  const makeSelect = (label, items, current, kind) => {
-    const distinct = [...new Set(items.filter(Boolean).map(String))];
-    if (distinct.length < 2) return;
-    const wrap = document.createElement("label");
-    wrap.className = "query-filter-control";
-    const title = document.createElement("span"); title.textContent = label;
-    const select = document.createElement("select"); select.setAttribute("aria-label", label);
-    for (const value of distinct) {
-      const option = document.createElement("option");
-      option.value = value; option.textContent = readableResultLabel(value); select.append(option);
-    }
-    if (distinct.includes(String(current))) select.value = String(current);
-    const baseline = select.value;
-    wrap.append(title, select);
-    if (kind === "metric") controls.prepend(wrap); else controls.append(wrap);
-    editors.push({ read: () => select.value === baseline ? null : {kind, value: select.value},
-      reset: () => { select.value = baseline; } });
-  };
-  const addField = field => {
-    const name = field.column.toLowerCase();
-    const label = /country/.test(name) ? "Country" : "Category";
-    // A compact bar has one control per role; prefer the field already used by SQL.
-    if (controls.querySelector(`[data-filter-role="${label}"]`)) return;
-    const wrap = document.createElement("div");
-    wrap.className = "query-filter-control";
-    wrap.dataset.filterRole = label;
-    const title = document.createElement("span"); title.textContent = label;
-    wrap.append(title);
-    const existing = body.suggested_filters?.applied_values?.[field.field]
-      || window.QueryflowFilters.selectedValues(contract, field.field);
-    {
-      const menu = document.createElement("details"); menu.className = "query-filter-menu";
-      const summary = document.createElement("summary"); summary.textContent = existing.length ? existing.join(", ") : "All";
-      const search = document.createElement("input"); search.type = "search"; search.placeholder = "Search values";
-      search.setAttribute("aria-label", `Search ${label.toLowerCase()} values`);
-      const choices = document.createElement("div"); choices.className = "query-filter-values";
-      const selected = new Set(existing);
-      let loaded = false;
-      const renderValues = values => {
-        choices.replaceChildren();
-        const all = document.createElement("button"); all.type = "button"; all.textContent = "All";
-        all.addEventListener("click", () => { selected.clear(); summary.textContent = "All"; renderValues(values); });
-        choices.append(all);
-        for (const value of [...new Set([...selected, ...values])]) {
-          const option = document.createElement("label");
-          const check = document.createElement("input"); check.type = "checkbox"; check.value = value;
-          check.checked = selected.has(value);
-          check.addEventListener("change", () => {
-            if (check.checked) selected.add(value); else selected.delete(value);
-            summary.textContent = selected.size ? [...selected].join(", ") : "All";
-          });
-          option.append(check, document.createTextNode(value)); choices.append(option);
-        }
-      };
-      const load = async () => {
-        choices.textContent = "Loading values…";
-        try {
-          const result = await api(`/api/databases/${encodeURIComponent(dbId)}/filter-values?table=${encodeURIComponent(field.table)}&column=${encodeURIComponent(field.column)}&search=${encodeURIComponent(search.value.trim())}`);
-          renderValues(result.values || []);
-          if (result.more_available) {
-            const note = document.createElement("small"); note.textContent = "Search for more values"; choices.append(note);
-          } else if (!result.values?.length && !selected.size) choices.textContent = "No matching values";
-        } catch (error) { choices.textContent = `Values unavailable: ${error.message}`; }
-      };
-      menu.addEventListener("toggle", () => { if (menu.open && !loaded) { loaded = true; void load(); } });
-      let timer;
-      search.addEventListener("input", () => { clearTimeout(timer); timer = setTimeout(load, 220); });
-      menu.append(summary, search, choices); wrap.append(menu);
-      editors.push({ read: () => {
-        const values = [...selected];
-        return values.length === existing.length && values.every(value => existing.includes(value))
-          ? null : {kind: "values", field: field.field, values};
-      }, reset: () => { selected.clear(); existing.forEach(value => selected.add(value));
-        summary.textContent = existing.length ? existing.join(", ") : "All"; if (loaded) void load(); } });
-      editors.at(-1).clear = () => existing.length ? {kind: "values", field: field.field, values: []} : null;
-    }
-    controls.append(wrap);
-  };
-  // Only expose roles backed by selected, verified schema fields.
-  fields.filter(item => /country/i.test(item.column)).forEach(addField);
-  fields.filter(item => !/country/i.test(item.column)).forEach(addField);
-  void queryFilterCapabilities(dbId).then(capabilities => {
-    const metricNames = [
-      ...(contract.measures || []),
-      ...(capabilities.available_kpis || []).filter(item => (item.columns || []).some(column => tables.has(String(column).split(".")[0]))).map(item => item.name),
-      ...(capabilities.measures || []).filter(item => selectedColumns.has(`${item.table}.${item.name}`))
-        .map(item => `${item.table}.${item.name}`),
-    ];
-    if (contract.measures?.length) makeSelect("Metric", metricNames, contract.measures[0], "metric");
-    const groups = [
-      ...(contract.grain || []),
-      ...(capabilities.dimensions || []).filter(item => selectedColumns.has(`${item.table}.${item.name}`) && !/id$/i.test(item.name))
-        .map(item => `${item.table}.${item.name}`),
-    ];
-    if (contract.grain?.length) makeSelect("Group By", groups, contract.grain[0], "group");
-    bar.hidden = !controls.children.length;
-  }).catch(error => { status.textContent = `Some filter choices could not load: ${error.message}`; });
-  bar.hidden = !controls.children.length;
-  apply.addEventListener("click", async () => {
-    const changes = editors.map(editor => editor.read()).filter(Boolean);
-    if (!changes.length) { status.textContent = "No changes to apply."; return; }
-    if ($("#databaseSelect").value !== dbId) { status.textContent = "Switch back to this result's database before applying filters."; return; }
-    if (state.busy) return;
-    apply.disabled = true; reset.disabled = true; status.textContent = "Updating query and results…";
-    try {
-      const prompt = window.QueryflowFilters.changePrompt(changes)
-        + (article.querySelector(".chart-section") ? " Keep the existing visualization on the refreshed result." : "");
-      const result = await sendFromAnswer(runId, prompt);
-      status.textContent = result?.generation?.accepted ? "Updated result appears below."
-        : "Update did not produce a new accepted result; original result is unchanged.";
-    } catch (error) { status.textContent = `Update failed: ${error.message}`; }
-    finally { apply.disabled = false; reset.disabled = false; }
-  });
-  reset.addEventListener("click", async () => {
-    const changes = editors.map(editor => editor.clear?.()).filter(Boolean);
-    editors.forEach(editor => editor.reset());
-    if (!changes.length) { status.textContent = "Selections reset."; return; }
-    if ($("#databaseSelect").value !== dbId) { status.textContent = "Switch back to this result's database before resetting filters."; return; }
-    if (state.busy) return;
-    apply.disabled = true; reset.disabled = true; status.textContent = "Removing query filters…";
-    try {
-      const prompt = window.QueryflowFilters.changePrompt(changes)
-        + (article.querySelector(".chart-section") ? " Keep the existing visualization on the refreshed result." : "");
-      const result = await sendFromAnswer(runId, prompt);
-      status.textContent = result?.generation?.accepted ? "Reset result appears below."
-        : "Reset did not produce a new accepted result; original result is unchanged.";
-    } catch (error) { status.textContent = `Reset failed: ${error.message}`; }
-    finally { apply.disabled = false; reset.disabled = false; }
-  });
-}
 
 async function appendAssistant(body, elapsed, options = {}) {
   const fragment = $("#assistantTemplate").content.cloneNode(true);
@@ -1719,12 +1430,6 @@ async function appendAssistant(body, elapsed, options = {}) {
   fragment.querySelector(".result-panel-pane").hidden = sqlNotAvailable || explanatory;
 
   const actions = fragment.querySelector(".answer-actions");
-  if (body.clarification_required && body.operation === "NEW_QUERY" && body.state) {
-    actions.append(actionButton("Start new conversation", "plus", () => {
-      if (!$("#messageInput").value.trim()) $("#messageInput").value = body.resolved_question || "";
-      $("#resetButton").click();
-    }));
-  }
   if (accepted && !explanatory && !sqlNotAvailable) {
     const sqlActions = fragment.querySelector(".sql-actions");
     const runId = body.run_id || options.run?.run_id || null;
@@ -1786,7 +1491,6 @@ async function appendAssistant(body, elapsed, options = {}) {
     wireDataScope(article, generation);
   }
   if (mode === "chart") wireChartSection(article, presentation, generation, body.run_id, body.chart_recommendations);
-  if (accepted && !options.restored) wireQueryFilterBar(article, body, body.run_id);
   if (accepted && !explanatory && !body.clarification_required) {
     wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length)});
   }
@@ -2078,16 +1782,15 @@ function updateInspector(body) {
   }
   renderInspectorSchema();
   renderInspectorRecovery(body);
-  renderInspectorPerformance(body);
+  renderInspectorTokenSummary(body);
   renderInspectorRunDetails(body);
   prioritizeInspector(body);
 }
 
-/* The inspector holds everything technical that used to sit under the answer:
-   validation attempts, token accounting, pipeline timings and the verified
-   model context. Sections are ordered by what the current response is. */
+/* Keep measured pipeline timing separate from token accounting and attempts. */
 function renderInspectorRunDetails(body) {
-  const target = $("#validationContent");
+  const target = $("#tokensContent");
+  const pipelineTarget = $("#pipelineContent");
   const schemaContent = $("#schemaContent");
   if (!target) return;
   const generation = body.generation || {};
@@ -2111,9 +1814,22 @@ function renderInspectorRunDetails(body) {
     '</details>',
   ].join("\n");
   renderTokenAccounting(tech, body, generation);
-  renderPipelineDetails(tech, body.timings_ms || {}, body, generation);
   renderAttempts(tech, generation.attempts || []);
-  [...tech.querySelectorAll("details")].forEach((block) => target.append(block));
+  const tokenCard = tech.querySelector(".token-card");
+  const attemptsCard = tech.querySelector(".attempts-panel");
+  if (tokenCard) { tokenCard.open = true; target.append(tokenCard); }
+  const pipelineCard = tech.querySelector(".pipeline-details");
+  if (pipelineCard && pipelineTarget) {
+    pipelineTarget.replaceChildren();
+    const kicker = document.createElement("div");
+    kicker.className = "inspect-kicker";
+    kicker.textContent = "PIPELINE · MEASURED TIME";
+    pipelineTarget.append(kicker);
+    pipelineTarget.append(pipelineCard);
+    pipelineCard.open = true;
+    renderPipelineDetails(pipelineTarget, body.timings_ms || {}, body, generation);
+    if (attemptsCard) pipelineTarget.append(attemptsCard);
+  }
   const context = JSON.stringify(generation.model_context || {}, null, 2);
   if (context !== "{}" && schemaContent) {
     schemaContent.querySelectorAll("[data-context-panel]").forEach((node) => node.remove());
@@ -2349,30 +2065,18 @@ function renderInspectorRecovery(body) {
   box.append(info);
 }
 
-function renderInspectorPerformance(body) {
-  const box = $("#validationContent");
+function renderInspectorTokenSummary(body) {
+  const box = $("#tokensContent");
   box.replaceChildren();
   const kicker = document.createElement("div");
   kicker.className = "inspect-kicker";
-  kicker.textContent = "EXECUTION · MEASURED DETAILS";
+  kicker.textContent = "MODEL USAGE · TOKENS";
   box.append(kicker);
   const generation = body.generation || {};
-  const timings = body.timings_ms || {};
   const usage = body.token_usage || generation.token_usage || {};
   const total = usage.input_tokens == null && usage.output_tokens == null ? null : (usage.input_tokens || 0) + (usage.output_tokens || 0);
-  const attempts = generation.attempts || [];
-  const failed = attempts.filter(a => attemptOutcome(a) === "failed").length;
-  box.append(metaRow("Attempts", `${attempts.length}${failed ? ` (${failed} failed)` : ""}`));
-  box.append(metaRow("Total latency", timings.total != null ? `${timings.total} ms` : "unreported"));
   box.append(metaRow("Model calls in ledger", String((body.call_ledger || []).length)));
   box.append(metaRow("Total tokens", total == null ? "unavailable" : total.toLocaleString()));
-  const rejected = attempts.filter(a => attemptOutcome(a) !== "passed");
-  if (rejected.length) {
-    const label = document.createElement("p");
-    label.className = "uq-note";
-    label.textContent = rejected.map(a => `${a.validation?.code || "?"}: ${a.validation?.message || ""}`.trim()).slice(0, 3).join(" · ");
-    box.append(label);
-  }
 }
 
 function wireSqlIdents(fragment, article) {
@@ -2623,12 +2327,23 @@ function renderAttempts(fragment, attempts) {
 function renderPipelineDetails(fragment, timings, body, generation) {
   const container = fragment.querySelector(".pipeline-rows");
   if (!container) return;
+  container.replaceChildren();
+  const total = Number(timings.total);
+  const knownTotal = Number.isFinite(total) && total > 0 ? total : null;
+  const headline = document.createElement("div");
+  headline.className = "pipeline-total";
+  const headlineLabel = document.createElement("span");
+  headlineLabel.textContent = "Total request";
+  const headlineValue = document.createElement("strong");
+  headlineValue.textContent = knownTotal == null ? "Not reported" : `${(knownTotal / 1000).toFixed(1)} s`;
+  headline.append(headlineLabel, headlineValue);
+  container.append(headline);
   const stages = [
     ["Conversation interpretation", timings.conversation_interpretation],
+    ["Analytics planning", timings.analytics_planning],
     ["Routing", timings.routing],
     ["Context planning", timings.planning],
     ["Generation / validation / execution", timings.generation_validation_execution],
-    ["Total request", timings.total],
   ];
   stages.forEach(([label, milliseconds]) => {
     const row = document.createElement("div");
@@ -2636,8 +2351,19 @@ function renderPipelineDetails(fragment, timings, body, generation) {
     const status = document.createElement("span");
     status.textContent = label;
     const duration = document.createElement("b");
-    duration.textContent = milliseconds == null ? "Not reported" : `${Number(milliseconds).toLocaleString()} ms`;
+    const measured = milliseconds == null ? null : Number(milliseconds);
+    duration.textContent = measured == null || !Number.isFinite(measured)
+      ? "Not reported" : `${measured.toLocaleString()} ms`;
     row.append(status, duration);
+    const track = document.createElement("div");
+    track.className = "pipeline-bar-track";
+    track.setAttribute("aria-hidden", "true");
+    const bar = document.createElement("span");
+    bar.className = "pipeline-bar-fill";
+    bar.style.width = `${knownTotal == null || measured == null || !Number.isFinite(measured)
+      ? 0 : Math.min(100, Math.max(0, measured / knownTotal * 100))}%`;
+    track.append(bar);
+    row.append(track);
     container.append(row);
   });
   if (body.progress_events?.length) {
@@ -2855,7 +2581,8 @@ const INSPECTOR_SECTIONS = {
   understanding: "#understandingSection",
   schema: "#schemaSection",
   recovery: "#recoverySection",
-  validation: "#validationSection",
+  pipeline: "#pipelineSection",
+  tokens: "#tokensSection",
 };
 
 function selectInspectorTab(tab) {

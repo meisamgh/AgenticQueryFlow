@@ -127,7 +127,8 @@
           <button type="button" role="tab" data-inspector-tab="understanding" aria-selected="true">Context</button>
           <button type="button" role="tab" data-inspector-tab="schema" aria-selected="false">Schema</button>
           <button type="button" role="tab" data-inspector-tab="recovery" aria-selected="false">Recovery trace</button>
-          <button type="button" role="tab" data-inspector-tab="validation" aria-selected="false">Details</button>
+          <button type="button" role="tab" data-inspector-tab="pipeline" aria-selected="false">Pipeline</button>
+          <button type="button" role="tab" data-inspector-tab="tokens" aria-selected="false">Tokens</button>
         </nav>
         <div class="inspector-body">
           <details class="inspector-section" id="understandingSection" open>
@@ -146,9 +147,13 @@
             <summary><span data-icon="binoculars"></span> Recovery evidence</summary>
             <div class="inspector-content" id="recoveryMini"><div class="inspect-kicker">INVESTIGATION · VERIFIED EVIDENCE</div><p class="inspector-empty">The recovery agent only activates on anomalies.</p></div>
           </details>
-          <details class="inspector-section" id="validationSection">
-            <summary><span data-icon="shield"></span> Validation &amp; performance</summary>
-            <div class="inspector-content" id="validationContent"><div class="inspect-kicker">EXECUTION · MEASURED DETAILS</div><p class="inspector-empty">Attempts, timings and token usage appear after a run.</p></div>
+          <details class="inspector-section" id="pipelineSection">
+            <summary><span data-icon="clock"></span> Pipeline</summary>
+            <div class="inspector-content" id="pipelineContent"><div class="inspect-kicker">PIPELINE · MEASURED TIME</div><p class="inspector-empty">Stage timing appears after a run.</p></div>
+          </details>
+          <details class="inspector-section" id="tokensSection">
+            <summary><span data-icon="hash"></span> Tokens</summary>
+            <div class="inspector-content" id="tokensContent"><div class="inspect-kicker">MODEL USAGE · TOKENS</div><p class="inspector-empty">Token usage appears after a run.</p></div>
           </details>
         </div>
       </aside>
@@ -171,11 +176,6 @@
               <button type="button" role="tab" data-response-tab="sql" aria-selected="false">SQL</button>
             </nav>
             <div class="answer-tab-panel" role="tabpanel">
-              <section class="query-filter-bar" aria-label="Refine this query" hidden>
-                <div class="query-filter-controls"></div>
-                <div class="query-filter-actions"><button type="button" class="query-filter-apply">Apply</button><button type="button" class="query-filter-reset">Reset</button></div>
-                <span class="query-filter-status" role="status" aria-live="polite"></span>
-              </section>
               <p class="response-note"></p>
               <p class="presentation-note" hidden></p>
               <div class="chart-section" hidden>
@@ -201,25 +201,6 @@
                 </div>
               </header>
               <div class="recommended-plots"><span>Recommended plots</span><div class="chart-kinds" hidden></div></div>
-              <div class="chart-explorer" hidden>
-                <details class="chart-filter-panel">
-                  <summary>Filters &amp; Parameters <span class="chart-filter-count" hidden></span></summary>
-                  <div class="chart-filter-controls" aria-label="Display-only chart parameters">
-                    <label class="chart-parameter-chip chart-x-control" hidden><span>X-axis</span><select class="chart-x-filter" aria-label="Chart X-axis"></select></label>
-                    <label class="chart-parameter-chip chart-series-control" hidden><span>Series</span><select class="chart-series-filter" aria-label="Chart series"></select></label>
-                    <details class="chart-parameter-chip chart-choice-chip chart-category-control" hidden><summary><span>Category</span><strong class="chart-category-current">All</strong></summary><div class="chart-choice-menu"><label for="chartCategoryFilter">Select categories</label><select id="chartCategoryFilter" class="chart-category-filter" multiple size="4"></select></div></details>
-                    <label class="chart-parameter-chip chart-metric-control" hidden><span>Metric</span><select class="chart-metric-filter" aria-label="Chart metric"></select></label>
-                    <details class="chart-parameter-chip chart-choice-chip chart-measures-control" hidden><summary><span>Measures</span><strong class="chart-measures-current">Recommended</strong></summary><div class="chart-choice-menu"><label for="chartMeasuresFilter">Select measures</label><select id="chartMeasuresFilter" class="chart-measures-filter" multiple size="4"></select></div></details>
-                    <label class="chart-parameter-chip chart-top-control" hidden><span>Top N</span><select class="chart-top-filter" aria-label="Visible top categories"><option value="">All</option><option value="5">5</option><option value="10">10</option><option value="20">20</option></select></label>
-                    <label class="chart-parameter-chip chart-legend-control"><span>Legend</span><input type="checkbox" class="chart-legend-filter" checked aria-label="Show chart legend"></label>
-                    <button type="button" class="chart-apply-filter">Apply to chart</button>
-                    <button type="button" class="chart-reset-filter">Reset to recommended</button>
-                    <button type="button" class="chart-clear-filter">Clear display filters</button>
-                  </div>
-                  <div class="chart-query-parameters"><strong>Change the query</strong><p>For a dimension or value missing from this result, generate a new validated read-only query.</p><label class="chart-parameter-chip"><span>Field</span><select class="chart-query-field" aria-label="Query filter field"></select></label><label class="chart-parameter-chip"><span>Operator</span><select class="chart-query-operator" aria-label="Query filter operator"><option value="=">is</option><option value="!=">is not</option><option value=">">greater than</option><option value="<">less than</option></select></label><label class="chart-parameter-chip"><span>Value</span><input class="chart-query-value" maxlength="120" autocomplete="off" aria-label="Query filter value"></label><button type="button" class="chart-apply-query">Apply to query</button></div>
-                  <p class="chart-filter-note">Chart controls change only the displayed, complete result. Apply to query creates a new SQL result through Queryflow.</p>
-                </details>
-              </div>
               <div class="chart-slot"></div>
               <div class="chart-zoom-guide" hidden>Time navigator · drag to zoom, pinch on touch, or use the range slider below the plot.</div>
               <div class="chart-zoom-actions" hidden><button type="button" class="chart-reset-zoom">Reset zoom</button></div>
@@ -307,7 +288,6 @@
     <script src="/static/echarts_view.js?v=12"></script>
     <script src="/static/plotly_view.js?v=1"></script>
     <script src="/static/chart_explorer.js?v=2"></script>
-    <script src="/static/query_filters.js?v=1"></script>
     <script src="/static/app.js?v=qf4-20"></script>
   </body>
 </html>
