@@ -189,3 +189,35 @@ def test_missing_time_grain_is_not_invented_by_plotting(
     assert "REQUERY_REQUIRED" in top.prompts[-1]
     assert "coarser grain" in response["message"]
     assert response["plot_status"] == "REQUERY_REQUIRED"
+
+
+def test_failed_current_sql_cannot_plot_stale_accepted_result(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    class FailSecondSQL(ScriptedSQL):
+        async def generate(self, **kwargs: Any) -> tuple[str, int]:
+            question = str(kwargs["question"])
+            if "missing metric" in question.casefold():
+                self.calls.append(question)
+                return "SELECT missing_column FROM yearmonth", 1
+            return await super().generate(**kwargs)
+
+    top = ScriptedCompleter([
+        _tool("NEW_QUERY", "ask_data", "Total consumption by currency",
+              operation="NEW_QUERY"),
+        _answer("NEW_QUERY", "Here are currency totals."),
+        _tool("NEW_QUERY", "ask_data", "Plot missing metric by currency",
+              operation="NEW_QUERY"),
+        _tool("VISUALIZE", "change_visualization", "Plot the current result"),
+        _answer("VISUALIZE", "Here is the chart."),
+    ])
+    plotting = ScriptedCompleter([])
+    sql = FailSecondSQL()
+    client = _client(tmp_path, monkeypatch, top, plotting, sql)
+    accepted = _post(client, "Total consumption by currency", "stale")
+    assert accepted["generation"]["accepted"] is True
+    failed = _post(client, "Plot the missing metric by currency", "stale")
+    assert failed["plot_status"] == "REQUERY_REQUIRED"
+    assert failed["presentation"] is None or failed["presentation"]["chart_spec"] is None
+    assert plotting.calls == 0
+    assert "Here is the chart" not in failed["message"]

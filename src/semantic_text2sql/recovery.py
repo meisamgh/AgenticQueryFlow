@@ -716,6 +716,49 @@ class RecoveryCoordinator:
                         evidence_id=evidence_id,
                     )
                 )
+                absent_key = _verified_absent_requested_key(
+                    question, failed_sql, self.tools.schema, tool, result
+                ) if mode == "ZERO_RESULT" else None
+                if absent_key is not None:
+                    table, column, value = absent_key
+                    diagnosis = (
+                        f"Customer ID {value} is not in the {table} table."
+                        if column.casefold() == "customerid"
+                        else f"{column} {value} is not in the {table} table."
+                    )
+                    if progress:
+                        progress("recovery_decision")
+                    return RecoveryTrace(
+                        mode="ZERO_RESULT",
+                        failure_code=failure_code,
+                        failure_category=category,
+                        diagnosis_code="REQUESTED_KEY_ABSENT",
+                        diagnosis_summary=diagnosis,
+                        agent_diagnosis=diagnosis,
+                        agent_confidence=1.0,
+                        agent_action="INFORM",
+                        claims=[RecoveryClaim(
+                            claim_type="VALUE_ABSENT", statement=diagnosis,
+                            evidence_ids=[evidence_id], table=table,
+                            column=column, value=value,
+                        )],
+                        tool_calls=calls,
+                        evidence=[
+                            f"failure-1 {failure_code}: {failure_message}",
+                            f"{evidence_id} {tool}: {result}",
+                        ],
+                        usage=RecoveryUsage(
+                            llm_calls=attempted_model_calls,
+                            token_usage=total_usage,
+                            database_probe_count=self.tools.database_probe_count,
+                            latency_ms=round((perf_counter() - started) * 1_000),
+                            max_tool_calls=MAX_RECOVERY_TOOL_CALLS,
+                            max_database_probes=self.tools.max_database_probes,
+                            max_recovery_ms=round(self.tools.max_recovery_seconds * 1_000),
+                            budget_exhausted=self.tools.budget_exhausted,
+                            estimated_llm_cost_usd=None,
+                        ),
+                    )
         except Exception:
             return await fallback_with_agent_usage()
         return await fallback_with_agent_usage()
@@ -961,6 +1004,62 @@ def _claim_has_compatible_evidence(
     if claim.claim_type == "JOIN_EFFECT":
         return any(_database_probe_has(item, require_join=True) for item in cited_observations)
     return False
+
+
+def _verified_absent_requested_key(
+    question: str,
+    sql: str,
+    schema: SchemaInfo,
+    tool: str,
+    result: dict[str, Any],
+) -> tuple[str, str, str] | None:
+    """Stop only for an absent, explicitly requested primary-key equality.
+
+    An arbitrary absent lookup or a SEARCH result cannot establish why the
+    user's SQL returned no rows.
+    """
+    if tool != "inspect_values" or result.get("mode") != "EXACT":
+        return None
+    if result.get("exact_match") is not False:
+        return None
+    table = str(result.get("table") or "")
+    column = str(result.get("column") or "")
+    value = str(result.get("value") or "")
+    if not table or not column or not value:
+        return None
+    live_table = next((item for item in schema.tables if item.name == table), None)
+    if live_table is None or not any(
+        item.name == column and item.primary_key for item in live_table.columns
+    ):
+        return None
+    if re.search(rf"(?<!\w){re.escape(value)}(?!\w)", question, re.I) is None:
+        return None
+    try:
+        tree = parse_one(sql, dialect=schema.dialect)
+    except Exception:
+        return None
+    aliases = {
+        item.alias_or_name.casefold(): item.name.casefold()
+        for item in tree.find_all(exp.Table)
+    }
+    for where in tree.find_all(exp.Where):
+        for predicate in where.find_all(exp.EQ):
+            sides = ((predicate.left, predicate.right), (predicate.right, predicate.left))
+            for left, right in sides:
+                if not isinstance(left, exp.Column) or not isinstance(right, exp.Literal):
+                    continue
+                owner = aliases.get(left.table.casefold(), left.table.casefold())
+                if (
+                    left.name.casefold() == column.casefold()
+                    and str(right.this) == value
+                    and (
+                        owner == table.casefold()
+                        or (not owner and len(aliases) == 1
+                            and table.casefold() in aliases.values())
+                    )
+                ):
+                    return table, column, value
+    return None
 
 
 def _exact_value_observation_matches(

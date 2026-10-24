@@ -51,8 +51,76 @@ def test_typed_followup_preserves_unaffected_approved_requirements() -> None:
     assert updated.filters == accepted.filters
     assert updated.required_literals == ["Germany"]
     assert updated.grain == ["Currency"]
-    assert updated.output_grain == ["customer"]
+    assert updated.output_grain == ["customer", "Currency"]
     assert accepted.grain == []
+
+
+def test_contract_filter_and_period_changes_preserve_unaffected_constraints() -> None:
+    base = SemanticContract(
+        filters=[
+            SemanticFilter(operand="Date", operator=">=", value="2025-01-01"),
+            SemanticFilter(operand="Date", operator="<", value="2026-01-01"),
+        ],
+        active_period="2025",
+        comparison_periods=["2024"],
+    )
+    updated = resolve_semantic_contract(
+        base, original_question="Use 2026", resolved_question="Use 2026",
+        changes=[
+            RequestedChange(operation="ADD_FILTER", target="Date", new_value="2026-07-01"),
+            RequestedChange(operation="CHANGE_PERIOD", target="period", new_value="2026"),
+        ],
+    )
+    assert len(updated.filters) == 3
+    assert updated.active_period == "2026"
+    assert updated.comparison_periods == ["2024"]
+
+
+def test_contract_replacement_requires_unique_match() -> None:
+    base = SemanticContract(filters=[
+        SemanticFilter(operand="Date", operator=">=", value="2025-01-01"),
+        SemanticFilter(operand="Date", operator="<", value="2026-01-01"),
+    ])
+    with pytest.raises(ValueError, match="exactly one"):
+        resolve_semantic_contract(
+            base, original_question="Change the date", resolved_question="Change the date",
+            changes=[RequestedChange(
+                operation="REPLACE_FILTER", target="Date", new_value="2026-02-01",
+            )],
+        )
+    updated = resolve_semantic_contract(
+        base, original_question="Change the start", resolved_question="Change the start",
+        changes=[RequestedChange(
+            operation="REPLACE_FILTER", target="Date", previous_value="2025-01-01",
+            new_value="2025-02-01",
+        )],
+    )
+    assert [item.value for item in updated.filters] == ["2025-02-01", "2026-01-01"]
+
+
+def test_contract_metric_change_removes_stale_metric_dependencies() -> None:
+    from semantic_text2sql.models import ApprovedMetricDefinition
+
+    base = SemanticContract(
+        measures=["revenue"],
+        approved_metrics=[ApprovedMetricDefinition(
+            id="revenue", formula="SUM(amount)", source_relation="sales",
+        )],
+    )
+    updated = resolve_semantic_contract(
+        base, original_question="Use volume", resolved_question="Use volume",
+        changes=[RequestedChange(operation="CHANGE_METRIC", target="revenue", new_value="volume")],
+    )
+    assert updated.measures == ["volume"]
+    assert updated.approved_metrics == []
+
+
+def test_contract_unsupported_delta_is_not_silently_ignored() -> None:
+    with pytest.raises(ValueError, match="Unsupported"):
+        resolve_semantic_contract(
+            SemanticContract(), original_question="Anything", resolved_question="Anything",
+            changes=[RequestedChange(operation="OTHER", target="unknown")],
+        )
 
 
 def test_explicit_filter_value_correction_replaces_stored_question() -> None:

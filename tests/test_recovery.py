@@ -98,6 +98,63 @@ class ExactValueReasoner:
         )
 
 
+class AbsentCustomerReasoner:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    async def complete_detailed(self, model: str, prompt: str):  # type: ignore[no-untyped-def]
+        self.calls += 1
+        return (
+            '{"action":"CALL_TOOL","tool":"inspect_values","arguments":'
+            '{"table":"customers","column":"customer_id","value":"6234234",'
+            '"mode":"EXACT"},"purpose":"Check the requested customer ID."}',
+            TokenUsage(input_tokens=20, output_tokens=10),
+        )
+
+
+def test_absent_requested_primary_key_stops_after_exact_probe(registry) -> None:  # type: ignore[no-untyped-def]
+    schema = registry.inspect("shop")
+    reasoner = AbsentCustomerReasoner()
+    trace = asyncio.run(
+        RecoveryCoordinator(RecoveryTools(registry, "shop", schema, profile=None)).ainvestigate(
+            question="Show the segment for customer ID 6234234",
+            failed_sql="SELECT country FROM customers WHERE customer_id = 6234234",
+            failure_code="ZERO_RESULT",
+            failure_message="Executed with zero rows",
+            allowed_tables=["customers"],
+            mode="ZERO_RESULT",
+            completer=reasoner,
+            model="test-model",
+        )
+    )
+    assert reasoner.calls == 1
+    assert trace.agent_action == "INFORM"
+    assert trace.diagnosis_code == "REQUESTED_KEY_ABSENT"
+    assert len(trace.tool_calls) == 1
+    assert trace.tool_calls[0].tool == "inspect_values"
+    assert trace.usage.database_probe_count == 1
+    assert trace.usage.budget_exhausted is False
+    assert trace.claims[0].claim_type == "VALUE_ABSENT"
+
+
+def test_unrelated_absent_lookup_does_not_short_circuit(registry) -> None:  # type: ignore[no-untyped-def]
+    from semantic_text2sql.recovery import _verified_absent_requested_key
+
+    schema = registry.inspect("shop")
+    result = {
+        "table": "customers", "column": "customer_id", "value": "6234234",
+        "mode": "EXACT", "exact_match": False,
+    }
+    assert _verified_absent_requested_key(
+        "Show customer 6", "SELECT country FROM customers WHERE customer_id = 6",
+        schema, "inspect_values", result,
+    ) is None
+    assert _verified_absent_requested_key(
+        "Show customer 6234234", "SELECT country FROM customers WHERE customer_id = 6234234",
+        schema, "inspect_values", {**result, "mode": "SEARCH"},
+    ) is None
+
+
 class UnsupportedClaimAfterToolReasoner:
     def __init__(self) -> None:
         self.calls = 0

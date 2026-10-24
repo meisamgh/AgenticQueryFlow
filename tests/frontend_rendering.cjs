@@ -18,11 +18,11 @@ test('inspector counts model calls without counting tools as models', () => {
   assert.ok(summary.includes('entry.kind === "MODEL"'));
   assert.ok(summary.includes('usage.input_tokens == null && usage.output_tokens == null'));
 });
-test('explicit chart-type clicks enter the top-layer conversation path', () => {
+test('validated recommended plots switch in place; new designs use conversation', () => {
   const toolbar = source.slice(source.indexOf('function wireChartSection('),
     source.indexOf('function closeChartFullscreen('));
+  assert.ok(toolbar.includes('if (proposal && article._chartViewState?.tryChart(proposal)) return;'));
   assert.ok(toolbar.includes('sendFromAnswer(runId, `Change the previous chart'));
-  assert.ok(!toolbar.includes('settings.chartType = type'));
 });
 test('query filter utilities remain available without a visible filter bar', () => {
   const body = {
@@ -89,9 +89,13 @@ test('empty success responses clear history and Clear resets the visible convers
   status = 200;
   assert.equal(await apiContext.testApi('/api/history', {method: 'DELETE'}), null);
   const clear = source.slice(source.indexOf('$("#clearHistory").addEventListener('), source.indexOf('$("#resetButton").addEventListener('));
+  const reset = source.slice(source.indexOf('$("#resetButton").addEventListener('), source.lastIndexOf('initialize();'));
   assert.ok(clear.includes('$("#messages").replaceChildren()'));
   assert.ok(clear.includes('$("#emptyState").hidden = false'));
   assert.ok(clear.includes('state.history = []'));
+  assert.ok(reset.includes('/api/conversations/'));
+  assert.ok(!reset.includes('/api/chat'));
+  assert.ok(reset.includes('state.lastBody = null'));
   assert.ok(!source.includes('section.querySelector(".chart-clear-filter")'));
 });
 test('display row filters share chart state and zero matches stay empty', () => {

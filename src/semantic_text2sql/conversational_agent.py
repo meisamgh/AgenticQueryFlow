@@ -345,6 +345,7 @@ class ConversationalAnalyticsAgent:
         get_last_response: Callable[[str, str], RecentResult | ChatResponse | None],
         sql_handler: Callable[[ChatRequest], Awaitable[ChatResponse]],
         investigation_handler: Callable[[ChatRequest], Awaitable[ChatResponse]] | None = None,
+        reset_handler: Callable[[str], None] | None = None,
     ) -> None:
         self.bridge = bridge
         self.completers = completers
@@ -352,6 +353,7 @@ class ConversationalAnalyticsAgent:
         self.get_last_response = get_last_response
         self.sql_handler = sql_handler
         self.investigation_handler = investigation_handler
+        self.reset_handler = reset_handler
         graph = StateGraph(AgentState)
         graph.add_node("reason", self._reason)
         graph.add_node("act", self._act)
@@ -410,6 +412,11 @@ class ConversationalAnalyticsAgent:
             cause = "The selected model does not support the required decision format."
         elif any(term in detail for term in ("timeout", "timed out")):
             cause = "The model provider did not respond before the timeout."
+        elif any(term in detail for term in (
+            "nodename nor servname", "name resolution", "dns", "connecterror",
+            "connection refused", "network is unreachable",
+        )):
+            cause = "The application could not reach the model provider over the network."
         elif "no text output" in detail or "no structured decision" in detail:
             cause = "The model provider returned an empty decision."
         else:
@@ -813,6 +820,11 @@ class ConversationalAnalyticsAgent:
         if decision.action != "CALL_TOOL":
             answer = decision.answer or "I could not complete that request safely."
             base = state.base_response or self._plain(answer)
+            recovery = base.generation.recovery if base.generation else None
+            if recovery and recovery.diagnosis_code == "REQUESTED_KEY_ABSENT":
+                # A live exact primary-key probe is conclusive. Do not let a
+                # conversational paraphrase turn it back into speculation.
+                answer = recovery.diagnosis_summary or answer
             plot_issue = next(
                 (
                     item for item in reversed(state.observations)
@@ -919,7 +931,16 @@ class ConversationalAnalyticsAgent:
         base = state.base_response
         downstream_usage = TokenUsage()
         downstream_ledger: list[CallLedgerEntry] = []
-        if tool in {"ask_data", "check_sql_correctness", "reset_context"}:
+        if tool == "reset_context" and self.reset_handler is not None:
+            self.reset_handler(self._request.session_id)
+            facts = {"tool": tool, "status": "reset"}
+            base = ChatResponse(
+                session_id=self._request.session_id,
+                operation="RESET_CONTEXT",
+                resolved_question="",
+                message="Conversation context was reset.",
+            )
+        elif tool in {"ask_data", "check_sql_correctness", "reset_context"}:
             if tool == "check_sql_correctness":
                 request_message = "Check correctness of the previous SQL. " + self._request.message
             elif state.decision.intent == "INVESTIGATE":
@@ -1091,11 +1112,15 @@ class ConversationalAnalyticsAgent:
         elif tool == "change_visualization":
             # The plotting specialist receives the exact accepted rows, including
             # a result produced earlier in this same user turn. It cannot run SQL.
+            failed_current_sql = any(
+                item.get("tool") == "ask_data" and item.get("status") != "executed"
+                for item in state.observations
+            )
             source = (
                 state.base_response
                 if state.base_response and state.base_response.generation
                 and state.base_response.generation.accepted
-                else last
+                else None if failed_current_sql else last
             )
             plot_provider = os.environ.get("TEXT2SQL_PLOTTING_PROVIDER") or self._request.provider
             plot_model = os.environ.get("TEXT2SQL_PLOTTING_MODEL") or self._request.model

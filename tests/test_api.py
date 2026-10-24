@@ -22,6 +22,30 @@ class FixedSQLModel:
         return self.sql, 1
 
 
+def test_new_conversation_reset_does_not_call_model_or_delete_history(
+    registry: Any, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    model = FixedSQLModel("SELECT COUNT(*) AS customer_count FROM customers")
+    history = RunHistoryStore(None)
+    client = TestClient(create_app(TextToSQLAgent(registry, model), run_history=history))
+    request = {
+        "session_id": "reset-without-model", "db_id": "shop",
+        "provider": "agentrouter", "model": "test-model",
+        "message": "How many customers?",
+    }
+    first = client.post("/api/chat", json=request)
+    assert first.status_code == 200
+    assert first.json()["generation"]["accepted"] is True
+    assert model.calls == 1
+    assert client.post("/api/conversations/reset-without-model/reset").status_code == 204
+    assert model.calls == 1
+    assert history.get(first.json()["run_id"], "reset-without-model") is not None
+    second = client.post("/api/chat", json=request)
+    assert second.status_code == 200
+    assert second.json()["operation"] == "NEW_QUERY"
+
+
 def test_visualization_followups_reuse_complete_results_without_new_sql(
     registry,
     monkeypatch,
@@ -450,6 +474,7 @@ def test_public_post_surface_contains_only_current_workflow() -> None:
     post_paths = {route.path for route in app.routes if "POST" in getattr(route, "methods", set())}
 
     assert post_paths == {
+        "/api/conversations/{session_id}/reset",
         "/api/check",
         "/api/chat",
         "/api/chat/jobs",
@@ -492,7 +517,7 @@ def test_web_chat_application_is_served() -> None:
     assert "Download CSV" in page.text
     assert "Validation attempts" not in page.text
     assert script.status_code == 200
-    assert 'api("/api/chat"' in script.text
+    assert 'api("/api/chat/jobs"' in script.text
     assert "renderTokenAccounting" in script.text
     assert 'api("/api/ui-config", { cache: "no-store" })' in script.text
     assert page.text.index('id="databaseSelect"') < page.text.index('id="chatForm"')

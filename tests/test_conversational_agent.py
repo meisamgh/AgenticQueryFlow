@@ -97,6 +97,16 @@ def test_agent_answers_greeting_with_one_model_call_and_no_sql(
     assert calls == []
 
 
+def test_provider_dns_failure_has_specific_safe_message() -> None:
+    from semantic_text2sql.llm import ModelError
+
+    message = ConversationalAnalyticsAgent._provider_failure_message(
+        ModelError("The Groq request failed: [Errno 8] nodename nor servname provided")
+    )
+    assert "could not reach the model provider over the network" in message
+    assert "Errno" not in message
+
+
 def test_agent_can_inspect_then_answer_without_sql(registry: Any, tmp_path: Any) -> None:
     calls: list[str] = []
     completer = Completer(

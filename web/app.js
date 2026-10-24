@@ -1078,6 +1078,10 @@ function wireChartSection(article, presentation, generation, runId, recommendati
         button.classList.toggle("active", type === next.chart_type);
         button.setAttribute("aria-pressed", String(type === next.chart_type));
         button.addEventListener("click", () => {
+          const proposal = recommended.find(item => item.chart_type === type);
+          // These choices were already validated against this exact result.
+          // Switching their display is not a new analytical request.
+          if (proposal && article._chartViewState?.tryChart(proposal)) return;
           if (type !== next.chart_type && !state.busy) {
             void sendFromAnswer(runId, `Change the previous chart to a ${type.replaceAll("_", " ")} chart.`);
           }
@@ -1089,12 +1093,40 @@ function wireChartSection(article, presentation, generation, runId, recommendati
   article._echart = null;
   article._chartType = presentation.chart_type;
   kinds.hidden = !explorer;
-  /* Zoom and read-only row display stay local; explicit chart changes go
-     through the conversational orchestrator above. */
+  /* A validated recommendation changes display only. Requests for a chart
+     that was not recommended go through the conversational orchestrator. */
   article._chartViewState = {
     sourceRunId: runId,
     settings,
     accepted: original,
+    tryChart(chart) {
+      if (!chart || !chart.x || !chart.y) return false;
+      const specColumns = new Set([
+        ...Object.keys(original.data?.[0] || {}),
+        ...(original.source_columns || []),
+      ]);
+      if (!specColumns.has(chart.x)) return false;
+      const measures = [...new Set([...(chart.y_measures || []), chart.y].filter(Boolean))];
+      if (!measures.every(name => specColumns.has(name))) return false;
+      const merged = {
+        ...settings,
+        x: chart.x,
+        metrics: measures,
+        series: chart.series || null,
+        chartType: chart.chart_type,
+        rowFilters: {},
+        categories: [],
+        topN: null,
+      };
+      const applied = explorer?.apply(original, merged);
+      if (!applied || !applied.data.length) return false;
+      if (applied.chart_type !== chart.chart_type) return false;
+      Object.keys(settings).forEach(key => delete settings[key]);
+      Object.assign(settings, merged);
+      saveSettings();
+      renderCurrent();
+      return true;
+    },
     setRowFilters(rows) {
       settings.rowFilters = (Array.isArray(rows) ? rows : [rows]).reduce((map, filter) => {
         if (!filter?.column) return map;
@@ -2632,10 +2664,7 @@ document.addEventListener("pointerdown", event => {
 $("#clearHistory").addEventListener("click", async () => {
   if (state.busy) return;
   try {
-    await api("/api/chat", {
-      method: "POST",
-      body: JSON.stringify({ session_id: sessionId, db_id: $("#databaseSelect").value, message: "Reset context" }),
-    });
+    await api(`/api/conversations/${encodeURIComponent(sessionId)}/reset`, { method: "POST" });
     await api(`/api/history?session_id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
   } catch (error) { showError(`Could not clear history: ${error.message}`); return; }
   state.history = [];
@@ -2649,17 +2678,17 @@ $("#clearHistory").addEventListener("click", async () => {
 });
 
 $("#resetButton").addEventListener("click", async () => {
+  if (state.busy) return;
   try {
-    await api("/api/chat", {
-      method: "POST",
-      body: JSON.stringify({ session_id: sessionId, db_id: $("#databaseSelect").value, message: "Reset context" }),
-    });
+    await api(`/api/conversations/${encodeURIComponent(sessionId)}/reset`, { method: "POST" });
     $("#messages").replaceChildren();
+    state.lastBody = null;
     state.activeRunId = null;
     state.restorePending = false;
     $("#emptyState").hidden = false;
     $("#threadIntro").hidden = true;
     $("#threadBreadcrumb").textContent = "Live database";
+    $("#mainColumn").scrollTop = 0;
     $("#messageInput").focus();
   } catch (error) { showError(error.message); }
 });

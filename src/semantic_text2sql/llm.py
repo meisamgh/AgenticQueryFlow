@@ -169,7 +169,7 @@ class GroqSQLModel:
             return await self._complete_detailed(
                 model,
                 prompt,
-                self.max_completion_tokens,
+                int(os.environ.get("TEXT2SQL_STRUCTURED_MAX_COMPLETION_TOKENS", "1024")),
                 response_format=_openai_schema_format(schema_name, schema),
             )
         except ModelError as exc:

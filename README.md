@@ -78,6 +78,24 @@ The legacy path can still use the selected SQL model for chart choice and result
 In assistant mode the top-layer model explains the validated result. Plot requests can invoke
 the independent plotting model; a repeated validated chart does not require another model call.
 A chart is never evidence that SQL is business-correct.
+Clicking a chart already recommended for the accepted result is a display-only switch: it
+changes the current plot in place and does not create a new question or execute SQL. Requests
+for a different, unvalidated chart design still enter the conversational assistant.
+
+Contract follow-ups are applied as typed changes: adding a dimension updates both grouping
+and output grain; adding a filter preserves existing constraints; ambiguous filter removal
+or replacement asks for clarification instead of silently editing unrelated predicates.
+The active period is separate from comparison periods. An explicit assistant reset clears
+conversation state and cached results without generating SQL. Semantic SQL checks reject
+provable missing outputs, aggregations, grouping, and filter values; formula equivalence,
+join fanout, and full business correctness are **not** proven by these checks.
+The **New conversation** button calls a deterministic reset endpoint; it does not need a
+model response and does not delete saved history. **Clear** also deletes that session's
+saved history.
+The SQL validator now records high-confidence AST findings for required output aliases,
+aggregation presence, grouping presence, and missing required filter literals. Provable failures
+enter bounded repair; uncertain formula equivalence and filter predicates remain explicitly
+unresolved rather than being presented as verified business correctness.
 
 ### Stakeholder answers and charts
 

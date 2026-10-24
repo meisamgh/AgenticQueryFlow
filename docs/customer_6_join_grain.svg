@@ -1,0 +1,53 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 520" role="img" aria-labelledby="title desc">
+  <title id="title">Customer 6 query: tables and join fanout</title>
+  <desc id="desc">Customers has one row per customer. Transactions and yearmonth each have many rows per customer. Joining both through CustomerID duplicates each transaction for every monthly row. Gas stations and products are dimensions of transactions.</desc>
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto"><path d="M1 1 L9 5 L1 9" fill="none" stroke="#667085" stroke-width="1.5"/></marker>
+    <style>
+      text{font-family:Inter,Arial,sans-serif;fill:#20243b} .title{font-size:25px;font-weight:700}
+      .sub{font-size:14px;fill:#667085} .name{font-size:18px;font-weight:700}
+      .body{font-size:14px} .small{font-size:12px;fill:#667085}
+      .box{fill:#fff;stroke:#d9dce9;stroke-width:1.5} .root{fill:#f5f2ff;stroke:#8c7cf1}
+      .warn{fill:#fff4e8;stroke:#efad57} .line{fill:none;stroke:#667085;stroke-width:2;marker-end:url(#arrow)}
+      .bad{fill:none;stroke:#dc6674;stroke-width:2.5;stroke-dasharray:7 5}
+    </style>
+  </defs>
+  <rect width="980" height="520" fill="#fbfbfe"/>
+  <text x="40" y="46" class="title">Why this query repeats customer 6's rows</text>
+  <text x="40" y="70" class="sub">“Show all available information” became an all-five-table column requirement.</text>
+
+  <rect class="root" x="374" y="102" width="232" height="88" rx="15"/>
+  <text x="394" y="131" class="name">customers</text>
+  <text x="394" y="154" class="body">CustomerID = 6</text>
+  <text x="394" y="174" class="small">one row per customer</text>
+
+  <rect class="box" x="95" y="256" width="268" height="92" rx="15"/>
+  <text x="115" y="286" class="name">transactions_1k</text>
+  <text x="115" y="310" class="body">many transactions / customer</text>
+  <text x="115" y="330" class="small">transaction-level grain</text>
+
+  <rect class="box" x="632" y="256" width="268" height="92" rx="15"/>
+  <text x="652" y="286" class="name">yearmonth</text>
+  <text x="652" y="310" class="body">many months / customer</text>
+  <text x="652" y="330" class="small">CustomerID + Date grain</text>
+
+  <path class="line" d="M420 190 L291 251"/>
+  <path class="line" d="M560 190 L696 251"/>
+  <text x="301" y="213" class="small">1 → many</text>
+  <text x="653" y="213" class="small">1 → many</text>
+
+  <rect class="box" x="67" y="395" width="184" height="70" rx="14"/>
+  <text x="87" y="424" class="name">gasstations</text>
+  <text x="87" y="446" class="small">GasStationID dimension</text>
+  <rect class="box" x="279" y="395" width="184" height="70" rx="14"/>
+  <text x="299" y="424" class="name">products</text>
+  <text x="299" y="446" class="small">ProductID dimension</text>
+  <path class="line" d="M190 348 L159 390"/>
+  <path class="line" d="M300 348 L350 390"/>
+
+  <path class="bad" d="M369 299 L625 299"/>
+  <rect class="warn" x="500" y="375" width="412" height="102" rx="15"/>
+  <text x="520" y="405" class="name">Fanout risk</text>
+  <text x="520" y="430" class="body">Joining transactions to months on CustomerID</text>
+  <text x="520" y="452" class="body">produces transactions × months for customer 6.</text>
+</svg>

@@ -437,6 +437,15 @@ def create_app(
         runs.drop_session(session_id)
         return Response(status_code=204)
 
+    @app.post("/api/conversations/{session_id}/reset", status_code=204)
+    async def reset_conversation(response: Response, session_id: str) -> Response:
+        """Start a fresh conversation without invoking any model or deleting audit history."""
+        response.headers["Cache-Control"] = "no-store"
+        conversations.reset(session_id)
+        for key in [key for key in recent_results if key[0] == session_id]:
+            recent_results.pop(key, None)
+        return Response(status_code=204, headers={"Cache-Control": "no-store"})
+
     @app.get("/api/databases/{db_id}/glossary")
     async def database_glossary(response: Response, db_id: str) -> list[GlossaryTerm]:
         """Approved business definitions, for the contextual schema inspector."""
@@ -1268,14 +1277,27 @@ def create_app(
             interpretation,
         )
         if pending is not None and operation not in EXPLANATION_OPERATIONS:
-            pending = pending.model_copy(update={
-                "semantic_contract": resolve_semantic_contract(
+            try:
+                updated_contract = resolve_semantic_contract(
                     previous.semantic_contract if operation != "NEW_QUERY" and previous else None,
                     original_question=request.assistant_original_question or request.message,
                     resolved_question=pending.resolved_question,
                     changes=request.assistant_changes or interpretation.changes,
                 )
-            })
+            except ValueError as exc:
+                return ChatResponse(
+                    session_id=request.session_id,
+                    operation=operation,
+                    resolved_question=pending.resolved_question,
+                    state=previous,
+                    generation=None,
+                    message=str(exc),
+                    clarification_required=True,
+                    clarification_question=str(exc),
+                    token_usage=conversation_usage,
+                    call_ledger=conversation_ledger,
+                )
+            pending = pending.model_copy(update={"semantic_contract": updated_contract})
         if operation == "RESET_CONTEXT":
             conversations.reset(request.session_id)
             return ChatResponse(
@@ -1860,11 +1882,17 @@ def create_app(
         retriever=hybrid_retriever,
         sql_handler=execute_chat,
     )
+    def reset_assistant_context(session_id: str) -> None:
+        conversations.reset(session_id)
+        for key in [key for key in recent_results if key[0] == session_id]:
+            recent_results.pop(key, None)
+
     conversational_agent = ConversationalAnalyticsAgent(
         bridge=bridge,
         completers=turn_completers,
         get_state=conversations.get,
         get_last_response=lambda session_id, db_id: recent_results.get((session_id, db_id)),
+        reset_handler=reset_assistant_context,
         sql_handler=assistant_sql_handler,
         investigation_handler=assistant_investigation_handler,
     )

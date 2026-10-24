@@ -49,6 +49,7 @@ from semantic_text2sql.validator import (
     normalize_sql,
     repair_context,
     validate_sql,
+    validate_sql_semantics,
 )
 
 
@@ -381,13 +382,24 @@ class TextToSQLAgent:
                 allowed_columns=authorized_columns,
             )
             if validation.valid:
+                findings = validate_sql_semantics(
+                    sql,
+                    request.semantic_contract or SemanticContract(),
+                    ({"business_context": request.business_context}
+                     if request.business_context else None),
+                    dialect=request.dialect,
+                )
+                failures = [item for item in findings if item.status == "FAIL"]
                 validation = validation.model_copy(
                     update={
-                        "code": "SQL_SAFETY_VALID",
+                        "valid": not failures,
+                        "code": failures[0].code if failures else "SQL_SAFETY_VALID",
                         "message": (
+                            failures[0].evidence if failures else
                             "SQL passed syntax and read-only safety validation. "
-                            "This does not prove executability or business correctness."
+                            "Unresolved semantic checks do not prove business correctness."
                         ),
+                        "semantic_findings": findings,
                     }
                 )
             if validation.valid and request.optimization_required and request.previous_sql:

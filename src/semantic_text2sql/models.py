@@ -403,6 +403,7 @@ class SemanticContract(StrictModel):
     input_grain: list[str] = Field(default_factory=list)
     output_grain: list[str] = Field(default_factory=list)
     temporal_boundaries: list[SemanticFilter] = Field(default_factory=list)
+    active_period: str | None = None
     comparison_periods: list[str] = Field(default_factory=list)
     tie_policy: Literal["return_all", "deterministic_one"] | None = None
     requires_grouping: bool = False

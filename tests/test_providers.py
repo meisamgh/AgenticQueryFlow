@@ -611,6 +611,7 @@ def test_groq_native_structured_output_carries_full_json_schema() -> None:
     assert len(requests) == 1
     body = requests[0]
     response_format: dict[str, Any] = body["response_format"]
+    assert body["max_completion_tokens"] == 1_024
     assert response_format["type"] == "json_schema"
     json_schema: dict[str, Any] = response_format["json_schema"]
     assert json_schema["name"] == "AgentDecision"

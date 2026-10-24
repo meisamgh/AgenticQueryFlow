@@ -81,42 +81,77 @@ def resolve_semantic_contract(
         if change.operation == "ADD_DIMENSION" and replacement:
             if replacement.casefold() not in {item.casefold() for item in values["grain"]}:
                 values["grain"].append(replacement)
+            if replacement.casefold() not in {item.casefold() for item in values["output_grain"]}:
+                values["output_grain"].append(replacement)
             values["requires_grouping"] = True
         elif change.operation == "REMOVE_DIMENSION":
-            values["grain"] = [
-                item for item in values["grain"] if item.casefold() != target.casefold()
-            ]
+            for field in ("grain", "output_grain"):
+                values[field] = [
+                    item for item in values[field] if item.casefold() != target.casefold()
+                ]
             values["requires_grouping"] = bool(values["grain"])
         elif change.operation == "CHANGE_METRIC" and replacement:
             values["measures"] = [replacement]
+            values["approved_metrics"] = [
+                metric for metric in values["approved_metrics"]
+                if metric["id"].casefold() == replacement.casefold()
+            ]
+            values["aggregation_stages"] = []
+            values["output_operations"] = []
         elif change.operation == "CHANGE_AGGREGATION" and replacement.casefold() in {
             "count", "sum", "average", "min", "max"
         }:
             values["aggregation"] = replacement.casefold()
         elif change.operation == "CHANGE_GRAIN" and replacement:
             values["output_grain"] = [replacement]
+            values["grain"] = [replacement]
+            values["requires_grouping"] = True
         elif change.operation == "ADD_FILTER" and change.new_value is not None:
             candidate = SemanticFilter(operand=target, operator="=", value=change.new_value)
-            values["filters"] = [
-                item for item in values["filters"]
-                if item["operand"].casefold() != target.casefold()
-            ] + [candidate.model_dump()]
+            if candidate.model_dump() not in values["filters"]:
+                values["filters"].append(candidate.model_dump())
         elif change.operation == "REMOVE_FILTER":
+            candidates = [
+                item for item in values["filters"]
+                if item["operand"].casefold() == target.casefold()
+            ]
+            if change.previous_value is None and len(candidates) != 1:
+                raise ValueError("REMOVE_FILTER requires one unambiguous matching filter.")
             values["filters"] = [
                 item for item in values["filters"]
-                if item["operand"].casefold() != target.casefold()
+                if not (item["operand"].casefold() == target.casefold()
+                        and (change.previous_value is None
+                             or str(item["value"]) == str(change.previous_value)))
             ]
         elif change.operation == "REPLACE_FILTER" and change.new_value is not None:
+            matches = [
+                item for item in values["filters"]
+                if item["operand"].casefold() == target.casefold()
+                and (change.previous_value is None
+                     or str(item["value"]) == str(change.previous_value))
+            ]
+            if len(matches) != 1:
+                raise ValueError("REPLACE_FILTER requires exactly one matching existing filter.")
             values["filters"] = [
                 {**item, "value": change.new_value}
-                if item["operand"].casefold() == target.casefold() else item
+                if item is matches[0] else item
                 for item in values["filters"]
             ]
         elif change.operation == "CHANGE_PERIOD" and replacement:
-            values["comparison_periods"] = [replacement]
+            values["active_period"] = replacement
         elif change.operation == "COMPARE" and replacement:
             if replacement not in values["comparison_periods"]:
                 values["comparison_periods"].append(replacement)
+        elif change.operation == "CHANGE_RANKING" and replacement:
+            values["requires_ordering"] = True
+            limit_match = re.search(r"\b(?:top|bottom|first|last)\s+(\d+)\b", replacement, re.I)
+            if limit_match:
+                values["limit"] = int(limit_match.group(1))
+        elif change.operation in {"REQUEST_VISUALIZATION", "CHANGE_VISUALIZATION"}:
+            # Presentation state belongs to the plotting service, not this SQL contract.
+            continue
+        else:
+            raise ValueError(f"Unsupported or incomplete contract change: {change.operation}.")
     return SemanticContract.model_validate(values)
 EXPLANATION_OPERATIONS = frozenset(
     {
