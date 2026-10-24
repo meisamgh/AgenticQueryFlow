@@ -20,6 +20,31 @@ class ModelError(RuntimeError):
     pass
 
 
+class StructuredOutputUnsupported(ModelError):
+    """The provider explicitly rejected native schema-constrained output."""
+
+
+def _structured_output_unsupported(error: ModelError) -> bool:
+    """Only a documented schema-capability rejection permits plain JSON fallback."""
+    message = str(error).lower()
+    if any(term in message for term in (
+        "response_format is not supported", "response_format unsupported",
+        "json_schema is not supported", "json_schema unsupported",
+        "tool_choice is not supported", "tool_choice unsupported",
+    )):
+        return True
+    # Some gateways describe the same capability failure as an invalid/unknown
+    # parameter. Do not treat unrelated 400s (invalid model, bad schema) as such.
+    mentions_format = any(
+        term in message for term in ("response_format", "json_schema", "tool_choice")
+    )
+    rejects_format = any(
+        term in message
+        for term in ("unsupported", "not supported", "unknown parameter", "unrecognized parameter")
+    )
+    return mentions_format and rejects_format
+
+
 CLAUDE_CODE_EXECUTABLE = Path.home() / ".local/bin/claude"
 """AgentRouter drives Claude through the Claude Code CLI installed at this fixed path."""
 
@@ -34,6 +59,30 @@ supported CLI's ``User-Agent`` and rejects every other one with HTTP 401
 request is therefore refused. Override with ``AGENTROUTER_USER_AGENT`` if the gateway's
 accepted client set changes.
 """
+
+
+def _openai_schema_format(
+    schema_name: str, schema: dict[str, object]
+) -> dict[str, object]:
+    """OpenAI-compatible chat-completions JSON-schema response format."""
+    return {
+        "type": "json_schema",
+        "json_schema": {"name": schema_name, "schema": schema, "strict": True},
+    }
+
+
+def _forced_schema_tools(
+    schema_name: str, schema: dict[str, object]
+) -> tuple[list[dict[str, object]], dict[str, object]]:
+    """Anthropic Messages forced-tool pair for native structured output."""
+    tools: list[dict[str, object]] = [
+        {
+            "name": schema_name,
+            "description": "Return the structured decision.",
+            "input_schema": schema,
+        }
+    ]
+    return tools, {"type": "tool", "name": schema_name}
 
 
 class SQLModel(Protocol):
@@ -64,11 +113,20 @@ class GroqSQLModel:
         base_url: str = "https://api.groq.com/openai/v1",
         timeout: float = 120.0,
         transport: httpx.AsyncBaseTransport | None = None,
+        max_completion_tokens: int | None = None,
     ) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.transport = transport
+        # 180 was the historical default; longer decision/answer prompts can be
+        # truncated at that cap and forced into repair attempts, so it stays
+        # overridable per deployment without changing any request shape.
+        self.max_completion_tokens = int(
+            max_completion_tokens
+            if max_completion_tokens is not None
+            else os.environ.get("TEXT2SQL_MAX_COMPLETION_TOKENS", "180")
+        )
 
     async def generate(self, **kwargs: object) -> tuple[str, int, TokenUsage]:
         from time import perf_counter
@@ -86,7 +144,9 @@ class GroqSQLModel:
             cast(Literal["reasoning", "icl", "alternative"], kwargs["generation_style"]),
         )
         started = perf_counter()
-        content, usage = await self._complete_detailed(str(kwargs["model"]), prompt, 180)
+        content, usage = await self._complete_detailed(
+            str(kwargs["model"]), prompt, self.max_completion_tokens
+        )
         return content, round((perf_counter() - started) * 1_000), usage
 
     async def complete(self, model: str, prompt: str) -> str:
@@ -94,10 +154,35 @@ class GroqSQLModel:
         return content
 
     async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
-        return await self._complete_detailed(model, prompt, 180)
+        return await self._complete_detailed(model, prompt, self.max_completion_tokens)
+
+    async def complete_structured(
+        self,
+        model: str,
+        prompt: str,
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> tuple[str, TokenUsage]:
+        """Prefer Groq-native JSON-schema output; one plain retry keeps support for
+        models whose gateway rejects ``response_format``."""
+        try:
+            return await self._complete_detailed(
+                model,
+                prompt,
+                self.max_completion_tokens,
+                response_format=_openai_schema_format(schema_name, schema),
+            )
+        except ModelError as exc:
+            if not _structured_output_unsupported(exc):
+                raise
+            raise StructuredOutputUnsupported(str(exc)) from exc
 
     async def _complete_detailed(
-        self, model: str, prompt: str, max_tokens: int
+        self,
+        model: str,
+        prompt: str,
+        max_tokens: int,
+        response_format: dict[str, object] | None = None,
     ) -> tuple[str, TokenUsage]:
         if not self.api_key:
             raise ModelError("GROQ_API_KEY is not configured.")
@@ -121,6 +206,11 @@ class GroqSQLModel:
                             "max_completion_tokens": max_tokens,
                             "reasoning_effort": "none",
                             "reasoning_format": "hidden",
+                            **(
+                                {"response_format": response_format}
+                                if response_format is not None
+                                else {}
+                            ),
                         },
                     )
                     if response.status_code != 429 or attempt == 2:
@@ -181,6 +271,82 @@ class JustDoWorkSQLModel:
     async def complete(self, model: str, prompt: str) -> str:
         content, _ = await self.complete_detailed(model, prompt)
         return content
+
+    async def complete_structured(
+        self,
+        model: str,
+        prompt: str,
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> tuple[str, TokenUsage]:
+        """Use Anthropic's forced-tool JSON-schema output when the gateway allows it,
+        with one plain completion as fallback."""
+        try:
+            return await self._structured_messages_completion(
+                model, prompt, schema_name, schema
+            )
+        except ModelError as exc:
+            if not _structured_output_unsupported(exc):
+                raise
+            raise StructuredOutputUnsupported(str(exc)) from exc
+
+    async def _structured_messages_completion(
+        self,
+        model: str,
+        prompt: str,
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> tuple[str, TokenUsage]:
+        if not self.api_key:
+            raise ModelError("JUSTDOWORK_API_KEY is not configured.")
+        if not self.base_url:
+            raise ModelError("JUSTDOWORK_BASE_URL is not configured.")
+        tools, tool_choice = _forced_schema_tools(schema_name, schema)
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=self.timeout,
+                transport=self.transport,
+            ) as client:
+                response = await client.post(
+                    "messages",
+                    headers={
+                        "x-api-key": self.api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": 4_000,
+                        "temperature": 0,
+                        "tools": tools,
+                        "tool_choice": tool_choice,
+                    },
+                )
+                response.raise_for_status()
+                body = response.json()
+                blocks = body["content"]
+                payload = next(
+                    (
+                        block["input"]
+                        for block in blocks
+                        if block.get("type") == "tool_use"
+                        and isinstance(block.get("input"), dict)
+                    ),
+                    None,
+                )
+        except httpx.HTTPStatusError as exc:
+            detail = _response_detail(exc.response)
+            raise ModelError(
+                f"The JustDoWork structured request failed: "
+                f"{detail or f'HTTP {exc.response.status_code}'}"
+            ) from exc
+        except (httpx.HTTPError, KeyError, StopIteration, TypeError, ValueError) as exc:
+            raise ModelError(f"The JustDoWork structured request failed: {exc}") from exc
+        if payload is None:
+            raise ModelError("JustDoWork returned no structured decision.")
+        return json.dumps(payload, separators=(",", ":")), _token_usage(body.get("usage") or {})
 
     async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
         if not self.api_key:
@@ -265,7 +431,33 @@ class CodeCraftSQLModel:
         content, _ = await self.complete_detailed(model, prompt)
         return content
 
+    async def complete_structured(
+        self,
+        model: str,
+        prompt: str,
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> tuple[str, TokenUsage]:
+        """Prefer native JSON-schema output; one plain retry keeps support for
+        gateways that reject ``response_format``."""
+        try:
+            return await self._complete_detailed(
+                model, prompt, response_format=_openai_schema_format(schema_name, schema)
+            )
+        except ModelError as exc:
+            if not _structured_output_unsupported(exc):
+                raise
+            raise StructuredOutputUnsupported(str(exc)) from exc
+
     async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+        return await self._complete_detailed(model, prompt)
+
+    async def _complete_detailed(
+        self,
+        model: str,
+        prompt: str,
+        response_format: dict[str, object] | None = None,
+    ) -> tuple[str, TokenUsage]:
         if not self.api_key:
             raise ModelError("CODECRAFT_API_KEY is not configured.")
         payload: dict[str, object] = {
@@ -273,6 +465,9 @@ class CodeCraftSQLModel:
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": 4_096,
             "stream": False,
+            **(
+                {"response_format": response_format} if response_format is not None else {}
+            ),
         }
         try:
             async with httpx.AsyncClient(
@@ -488,6 +683,76 @@ class AgentRouterClaudeModel:
         content, _ = await self.complete_detailed(model, prompt)
         return content
 
+    async def complete_structured(
+        self,
+        model: str,
+        prompt: str,
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> tuple[str, TokenUsage]:
+        """Native structured output over theMessages API; the Claude Code CLI
+        transport cannot constrain JSON, so it validates locally instead."""
+        if self.transport is None and self.base_url == "https://agentrouter.org":
+            return await self.complete_detailed(model, prompt)
+        try:
+            return await self._structured_messages_completion(
+                model, prompt, schema_name, schema
+            )
+        except ModelError as exc:
+            if not _structured_output_unsupported(exc):
+                raise
+            raise StructuredOutputUnsupported(str(exc)) from exc
+
+    async def _structured_messages_completion(
+        self,
+        model: str,
+        prompt: str,
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> tuple[str, TokenUsage]:
+        if not self.api_key:
+            raise ModelError("AGENTROUTER_API_KEY is not configured.")
+        tools, tool_choice = _forced_schema_tools(schema_name, schema)
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url,
+                timeout=self.timeout,
+                transport=self.transport,
+            ) as client:
+                response = await client.post(
+                    "/v1/messages?beta=true",
+                    headers={
+                        "x-api-key": self.api_key,
+                        "anthropic-version": "2023-06-01",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "max_tokens": 4_000,
+                        "temperature": 0,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "tools": tools,
+                        "tool_choice": tool_choice,
+                    },
+                )
+                response.raise_for_status()
+                body = response.json()
+                blocks = body["content"]
+                payload = next(
+                    (
+                        block["input"]
+                        for block in blocks
+                        if block.get("type") == "tool_use"
+                        and isinstance(block.get("input"), dict)
+                    ),
+                    None,
+                )
+        except (httpx.HTTPError, KeyError, StopIteration, TypeError, ValueError) as exc:
+            raise ModelError("The AgentRouter Claude structured request failed.") from exc
+        if payload is None:
+            raise ModelError("AgentRouter Claude returned no structured decision.")
+        return json.dumps(payload, separators=(",", ":")), _token_usage(body.get("usage") or {})
+
     async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
         """Return a completion and provider-reported token usage."""
         if not self.api_key:
@@ -582,6 +847,26 @@ class AgentRouterCodexModel:
         content, _ = await self._complete_detailed(model, prompt)
         return content
 
+    async def complete_structured(
+        self,
+        model: str,
+        prompt: str,
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> tuple[str, TokenUsage]:
+        """Native structured output over either GPT wire format; the Codex CLI
+        transport cannot constrain JSON, so it validates locally instead."""
+        if self.executable is not None:
+            return await self._complete_with_codex_cli(model, prompt)
+        try:
+            return await self._complete_over_http(
+                model, prompt, schema_name=schema_name, schema=schema
+            )
+        except ModelError as exc:
+            if not _structured_output_unsupported(exc):
+                raise
+            raise StructuredOutputUnsupported(str(exc)) from exc
+
     async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
         return await self._complete_detailed(model, prompt)
 
@@ -605,7 +890,14 @@ class AgentRouterCodexModel:
             except ModelError as cli_error:
                 raise ModelError(f"{http_error} Codex CLI fallback: {cli_error}") from cli_error
 
-    async def _complete_over_http(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+    async def _complete_over_http(
+        self,
+        model: str,
+        prompt: str,
+        *,
+        schema_name: str | None = None,
+        schema: dict[str, object] | None = None,
+    ) -> tuple[str, TokenUsage]:
         failures: list[str] = []
         async with httpx.AsyncClient(
             base_url=self.base_url,
@@ -621,7 +913,13 @@ class AgentRouterCodexModel:
                             "content-type": "application/json",
                             "user-agent": self.user_agent,
                         },
-                        json=_gpt_payload(path, model, _CODEX_PREAMBLE + prompt),
+                        json=_gpt_payload(
+                            path,
+                            model,
+                            _CODEX_PREAMBLE + prompt,
+                            schema_name=schema_name,
+                            schema=schema,
+                        ),
                     )
                 except httpx.HTTPError as exc:
                     failures.append(f"{path}: {type(exc).__name__}")
@@ -725,6 +1023,25 @@ class AgentRouterModel:
     async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
         return await self._select(model).complete_detailed(model, prompt)
 
+    async def complete_structured(
+        self,
+        model: str,
+        prompt: str,
+        schema_name: str,
+        schema: dict[str, object],
+    ) -> tuple[str, TokenUsage]:
+        selected = self._select(model)
+        structured = getattr(selected, "complete_structured", None)
+        if not callable(structured):
+            return await selected.complete_detailed(model, prompt)
+        try:
+            return cast(
+                "tuple[str, TokenUsage]",
+                await structured(model, prompt, schema_name, schema),
+            )
+        except ModelError:
+            raise
+
 
 class RoutingSQLModel:
     def __init__(
@@ -819,15 +1136,35 @@ def _gpt_error(response: httpx.Response) -> str:
     return str(message)[:120].strip() if message else ""
 
 
-def _gpt_payload(path: str, model: str, instruction: str) -> dict[str, object]:
+def _gpt_payload(
+    path: str,
+    model: str,
+    instruction: str,
+    *,
+    schema_name: str | None = None,
+    schema: dict[str, object] | None = None,
+) -> dict[str, object]:
     """Build the body for whichever OpenAI-compatible wire format ``path`` speaks.
 
     Sampling controls are omitted deliberately: reasoning-class GPT models reject
     ``temperature``, and that rejection is indistinguishable from a wrong wire format.
+    When ``schema`` is set, native JSON-schema structured output is requested on the
+    matching wire format.
     """
     if path.endswith("/responses"):
-        return {"model": model, "input": instruction, "store": False}
-    return {"model": model, "messages": [{"role": "user", "content": instruction}]}
+        payload: dict[str, object] = {"model": model, "input": instruction, "store": False}
+        if schema is not None:
+            payload["text"] = {
+                "format": {"type": "json_schema", "name": schema_name, "schema": schema}
+            }
+        return payload
+    payload = {"model": model, "messages": [{"role": "user", "content": instruction}]}
+    if schema is not None:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": schema_name, "schema": schema, "strict": True},
+        }
+    return payload
 
 
 def _gpt_text(body: object) -> str:
@@ -953,8 +1290,12 @@ HISTORICAL EXAMPLES:
     return f"""You are Model 2, the SQL reasoner and generator. Return exactly one safe {dialect}
 SELECT or WITH...SELECT statement. Return SQL only: no JSON, markdown, comments, explanation, or
 alternative queries.
-The question and trusted evidence are authoritative. Use only tables, columns, and relationships
-in VERIFIED_CONTEXT; aliases created inside the SQL are allowed. {dialect_rules}
+Authority order: (1) safety and authorization; (2) approved metric definitions and mandatory
+metric filters; (3) resolved analytical contract hard requirements; (4) verified physical schema
+and relationships; (5) advisory metadata and historical SQL patterns. Compile the resolved
+analytical contract in VERIFIED_CONTEXT into SQL. The original question supplies context but
+does not override the resolved contract or approved definitions. Use only tables, columns, and
+relationships in VERIFIED_CONTEXT; aliases created inside the SQL are allowed. {dialect_rules}
 Preserve approved business definitions and all unaffected constraints when the question is a
 follow-up or correction. Treat context and historical examples as grounding, not as permission
 to add unrequested filters, metrics, or result columns. Do not guess unsupported database facts,

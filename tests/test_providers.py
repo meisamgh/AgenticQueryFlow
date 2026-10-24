@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from typing import Any, cast
 
 import httpx
 import pytest
@@ -17,7 +18,13 @@ from semantic_text2sql.llm import (
     RoutingSQLModel,
     _prompt,
 )
-from semantic_text2sql.models import ColumnInfo, SchemaInfo, StrategyHints, TableInfo, TokenUsage
+from semantic_text2sql.models import (
+    ColumnInfo,
+    SchemaInfo,
+    StrategyHints,
+    TableInfo,
+    TokenUsage,
+)
 
 
 def _call(model: AgentRouterClaudeModel) -> tuple[str, int, TokenUsage]:
@@ -505,3 +512,308 @@ def test_groq_retries_transient_rate_limit() -> None:
     assert text == "SELECT 1"
     assert usage.total_tokens == 3
     assert calls == 2
+
+
+def _agent_decision_schema_typed() -> dict[str, Any]:
+    from semantic_text2sql.conversational_agent import AGENT_DECISION_SCHEMA
+
+    return cast(dict[str, Any], AGENT_DECISION_SCHEMA)
+
+
+def test_agent_decision_schema_enumerates_every_allowed_value() -> None:
+    schema = _agent_decision_schema_typed()
+    properties = schema["properties"]
+    assert schema["required"] == [
+        "action", "intent", "tool", "tool_arguments", "instruction", "answer"
+    ]
+    assert properties["action"]["enum"] == [
+        "ANSWER",
+        "CALL_TOOL",
+    ]
+    assert properties["intent"]["enum"] == [
+        "DIRECT_ANSWER",
+        "NEW_QUERY",
+        "MODIFY_QUERY",
+        "VISUALIZE",
+        "EXPLORE_SCHEMA",
+        "BUSINESS_CONTEXT",
+        "EXPLAIN",
+        "INVESTIGATE",
+        "CORRECT",
+        "REVIEW_SQL",
+        "OPTIMIZE",
+        "RESET_CONTEXT",
+    ]
+    assert properties["tool"]["anyOf"][0]["enum"] == [
+        "list_tables",
+        "search_schema",
+        "describe_table",
+        "get_relationships",
+        "get_column_profile",
+        "get_available_metrics",
+        "get_business_context",
+        "ask_data",
+        "analyze_result",
+        "check_sql_correctness",
+        "change_visualization",
+        "present_result",
+        "explain_existing_result",
+        "reset_context",
+    ]
+    assert schema["additionalProperties"] is False
+    from semantic_text2sql.conversational_agent import _DECISION_EXAMPLES
+    assert len(_DECISION_EXAMPLES) == 3
+
+
+def test_groq_native_structured_output_carries_full_json_schema() -> None:
+    from semantic_text2sql.conversational_agent import AGENT_DECISION_SCHEMA, AgentDecision
+
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "action": "ANSWER",
+                                    "intent": "DIRECT_ANSWER",
+                                    "tool": None,
+                                    "tool_arguments": None,
+                                    "answer": "Summary",
+                                }
+                            )
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 30, "completion_tokens": 8},
+            },
+        )
+
+    model = GroqSQLModel(
+        "groq-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    text, usage = asyncio.run(
+        model.complete_structured(
+            "qwen/qwen3.6-27b", "Decide next step", "AgentDecision", AGENT_DECISION_SCHEMA
+        )
+    )
+
+    decision = AgentDecision.model_validate_json(text)
+    assert decision.intent == "DIRECT_ANSWER"
+    assert usage.total_tokens == 38
+    assert len(requests) == 1
+    body = requests[0]
+    response_format: dict[str, Any] = body["response_format"]
+    assert response_format["type"] == "json_schema"
+    json_schema: dict[str, Any] = response_format["json_schema"]
+    assert json_schema["name"] == "AgentDecision"
+    assert json_schema["strict"] is True
+    assert json_schema["schema"] == AGENT_DECISION_SCHEMA
+
+
+def test_groq_structured_output_reports_unsupported_without_hidden_retry() -> None:
+    from semantic_text2sql.conversational_agent import AGENT_DECISION_SCHEMA
+
+    bodies: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body: dict[str, Any] = json.loads(request.content)
+        bodies.append(body)
+        if "response_format" in body:
+            return httpx.Response(
+                400, json={"error": {"message": "response_format unsupported"}}
+            )
+        return httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": json.dumps(
+                                {
+                                    "action": "ANSWER",
+                                    "intent": "DIRECT_ANSWER",
+                                    "tool": None,
+                                    "tool_arguments": None,
+                                    "answer": "Summary",
+                                }
+                            )
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 11, "completion_tokens": 5},
+            },
+        )
+
+    model = GroqSQLModel(
+        "groq-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    from semantic_text2sql.llm import StructuredOutputUnsupported
+    with pytest.raises(StructuredOutputUnsupported):
+        asyncio.run(model.complete_structured(
+            "qwen/qwen3.6-27b", "Decide next step", "AgentDecision", AGENT_DECISION_SCHEMA
+        ))
+    assert len(bodies) == 1
+
+
+def test_justdowork_structured_output_uses_forced_tool_schema() -> None:
+    from semantic_text2sql.conversational_agent import (
+        AGENT_DECISION_SCHEMA,
+        AgentDecision,
+    )
+
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "content": [
+                    {
+                        "type": "tool_use",
+                        "name": "AgentDecision",
+                        "input": {
+                            "action": "ANSWER",
+                            "intent": "DIRECT_ANSWER",
+                            "tool": None,
+                            "tool_arguments": None,
+                            "answer": "Summary",
+                        },
+                    }
+                ],
+                "usage": {"prompt_tokens": 24, "completion_tokens": 9},
+            },
+        )
+
+    model = JustDoWorkSQLModel(
+        "shared-key",
+        "https://justdowork.test/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    text, usage = asyncio.run(
+        model.complete_structured(
+            "claude-opus-4-8", "Decide next step", "AgentDecision", AGENT_DECISION_SCHEMA
+        )
+    )
+
+    assert AgentDecision.model_validate_json(text).intent == "DIRECT_ANSWER"
+    assert usage.total_tokens == 33
+    body: dict[str, Any] = captured["body"]
+    tool_choice = body["tool_choice"]
+    assert tool_choice == {"type": "tool", "name": "AgentDecision"}
+    forced_tool = next(
+        tool for tool in body["tools"] if tool["name"] == "AgentDecision"
+    )
+    schema: dict[str, Any] = forced_tool["input_schema"]
+    assert schema["required"] == [
+        "action", "intent", "tool", "tool_arguments", "instruction", "answer"
+    ]
+    assert schema["properties"]["action"]["enum"] == [
+        "ANSWER",
+        "CALL_TOOL",
+    ]
+
+
+def test_agentrouter_routes_structured_output_and_falls_back() -> None:  # noqa: C901
+    class StructuredClaude:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str, dict[str, object]]] = []
+
+        async def complete_structured(
+            self,
+            model: str,
+            prompt: str,
+            schema_name: str,
+            schema: dict[str, object],
+        ) -> tuple[str, TokenUsage]:
+            self.calls.append((model, prompt, schema_name, schema))
+            return json.dumps(
+                {"action": "ANSWER", "intent": "DIRECT_ANSWER"}
+            ), TokenUsage(input_tokens=5, output_tokens=3)
+
+        async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            raise AssertionError("structured path should not need plain completions")
+
+    class UnsupportedClaude:
+        async def complete_structured(
+            self,
+            model: str,
+            prompt: str,
+            schema_name: str,
+            schema: dict[str, object],
+        ) -> tuple[str, TokenUsage]:
+            raise ModelError("gateway rejected the response format")
+
+        async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            return "SELECT 1", TokenUsage(input_tokens=2, output_tokens=1)
+
+    router = AgentRouterModel(
+        StructuredClaude(),  # type: ignore[arg-type]
+        AgentRouterCodexModel(None),
+    )
+    text, usage = asyncio.run(router.complete_structured("claude-x", "p", "AgentDecision", {}))
+    assert json.loads(text) == {"action": "ANSWER", "intent": "DIRECT_ANSWER"}
+    assert usage.total_tokens == 8
+
+    router = AgentRouterModel(
+        UnsupportedClaude(),  # type: ignore[arg-type]
+        AgentRouterCodexModel(None),
+    )
+    with pytest.raises(ModelError):
+        asyncio.run(router.complete_structured("claude-x", "p", "AgentDecision", {}))
+
+
+def test_groq_max_completion_tokens_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(int(json.loads(request.content)["max_completion_tokens"]))
+        return httpx.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": "SELECT 1"}}],
+                "usage": {"prompt_tokens": 2, "completion_tokens": 1},
+            },
+        )
+
+    model = GroqSQLModel(
+        "groq-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+        max_completion_tokens=1_024,
+    )
+    asyncio.run(model.complete_detailed("qwen/qwen3.6-27b", "Return SQL"))
+    asyncio.run(
+        model.complete_structured("qwen/qwen3.6-27b", "Decide", "AgentDecision", {})
+    )
+
+    # Env fallback when no explicit value is passed.
+    monkeypatch.setenv("TEXT2SQL_MAX_COMPLETION_TOKENS", "640")
+    env_model = GroqSQLModel(
+        "groq-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+
+    asyncio.run(env_model.complete_detailed("qwen/qwen3.6-27b", "Return SQL"))
+
+    # Default stays at the historical 180.
+    monkeypatch.delenv("TEXT2SQL_MAX_COMPLETION_TOKENS", raising=False)
+    default_model = GroqSQLModel(
+        "groq-test-key",
+        "https://api.groq.test/openai/v1",
+        transport=httpx.MockTransport(handler),
+    )
+    asyncio.run(default_model.complete_detailed("qwen/qwen3.6-27b", "Return SQL"))
+
+    assert captured == [1_024, 1_024, 640, 180]

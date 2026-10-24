@@ -8,8 +8,14 @@ from fastapi.testclient import TestClient
 
 from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.api import create_app
-from semantic_text2sql.conversational_agent import ConversationalAnalyticsAgent
-from semantic_text2sql.conversational_bridge import ConversationalAnalyticsBridge, _route
+from semantic_text2sql.conversational_agent import (
+    AGENT_DECISION_SCHEMA,
+    ConversationalAnalyticsAgent,
+)
+from semantic_text2sql.conversational_bridge import (
+    ConversationalAnalyticsBridge,
+    _route,
+)
 from semantic_text2sql.data_requirement_validator import _stored_grain_capability
 from semantic_text2sql.glossary import GlossaryStore
 from semantic_text2sql.hybrid_retrieval import HybridSchemaRetriever
@@ -261,7 +267,7 @@ def test_invalid_agent_decision_fails_closed(registry: Any, tmp_path: Any) -> No
     response = asyncio.run(
         agent.run(ChatRequest(session_id="invalid", db_id="shop", message="Inspect this database"))
     )
-    assert "could not complete this safely" in response.message
+    assert "No query was run" in response.message
     assert calls == []
 
 
@@ -272,7 +278,7 @@ def test_assistant_failure_is_marked_not_presented_as_model_answer(
     result = asyncio.run(
         agent.run(ChatRequest(session_id="down", db_id="shop", message="Hello"))
     )
-    assert "Assistant response unavailable" in result.message
+    assert "model provider" in result.message.lower()
     assert result.provenance == ["assistant_service_failure"]
 
 
@@ -645,3 +651,444 @@ def test_investigation_uses_governed_sql_for_distinct_breakdowns(
     assert response.json()["message"].startswith("These breakdowns")
     assert model.questions == ["Count orders", "Count customers by country"]
     assert completer.calls == 3
+
+
+class ScriptedStructuredCompleter:
+    """Plays raw scripted outputs through ``complete_structured`` and records calls."""
+
+    def __init__(self, items: list[str]) -> None:
+        self.items = iter(items)
+        self.calls: list[tuple[str, dict[str, Any]]] = []
+        self.prompts: list[str] = []
+
+    async def complete_structured(
+        self, model: str, prompt: str, schema_name: str, schema: dict[str, Any]
+    ) -> tuple[str, TokenUsage]:
+        self.calls.append((schema_name, schema))
+        self.prompts.append(prompt)
+        return next(self.items), TokenUsage(input_tokens=10, output_tokens=5)
+
+
+def _decision_agent(
+    registry: Any, tmp_path: Any, completer: Any, calls: list[str]
+) -> ConversationalAnalyticsAgent:
+    async def sql_handler(request: ChatRequest) -> ChatResponse:
+        calls.append(request.message)
+        return ChatResponse(
+            session_id=request.session_id,
+            operation="NEW_QUERY",
+            resolved_question=request.message,
+            message="The query ran.",
+        )
+
+    bridge = ConversationalAnalyticsBridge(
+        database=registry,
+        postgres=None,
+        profiles=ProfileStore(tmp_path / "profiles"),
+        glossaries=GlossaryStore(tmp_path / "glossaries"),
+        retriever=HybridSchemaRetriever(Encoder()),
+        sql_handler=sql_handler,
+    )
+    agent = ConversationalAnalyticsAgent(
+        bridge=bridge,
+        completers={"agentrouter": completer},
+        get_state=lambda session_id: None,
+        get_last_response=lambda session_id, db_id: None,
+        sql_handler=sql_handler,
+    )
+    return agent
+
+
+def test_structured_schema_enumerates_every_allowed_value() -> None:
+    """The schema carries every action/intent/tool value and concrete examples."""
+    action_spec = AGENT_DECISION_SCHEMA["properties"]["action"]
+    intent_spec = AGENT_DECISION_SCHEMA["properties"]["intent"]
+    tool_spec = AGENT_DECISION_SCHEMA["properties"]["tool"]
+    arguments_spec = AGENT_DECISION_SCHEMA["properties"]["tool_arguments"]
+
+    action_enum = action_spec["enum"]  # type: ignore[index]
+    assert action_enum == ["ANSWER", "CALL_TOOL"]
+
+    intent_enum = intent_spec["enum"]  # type: ignore[index]
+    for expected in (
+        "DIRECT_ANSWER", "NEW_QUERY", "MODIFY_QUERY", "VISUALIZE",
+        "EXPLORE_SCHEMA", "BUSINESS_CONTEXT", "EXPLAIN", "INVESTIGATE",
+        "CORRECT", "REVIEW_SQL", "OPTIMIZE", "RESET_CONTEXT",
+    ):
+        assert expected in intent_enum
+
+    tool_enum = [
+        value
+        for alternative in tool_spec["anyOf"]  # type: ignore[index]
+        for value in alternative.get("enum", [None])  # type: ignore[union-attr]
+    ]
+    assert None in tool_enum
+    for expected in (
+        "list_tables", "search_schema", "describe_table", "get_relationships",
+        "get_column_profile", "get_available_metrics", "get_business_context",
+        "ask_data", "analyze_result", "check_sql_correctness", "change_visualization",
+        "present_result", "explain_existing_result", "reset_context",
+    ):
+        assert expected in tool_enum
+    assert "run_arbitrary_sql" not in tool_enum
+
+    assert arguments_spec["anyOf"][0]["required"] == ["objective"]  # type: ignore[index]
+    assert AGENT_DECISION_SCHEMA["required"] == [
+        "action", "intent", "tool", "tool_arguments", "instruction", "answer"
+    ]
+
+    from semantic_text2sql.conversational_agent import _DECISION_EXAMPLES, AgentDecision, ToolInput
+    for example in _DECISION_EXAMPLES:
+        decision = AgentDecision.model_validate(example)
+        if decision.tool_arguments is not None:
+            assert ToolInput.model_validate(decision.tool_arguments) is not None
+
+
+def test_agent_prompt_carries_schema_rules_and_examples(
+    registry: Any, tmp_path: Any
+) -> None:
+    calls: list[str] = []
+    completer = ScriptedStructuredCompleter([
+        json.dumps({
+            "action": "ANSWER", "intent": "DIRECT_ANSWER", "tool": None,
+            "tool_arguments": None, "instruction": None, "answer": "Hello!",
+        })
+    ])
+    agent = _decision_agent(registry, tmp_path, completer, calls)
+    asyncio.run(agent.run(ChatRequest(session_id="prompt", db_id="shop", message="Hello")))
+    prompt = completer.prompts[0]
+    assert "action must be exactly one of: ANSWER, CALL_TOOL." in prompt
+    assert "NEW_QUERY" in prompt and "MODIFY_QUERY" in prompt
+    assert "tool must be exactly one of: list_tables" in prompt
+    assert 'tool_arguments is {"objective": "a short, scoped natural-language objective"}' in prompt
+    assert '"intent":"NEW_QUERY"' in prompt  # NEW_QUERY example
+    assert '"intent":"VISUALIZE"' in prompt  # VISUALIZE example
+    assert '"action":"ANSWER"' in prompt  # ANSWER example
+    assert "Do not ask the client to name" in prompt
+
+
+def test_prose_intent_is_repaired_not_converted_for_total_consumption(
+    registry: Any, tmp_path: Any
+) -> None:
+    """'total consumption' first-turn bug: prose intent triggers one bounded repair."""
+    calls: list[str] = []
+    completer = ScriptedStructuredCompleter([
+        json.dumps({
+            "action": "CALL_TOOL",
+            "intent": "Sum the total consumption recorded in the database",
+            "tool": "ask_data", "instruction": "Total consumption", "answer": None,
+        }),
+        json.dumps({
+            "action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
+            "tool_arguments": {"objective": "Show total consumption"}, "answer": None,
+        }),
+        json.dumps({
+            "action": "ANSWER", "intent": "NEW_QUERY", "tool": None,
+            "tool_arguments": None, "instruction": None,
+            "answer": "The query ran.",
+        }),
+    ])
+    agent = _decision_agent(registry, tmp_path, completer, calls)
+    response = asyncio.run(
+        agent.run(ChatRequest(session_id="prose", db_id="shop", message="total consumption"))
+    )
+    assert calls == ["total consumption"]  # the tool executed exactly once
+    assert response.message == "The query ran."
+    # Measured model-call count: 1 rejected attempt + 1 repair + 1 final answer, no more.
+    assert len(completer.calls) == 3
+    statuses = [
+        item.status
+        for item in response.call_ledger
+        if item.kind == "MODEL" and item.component == "conversational_agent"
+    ]
+    assert statuses == ["FAILED", "SUCCEEDED", "SUCCEEDED"]
+    assert response.token_usage.total_tokens == 45  # 10+5 tokens preserved per attempt
+    repair_prompt = completer.prompts[1]
+    assert "Validation issues:" in repair_prompt
+    assert (
+        "intent must be one of the allowed values exactly" in repair_prompt
+        or "must be one of" in repair_prompt
+    )
+    assert "|".join(("DIRECT_ANSWER", "NEW_QUERY")) in repair_prompt
+
+
+def test_malformed_output_fails_closed_after_exactly_one_repair(
+    registry: Any, tmp_path: Any
+) -> None:
+    calls: list[str] = []
+    completer = ScriptedStructuredCompleter([
+        "I think the right answer is to look at the database.",  # no JSON at all
+        json.dumps({"action": "CALL_TOOL", "tool": "run_arbitrary_sql"}),  # still invalid
+        json.dumps({
+            "action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
+            "tool_arguments": {"objective": "Show total consumption"}, "answer": None,
+        }),
+        json.dumps({
+            "action": "ANSWER", "intent": "NEW_QUERY", "tool": None,
+            "tool_arguments": None, "instruction": None, "answer": "Executed anyway.",
+        }),
+    ])
+    agent = _decision_agent(registry, tmp_path, completer, calls)
+    response = asyncio.run(
+        agent.run(ChatRequest(session_id="bad", db_id="shop", message="total consumption"))
+    )
+    assert calls == []  # never executed a tool from an invalid decision
+    assert len(completer.calls) == 2  # exactly one bounded repair attempt
+    assert "couldn't interpret that request safely" in response.message
+    assert "Invalid JSON" not in response.message  # raw pydantic text stays out
+    assert response.provenance == ["assistant_service_failure"]
+    statuses = [
+        item.status
+        for item in response.call_ledger
+        if item.kind == "MODEL" and item.component == "conversational_agent"
+    ]
+    assert statuses == ["FAILED", "FAILED"]
+    assert response.token_usage.total_tokens == 30  # usage preserved despite failures
+    # The repair prompt repeats the base prompt plus the exact validation issues.
+    assert completer.prompts[1].startswith(completer.prompts[0])
+    assert "Validation issues:" in completer.prompts[1]
+    # Items 3/4 are valid responses that must never be consumed after failing closed.
+
+
+def test_prose_wrapped_json_never_executes_before_repair(registry: Any, tmp_path: Any) -> None:
+    calls: list[str] = []
+    valid = json.dumps({
+        "action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
+        "tool_arguments": {"objective": "Show total consumption"}, "answer": None,
+    })
+    completer = ScriptedStructuredCompleter([
+        "Here is the decision: " + valid,
+        valid,
+        json.dumps({"action": "ANSWER", "intent": "NEW_QUERY", "answer": "Done."}),
+    ])
+    response = asyncio.run(_decision_agent(registry, tmp_path, completer, calls).run(
+        ChatRequest(session_id="wrapped", db_id="shop", message="total consumption")
+    ))
+    assert calls == ["total consumption"]
+    assert len(completer.calls) == 3
+    statuses = [
+        entry.status for entry in response.call_ledger
+        if entry.component == "conversational_agent"
+    ]
+    assert statuses == [
+        "FAILED", "SUCCEEDED", "SUCCEEDED"
+    ]
+
+
+def test_incompatible_intent_tool_is_repaired_before_execution(
+    registry: Any, tmp_path: Any
+) -> None:
+    calls: list[str] = []
+    completer = ScriptedStructuredCompleter([
+        json.dumps({
+            "action": "CALL_TOOL", "intent": "VISUALIZE", "tool": "ask_data",
+            "tool_arguments": {"objective": "Plot it"}, "answer": None,
+        }),
+        json.dumps({
+            "action": "CALL_TOOL", "intent": "VISUALIZE", "tool": "change_visualization",
+            "tool_arguments": {"objective": "Plot the current result"}, "answer": None,
+        }),
+    ])
+    response = asyncio.run(_decision_agent(registry, tmp_path, completer, calls).run(
+        ChatRequest(session_id="wrong-tool", db_id="shop", message="plot it")
+    ))
+    assert calls == []  # no accepted result exists to visualize
+    assert len(completer.calls) == 3
+    assert response.message
+
+
+def test_removed_clarify_action_repairs_to_query_for_total_consumption(
+    registry: Any, tmp_path: Any
+) -> None:
+    calls: list[str] = []
+    completer = ScriptedStructuredCompleter([
+        json.dumps({
+            "action": "CLARIFY", "intent": "CLARIFY", "tool": None,
+            "tool_arguments": None, "answer": "Which date range?",
+        }),
+        json.dumps({
+            "action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
+            "tool_arguments": {"objective": "Show total consumption"}, "answer": None,
+        }),
+        json.dumps({
+            "action": "ANSWER", "intent": "NEW_QUERY", "tool": None,
+            "tool_arguments": None, "answer": "The total is available in the result.",
+        }),
+    ])
+    response = asyncio.run(_decision_agent(registry, tmp_path, completer, calls).run(
+        ChatRequest(session_id="no-clarify", db_id="shop", message="total consumption")
+    ))
+    assert calls == ["total consumption"]
+    assert len(completer.calls) == 3
+    assert "Which date range" not in response.message
+
+
+def test_provider_failure_has_safe_cause_and_failed_ledger(
+    registry: Any, tmp_path: Any
+) -> None:
+    from semantic_text2sql.llm import ModelError
+
+    class RateLimitedCompleter:
+        async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            raise ModelError("The Groq request failed: rate_limit_exceeded 429; secret=hidden")
+
+    calls: list[str] = []
+    response = asyncio.run(
+        _decision_agent(registry, tmp_path, RateLimitedCompleter(), calls).run(
+            ChatRequest(session_id="rate-limited", db_id="shop", message="total consumption")
+        )
+    )
+    assert "rate-limiting" in response.message
+    assert "secret" not in response.message
+    assert calls == []
+    assert [
+        entry.status for entry in response.call_ledger
+        if entry.component == "conversational_agent"
+    ] == ["FAILED"]
+
+
+def test_consistency_repair_when_call_tool_lacks_a_tool(registry: Any, tmp_path: Any) -> None:
+    calls: list[str] = []
+    completer = ScriptedStructuredCompleter([
+        json.dumps({
+            "action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": None,
+            "tool_arguments": {"objective": "Count customers"}, "answer": None,
+        }),
+        json.dumps({
+            "action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
+            "tool_arguments": {"objective": "Count customers"}, "answer": None,
+        }),
+        json.dumps({
+            "action": "ANSWER", "intent": "NEW_QUERY", "tool": None,
+            "tool_arguments": None, "instruction": None,
+            "answer": "The query ran.",
+        }),
+    ])
+    agent = _decision_agent(registry, tmp_path, completer, calls)
+    response = asyncio.run(
+        agent.run(ChatRequest(session_id="consistency", db_id="shop", message="Count customers"))
+    )
+    assert calls == ["Count customers"]  # executed once, not twice
+    assert len(completer.calls) == 3
+    assert "tool is required when action is CALL_TOOL" in completer.prompts[1]
+    assert "could not complete" not in response.message
+
+
+def test_plot_it_valid_visualize_decision_is_not_repaired(
+    registry: Any, tmp_path: Any
+) -> None:
+    calls: list[str] = []
+    completer = ScriptedStructuredCompleter([
+        json.dumps({
+            "action": "CALL_TOOL", "intent": "VISUALIZE", "tool": "change_visualization",
+            "tool_arguments": {"objective": "Plot the accepted result"}, "answer": None,
+        }),
+        json.dumps({
+            "action": "ANSWER", "intent": "VISUALIZE", "tool": None,
+            "tool_arguments": None, "instruction": None,
+            "answer": "Here is a chart of the stored result.",
+        }),
+    ])
+    agent = _decision_agent(registry, tmp_path, completer, calls)
+    agent.get_state = lambda session_id: ConversationState(
+        session_id="viz",
+        db_id="shop",
+        root_question="Show monthly consumption",
+        resolved_question="Show monthly consumption",
+        last_sql="SELECT yearmonth, SUM(Consumption) FROM yearmonth GROUP BY yearmonth",
+    )
+    response = asyncio.run(
+        agent.run(ChatRequest(session_id="viz", db_id="shop", message="plot it"))
+    )
+    assert calls == ["plot it"]
+    assert response.message == "Here is a chart of the stored result."
+    assert len(completer.calls) == 2  # one decision per round; zero repair calls
+
+
+def test_add_currency_category_prose_intent_is_repaired_to_modify_query(
+    registry: Any, tmp_path: Any
+) -> None:
+    calls: list[str] = []
+    completer = ScriptedStructuredCompleter([
+        json.dumps({
+            "action": "CALL_TOOL",
+            "intent": "break the consumption down by currency category",
+            "tool": "ask_data", "instruction": "Add currency category", "answer": None,
+        }),
+        json.dumps({
+            "action": "CALL_TOOL", "intent": "MODIFY_QUERY", "tool": "ask_data",
+            "tool_arguments": {"objective": "Add a currency category breakdown"}, "answer": None,
+        }),
+        json.dumps({
+            "action": "ANSWER", "intent": "MODIFY_QUERY", "tool": None,
+            "tool_arguments": None, "instruction": None,
+            "answer": "The query ran with the currency breakdown.",
+        }),
+    ])
+    agent = _decision_agent(registry, tmp_path, completer, calls)
+    response = asyncio.run(
+        agent.run(
+            ChatRequest(session_id="modify", db_id="shop", message="add currency category")
+        )
+    )
+    assert calls == ["add currency category"]
+    assert response.message == "The query ran with the currency breakdown."
+    assert len(completer.calls) == 3  # 1 invalid + 1 repaired + 1 final answer
+    assert "Validation issues:" in completer.prompts[1]
+
+
+def test_structured_completer_transport_failure_keeps_ledger_and_usage(
+    registry: Any, tmp_path: Any
+) -> None:
+    agent_fallback: list[str] = []
+
+    class DenyingCompleter:
+        calls = 0
+
+        async def complete_structured(
+            self, model: str, prompt: str, schema_name: str, schema: dict[str, Any]
+        ) -> tuple[str, TokenUsage]:
+            self.calls += 1
+            raise RuntimeError("gateway down")
+
+    async def sql_handler(request: ChatRequest) -> ChatResponse:
+        agent_fallback.append(request.message)
+        return ChatResponse(
+            session_id=request.session_id,
+            operation="NEW_QUERY",
+            resolved_question=request.message,
+            message="The query ran.",
+        )
+
+    bridge = ConversationalAnalyticsBridge(
+        database=registry,
+        postgres=None,
+        profiles=ProfileStore(tmp_path / "profiles"),
+        glossaries=GlossaryStore(tmp_path / "glossaries"),
+        retriever=HybridSchemaRetriever(Encoder()),
+        sql_handler=sql_handler,
+    )
+    completer = DenyingCompleter()
+    agent = ConversationalAnalyticsAgent(
+        bridge=bridge,
+        completers={"agentrouter": completer},
+        get_state=lambda session_id: None,
+        get_last_response=lambda session_id, db_id: None,
+        sql_handler=sql_handler,
+    )
+    response = asyncio.run(
+        agent.run(ChatRequest(session_id="down", db_id="shop", message="Hello"))
+    )
+    assert agent_fallback == []  # no tool ever executed
+    assert completer.calls == 1  # a transport failure is not retried as a repair
+    assert "model provider" in response.message.lower()
+    statuses = [
+        item.status
+        for item in response.call_ledger
+        if item.kind == "MODEL" and item.component == "conversational_agent"
+    ]
+    assert statuses == ["FAILED"]
+    # Zero tokens were consumed because zero model responses arrived; usage is a
+    # structured TokenUsage (not raw exception text), so no tokens leak or vanish.
+    assert response.token_usage is not None
+    assert response.token_usage.total_tokens == 0

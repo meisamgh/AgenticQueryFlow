@@ -1822,6 +1822,15 @@ def create_app(
         # completed turn once, after that answer has been attached.
         return await execute_chat(request, persist=False)
 
+    async def assistant_investigation_handler(request: ChatRequest) -> ChatResponse:
+        # Investigation state is request-local. Never save an intermediate turn
+        # in the client's history or leave its temporary conversation behind.
+        try:
+            return await execute_chat(request, persist=False)
+        finally:
+            conversations.reset(request.session_id)
+            recent_results.pop((request.session_id, request.db_id), None)
+
     bridge = ConversationalAnalyticsBridge(
         database=sqlite,
         postgres=postgres,
@@ -1836,7 +1845,7 @@ def create_app(
         get_state=conversations.get,
         get_last_response=lambda session_id, db_id: recent_results.get((session_id, db_id)),
         sql_handler=assistant_sql_handler,
-        investigation_handler=execute_chat,
+        investigation_handler=assistant_investigation_handler,
     )
 
     @app.post("/api/chat", response_model=ChatResponse)
