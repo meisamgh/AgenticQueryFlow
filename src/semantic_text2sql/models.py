@@ -406,6 +406,8 @@ class SemanticContract(StrictModel):
     active_period: str | None = None
     comparison_periods: list[str] = Field(default_factory=list)
     tie_policy: Literal["return_all", "deterministic_one"] | None = None
+    ranking_direction: Literal["ASC", "DESC"] | None = None
+    ranked_metric: str | None = None
     requires_grouping: bool = False
     requires_distinct: bool = False
     requires_ordering: bool = False
@@ -677,6 +679,15 @@ class HistoricalExample(StrictModel):
     score: float = Field(ge=0)
 
 
+class VerifiedSchemaSnapshot(StrictModel):
+    """Live schema/profile inspected once within a governed SQL request."""
+
+    db_id: str
+    dialect: Literal["sqlite", "postgres"]
+    live_schema: SchemaInfo
+    profile: DatabaseProfile | None = None
+
+
 class GenerateRequest(StrictModel):
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     question: str = Field(min_length=1, max_length=4_000)
@@ -697,6 +708,7 @@ class GenerateRequest(StrictModel):
     planner_call_used: bool = False
     planner_token_usage: TokenUsage = Field(default_factory=TokenUsage)
     historical_examples: list[HistoricalExample] = Field(default_factory=list, max_length=3)
+    schema_snapshot: VerifiedSchemaSnapshot | None = Field(default=None, exclude=True)
 
 
 class ChatRequest(StrictModel):
@@ -782,6 +794,20 @@ class ConversationState(StrictModel):
     corrections: list[str] = Field(default_factory=list, max_length=30)
     contract_deltas: list[ContractDelta] = Field(default_factory=list, max_length=30)
     version: int = Field(default=0, ge=0)
+
+
+class TurnContext(StrictModel):
+    """Identifiers and objective for one request, never persisted as session state."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    request_id: str
+    session_id: str
+    db_id: str
+    source_result_id: str | None = None
+    source_run_id: str | None = None
+    chart_id: str | None = None
+    pending_goal: Literal["SQL", "CHART", "SQL_AND_CHART", "NONE"] = "NONE"
 
 
 class TurnInterpretation(StrictModel):
@@ -910,6 +936,7 @@ class PresentationState(StrictModel):
     size: str | None = None
     title: str | None = None
     source_run_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    source_result_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     data_complete: bool = True
 
 
@@ -972,11 +999,14 @@ class ChartRecommendations(StrictModel):
 class ChatResponse(StrictModel):
     session_id: str
     run_id: str | None = None
+    result_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    chart_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     turn_id: str | None = None
     conversation_id: str | None = None
     parent_run_id: str | None = None
     sql_version: int = 0
     history_saved: bool = False
+    state_commit_pending: bool = Field(default=False, exclude=True)
     previous_sql: str | None = Field(default=None, max_length=20_000)
     recovery_events: list[RecoveryEvent] = Field(default_factory=list, max_length=40)
     operation: Literal[

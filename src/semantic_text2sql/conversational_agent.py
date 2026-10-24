@@ -36,6 +36,7 @@ from semantic_text2sql.models import (
     ResultPresentation,
     StrictModel,
     TokenUsage,
+    TurnContext,
 )
 from semantic_text2sql.plotting_service import design_chart
 from semantic_text2sql.result_cache import RecentResult
@@ -300,6 +301,7 @@ def _consistency_issue_lines(decision: AgentDecision) -> list[str]:
 
 
 class AgentState(StrictModel):
+    turn_context: TurnContext | None = None
     observations: list[dict[str, Any]] = Field(default_factory=list, max_length=4)
     decision: AgentDecision | None = None
     response: ChatResponse | None = None
@@ -375,7 +377,12 @@ class ConversationalAnalyticsAgent:
 
     async def _run_request(self, request: ChatRequest) -> ChatResponse:
         try:
-            result = await self.graph.ainvoke(AgentState())
+            result = await self.graph.ainvoke(AgentState(turn_context=TurnContext(
+                request_id=uuid4().hex,
+                session_id=request.session_id,
+                db_id=request.db_id,
+                pending_goal="CHART" if parse_intent(request.message).requested else "NONE",
+            )))
             state = AgentState.model_validate(result)
             if state.response is not None:
                 return state.response
@@ -646,9 +653,16 @@ class ConversationalAnalyticsAgent:
     async def _reason(self, state: AgentState) -> AgentState:
         assert self._request is not None and self._budget is not None
         previous = self.get_state(self._request.session_id)
+        if state.base_response and state.base_response.state:
+            previous = state.base_response.state
         if previous and previous.db_id != self._request.db_id:
             previous = None
-        last = self.get_last_response(self._request.session_id, self._request.db_id)
+        last = (
+            state.base_response
+            if state.base_response and state.base_response.generation
+            and state.base_response.generation.accepted
+            else self.get_last_response(self._request.session_id, self._request.db_id)
+        )
         compact = {
             "question": self._request.message,
             "capabilities": self._capabilities(),
@@ -878,7 +892,7 @@ class ConversationalAnalyticsAgent:
                     ),
                 }
             )
-        if not decision.tool or state.steps >= 3:
+        if not decision.tool or state.steps >= 5:
             return state.model_copy(
                 update={
                     "response": self._failure(
@@ -903,13 +917,21 @@ class ConversationalAnalyticsAgent:
         question = tool_input.objective
         started = perf_counter()
         facts: dict[str, Any]
-        last = self.get_last_response(self._request.session_id, self._request.db_id)
+        last = (
+            state.base_response
+            if state.base_response and state.base_response.generation
+            and state.base_response.generation.accepted
+            else self.get_last_response(self._request.session_id, self._request.db_id)
+        )
         previous = self.get_state(self._request.session_id)
+        if state.base_response and state.base_response.state:
+            previous = state.base_response.state
         has_prior_sql = bool(
             previous and previous.db_id == self._request.db_id and previous.last_sql
         )
         if (tool in CACHED_RESULT_TOOLS and last is None) or (
             tool in PRIOR_SQL_TOOLS and not has_prior_sql
+            and not (last and last.generation and last.generation.accepted)
         ):
             facts = {"tool": tool, "error": "No accepted result is available."}
             return state.model_copy(
@@ -1018,6 +1040,8 @@ class ConversationalAnalyticsAgent:
                 else self.sql_handler
             )
             response = await handler(request)
+            if response.generation and response.generation.accepted and not response.result_id:
+                response = response.model_copy(update={"result_id": uuid4().hex})
             facts = {"tool": tool, **self._result_facts(response)}
             if state.decision.intent == "INVESTIGATE" and response.generation:
                 facts["evidence_id"] = request.session_id
@@ -1166,6 +1190,13 @@ class ConversationalAnalyticsAgent:
                     })
                     base = ChatResponse(
                         session_id=self._request.session_id,
+                        result_id=source.result_id,
+                        chart_id=uuid4().hex,
+                        state=(source.state if isinstance(source, ChatResponse) else previous),
+                        state_commit_pending=(
+                            source.state_commit_pending
+                            if isinstance(source, ChatResponse) else False
+                        ),
                         operation="VISUALIZE",
                         resolved_question=source.generation.question,
                         generation=source.generation,
@@ -1175,6 +1206,7 @@ class ConversationalAnalyticsAgent:
                             mode="chart", chart_type=outcome.spec.chart_type,
                             x=outcome.spec.x, y=outcome.spec.y,
                             title=outcome.spec.title, source_run_id=source.run_id,
+                            source_result_id=source.result_id,
                         ),
                         chart_recommendations=outcome.recommendations,
                         plot_status="CHART_READY",
@@ -1187,8 +1219,25 @@ class ConversationalAnalyticsAgent:
                     ))
         else:
             facts = {"tool": tool, "error": "Unsupported tool."}
+        context = state.turn_context
+        if context is not None and base is not None:
+            context = context.model_copy(update={
+                "source_result_id": base.result_id or context.source_result_id,
+                "source_run_id": (
+                    base.presentation_state.source_run_id
+                    if base.presentation_state and base.presentation_state.source_run_id
+                    else base.run_id or context.source_run_id
+                ),
+                "chart_id": base.chart_id or context.chart_id,
+                "pending_goal": (
+                    "NONE" if base.chart_id
+                    else "CHART" if context.pending_goal in {"CHART", "SQL_AND_CHART"}
+                    else context.pending_goal
+                ),
+            })
         return state.model_copy(
             update={
+                "turn_context": context,
                 "observations": [*state.observations, facts],
                 "base_response": base,
                 "decision": None,

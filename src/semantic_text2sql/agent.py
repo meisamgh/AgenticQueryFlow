@@ -117,9 +117,15 @@ class TextToSQLAgent:
         semantic_contract = request.semantic_contract or SemanticContract()
         try:
             database = self._database(request.dialect)
-            if budget is not None:
-                budget.claim("database")
-            schema = database.inspect(request.db_id)
+            snapshot = request.schema_snapshot
+            if snapshot is not None:
+                if snapshot.db_id != request.db_id or snapshot.dialect != request.dialect:
+                    raise DatabaseError("DATABASE_NOT_FOUND", "Schema snapshot identity mismatch.")
+                schema = snapshot.live_schema
+            else:
+                if budget is not None:
+                    budget.claim("database")
+                schema = database.inspect(request.db_id)
         except DatabaseError:
             return GenerateResponse(
                 db_id=request.db_id,
@@ -158,7 +164,10 @@ class TextToSQLAgent:
                     ],
                 }
             )
-        profile = self.profiles.load(request.dialect, request.db_id) if self.profiles else None
+        profile = (
+            snapshot.profile if snapshot is not None
+            else self.profiles.load(request.dialect, request.db_id) if self.profiles else None
+        )
         semantic_scope = " ".join(
             [
                 *semantic_contract.outputs,
@@ -385,8 +394,7 @@ class TextToSQLAgent:
                 findings = validate_sql_semantics(
                     sql,
                     request.semantic_contract or SemanticContract(),
-                    ({"business_context": request.business_context}
-                     if request.business_context else None),
+                    final_model_context,
                     dialect=request.dialect,
                 )
                 failures = [item for item in findings if item.status == "FAIL"]

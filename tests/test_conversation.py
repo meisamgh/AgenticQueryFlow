@@ -71,7 +71,9 @@ def test_contract_filter_and_period_changes_preserve_unaffected_constraints() ->
             RequestedChange(operation="CHANGE_PERIOD", target="period", new_value="2026"),
         ],
     )
-    assert len(updated.filters) == 3
+    assert [(item.operator, item.value) for item in updated.filters] == [
+        ("=", "2026-07-01")
+    ]
     assert updated.active_period == "2026"
     assert updated.comparison_periods == ["2024"]
 
@@ -121,6 +123,56 @@ def test_contract_unsupported_delta_is_not_silently_ignored() -> None:
             SemanticContract(), original_question="Anything", resolved_question="Anything",
             changes=[RequestedChange(operation="OTHER", target="unknown")],
         )
+
+
+def test_change_period_removes_old_date_bounds_not_country_filter() -> None:
+    base = SemanticContract(
+        active_period="2025", comparison_periods=["2024"],
+        filters=[
+            SemanticFilter(operand="orders.order_date", operator=">=", value="2025-01-01"),
+            SemanticFilter(operand="orders.order_date", operator="<", value="2026-01-01"),
+            SemanticFilter(operand="orders.Country", operator="=", value="Germany"),
+        ],
+    )
+    updated = resolve_semantic_contract(
+        base, original_question="Use 2026", resolved_question="Show 2026",
+        changes=[RequestedChange(operation="CHANGE_PERIOD", target="year", new_value="2026")],
+    )
+    assert updated.active_period == "2026"
+    assert updated.comparison_periods == ["2024"]
+    assert [(item.operand, item.value) for item in updated.filters] == [
+        ("orders.Country", "Germany")
+    ]
+
+
+def test_add_conflicting_equality_requires_explicit_intent() -> None:
+    base = SemanticContract(filters=[
+        SemanticFilter(operand="Country", operator="=", value="Germany"),
+    ])
+    with pytest.raises(ValueError, match="replacement, comparison, or intersection"):
+        resolve_semantic_contract(
+            base, original_question="Only France", resolved_question="Only France",
+            changes=[RequestedChange(
+                operation="ADD_FILTER", target="Country", new_value="France",
+            )],
+        )
+
+
+def test_change_metric_clears_old_formula_and_ranking_dependency() -> None:
+    base = SemanticContract(
+        measures=["revenue"], aggregation="sum", required_columns=["sales.Price"],
+        ranked_metric="revenue", required_output_aliases=["revenue"],
+        mandatory_metric_filters=[SemanticFilter(operand="status", operator="=", value="paid")],
+    )
+    updated = resolve_semantic_contract(
+        base, original_question="Use volume", resolved_question="Use volume",
+        changes=[RequestedChange(operation="CHANGE_METRIC", target="revenue", new_value="volume")],
+    )
+    assert updated.measures == ["volume"]
+    assert updated.aggregation is None
+    assert updated.ranked_metric is None
+    assert updated.required_columns == []
+    assert updated.mandatory_metric_filters == []
 
 
 def test_explicit_filter_value_correction_replaces_stored_question() -> None:
@@ -566,7 +618,10 @@ def test_correctness_check_without_budget_reports_unverified_review(
         monkeypatch,
         "SELECT customer_id, COUNT(*) FROM orders GROUP BY customer_id",
         "correctness-no-budget",
-        extra_env={"TEXT2SQL_REQUEST_MAX_DATABASE_CALLS": "3"},
+        # The request-scoped schema snapshot removed one database inspection.
+        # Two calls cover schema inspection and candidate execution, leaving
+        # none for the independent equivalence re-execution.
+        extra_env={"TEXT2SQL_REQUEST_MAX_DATABASE_CALLS": "2"},
     )
     response = client.post(
         "/api/chat", json={**base, "message": "Please verify correctness"}

@@ -189,7 +189,8 @@ def model_context_payload(
         "required_literals", "outputs", "filters", "measures", "aggregation_stages",
         "selectors", "output_operations", "named_outputs", "structural_formulas",
         "grain", "input_grain", "output_grain", "temporal_boundaries",
-        "comparison_periods", "tie_policy", "aggregation", "requires_grouping",
+        "comparison_periods", "active_period", "tie_policy", "ranking_direction",
+        "ranked_metric", "aggregation", "requires_grouping",
         "requires_distinct", "requires_ordering", "limit", "required_columns",
     )
     advisory_fields = (

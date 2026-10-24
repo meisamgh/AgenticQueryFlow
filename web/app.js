@@ -840,14 +840,47 @@ function renderChartInto(slot, presentation, generation) {
   // Plotly measures the element during newPlot, so size it before rendering.
   slot.classList.add("chart-slot-plotly");
   let plotly = null;
-  try { plotly = window.QueryflowPlotly?.render(slot, presentation, generation) || null; }
+  let active = null;
+  let disposed = false;
+  const selectionCallbacks = [];
+  const zoomCallbacks = [];
+  const handle = {
+    get renderer() { return active?.renderer; },
+    onSelect(callback) { selectionCallbacks.push(callback); active?.onSelect?.(callback); },
+    onZoom(callback) { zoomCallbacks.push(callback); active?.onZoom?.(callback); },
+    resetZoom() { active?.resetZoom?.(); },
+    resize() { active?.resize?.(); },
+    getDataURL(options) { return active?.getDataURL?.(options); },
+    dispose() { disposed = true; active?.dispose?.(); },
+  };
+  const useFallback = () => {
+    if (disposed || active !== plotly) return;
+    active?.dispose?.();
+    slot.replaceChildren();
+    slot.classList.remove("chart-slot-plotly");
+    slot.classList.add("chart-slot-ec");
+    active = window.QueryflowECharts?.render(slot, presentation, generation) || null;
+    if (active) {
+      selectionCallbacks.forEach(callback => active.onSelect?.(callback));
+      zoomCallbacks.forEach(callback => active.onZoom?.(callback));
+    } else {
+      const note = document.createElement("p");
+      note.className = "chart-note";
+      note.textContent = "Interactive chart unavailable. The exact rows remain in Data.";
+      slot.append(note);
+    }
+  };
+  try {
+    plotly = window.QueryflowPlotly?.render(slot, presentation, generation, useFallback) || null;
+  }
   catch (error) { console.warn(`Plotly rendering failed: ${error.message}`); }
   const chart = plotly || window.QueryflowECharts?.render(slot, presentation, generation) || null;
+  active = chart;
   slot.classList.toggle("chart-slot-plotly", Boolean(plotly));
   slot.classList.toggle("chart-slot-ec", Boolean(chart && !plotly));
-  slot._echart = chart; // Existing chart-view controller accepts either renderer's handle.
+  slot._echart = chart ? handle : null;
   if (chart) {
-    return { echarts: chart };
+    return { echarts: handle };
   }
   const note = document.createElement("p");
   note.className = "chart-note";

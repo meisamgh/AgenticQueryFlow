@@ -602,6 +602,10 @@ def test_plot_followup_is_selected_by_top_model_and_uses_no_new_sql(
     plotted = client.post("/api/chat", json={**base, "message": "Plot it."})
     assert plotted.status_code == 200
     assert plotted.json()["presentation"]["chart_spec"] is not None
+    assert plotted.json()["result_id"] == initial.json()["result_id"]
+    assert plotted.json()["chart_id"] != initial.json()["chart_id"]
+    assert plotted.json()["presentation_state"]["source_result_id"] == initial.json()["result_id"]
+    assert plotted.json()["presentation_state"]["source_run_id"] == initial.json()["run_id"]
     assert plotted.json()["message"] == "Here is a chart of those customer counts."
     assert any(
         item["component"] == "result_cache_reuse" for item in plotted.json()["call_ledger"]
@@ -624,6 +628,60 @@ def test_plot_followup_is_selected_by_top_model_and_uses_no_new_sql(
     assert reset.json()["message"] == "The conversation was reset."
     assert model.calls == 1
     assert completer.calls == 8
+
+
+def test_first_turn_sql_then_plot_preserves_result_identity_without_intermediate_run(
+    registry: Any, tmp_path: Any, monkeypatch: Any
+) -> None:
+    class SQLModel:
+        calls = 0
+
+        async def generate(self, **kwargs: Any) -> tuple[str, int]:
+            self.calls += 1
+            return "SELECT country, COUNT(*) AS total FROM customers GROUP BY country", 1
+
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
+    monkeypatch.setenv("TEXT2SQL_GLOSSARY_ROOT", str(tmp_path / "glossaries"))
+    monkeypatch.setenv("TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED", "true")
+    monkeypatch.setenv("TEXT2SQL_PLOTTING_PROVIDER", "groq")
+    plot_completer = Completer([{
+        "primary_chart": {
+            "chart_type": "bar", "x": "country", "x_components": [],
+            "y": "total", "y_measures": ["total"], "series": None,
+            "reason": "Compare customers by country.",
+        },
+        "alternative_charts": [],
+    }])
+    top = Completer([
+        {"action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
+         "instruction": "Count customers by country", "answer": None},
+        {"action": "CALL_TOOL", "intent": "VISUALIZE", "tool": "change_visualization",
+         "instruction": "Plot those customer counts", "answer": None},
+        {"action": "ANSWER", "intent": "VISUALIZE", "tool": None,
+         "instruction": None, "answer": "Here are the customer counts by country."},
+    ])
+    sql_model = SQLModel()
+    history = RunHistoryStore(None)
+    client = TestClient(create_app(
+        TextToSQLAgent(registry, sql_model),
+        conversation_completers={"agentrouter": top, "groq": plot_completer},
+        run_history=history,
+    ))
+    result = client.post("/api/chat", json={
+        "session_id": "first-sql-plot", "db_id": "shop", "provider": "agentrouter",
+        "model": "test-model", "message": "Count customers by country and plot it.",
+    })
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["generation"]["accepted"] is True
+    assert body["presentation"]["chart_spec"] is not None
+    assert body["result_id"]
+    assert body["chart_id"]
+    assert body["presentation_state"]["source_result_id"] == body["result_id"]
+    assert body["presentation_state"]["source_run_id"] == body["run_id"]
+    assert len(history.list_sessions("first-sql-plot")) == 1
+    assert sql_model.calls == 1
 
 
 def test_investigation_uses_governed_sql_for_distinct_breakdowns(

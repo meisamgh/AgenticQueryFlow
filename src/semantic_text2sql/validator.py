@@ -154,7 +154,6 @@ def validate_sql_semantics(
     fanout require data-backed review and are explicitly marked UNRESOLVED.
     The caller must run ``validate_sql`` first; this function never executes SQL.
     """
-    del verified_context  # Reserved for verified lineage/cardinality checks.
     root = sqlglot.parse_one(sql, read=dialect)
     findings: list[SemanticFinding] = []
     aliases = {
@@ -192,7 +191,9 @@ def validate_sql_semantics(
             status="PASS", code="AGGREGATION_PRESENT",
             evidence=f"Found a {contract.aggregation.upper()} aggregation node.",
         ))
-    if contract.requires_grouping and contract.grain and not any(root.find_all(exp.Group)):
+    required_grain = contract.output_grain or contract.grain
+    groups = list(root.find_all(exp.Group))
+    if contract.requires_grouping and required_grain and not groups:
         status: Literal["FAIL", "UNRESOLVED"] = (
             "UNRESOLVED" if any(root.find_all(exp.Window)) else "FAIL"
         )
@@ -200,34 +201,11 @@ def validate_sql_semantics(
             status=status, code="GROUPING_NOT_FOUND",
             evidence="The contract requires grouped output, but SQL has no GROUP BY clause.",
         ))
-    elif contract.requires_grouping and contract.grain:
-        findings.append(SemanticFinding(
-            status="PASS", code="GROUPING_PRESENT",
-            evidence="SQL contains a GROUP BY clause; exact output grain remains unverified.",
-        ))
-    literals = {
-        str(node.this).casefold() for node in root.find_all(exp.Literal)
-    }
-    for requirement in [*contract.filters, *contract.mandatory_metric_filters]:
-        value = requirement.value
-        required_values = [str(item) for item in value] if isinstance(value, list) else [str(value)]
-        # Only exact scalar categorical requirements are provable here. A year
-        # might be represented as bounds on a YYYYMM date and is not rejected.
-        for item in required_values:
-            if item.casefold() not in literals and not re.fullmatch(r"\d{4}", item):
-                findings.append(SemanticFinding(
-                    status="FAIL", code="REQUIRED_FILTER_VALUE_MISSING",
-                    evidence=(
-                        f"Required filter value {item!r} for {requirement.operand!r} "
-                        "does not occur in SQL literals."
-                    ),
-                ))
-            elif item.casefold() in literals:
-                findings.append(SemanticFinding(
-                    status="UNRESOLVED", code="FILTER_PREDICATE_UNVERIFIED",
-                    evidence=(f"Required value {item!r} occurs in SQL literals, but this "
-                              "alone does not prove the intended filter predicate."),
-                ))
+    elif contract.requires_grouping and required_grain:
+        findings.extend(_grouping_findings(root, required_grain, groups))
+    findings.extend(_measure_findings(root, contract, verified_context))
+    findings.extend(_filter_findings(root, contract, verified_context))
+    findings.extend(_fanout_findings(root, verified_context))
     if contract.requires_distinct and not any(root.find_all(exp.Distinct)):
         findings.append(SemanticFinding(
             status="UNRESOLVED", code="DISTINCT_NOT_OBVIOUS",
@@ -239,6 +217,231 @@ def validate_sql_semantics(
             evidence="Approved metric formula equivalence needs lineage-aware validation.",
         ))
     return findings
+
+
+def _grouping_findings(
+    root: exp.Expression, required_grain: list[str], groups: list[exp.Group]
+) -> list[SemanticFinding]:
+    aliases = {
+        alias.alias.casefold(): alias.this.name.casefold()
+        for alias in root.find_all(exp.Alias)
+        if isinstance(alias.this, exp.Column)
+    }
+    actual = {
+        column.name.casefold()
+        for group in groups for expression in group.expressions
+        for column in expression.find_all(exp.Column)
+    }
+    actual.update(
+        expression.name.casefold()
+        for group in groups for expression in group.expressions
+        if isinstance(expression, exp.Column)
+    )
+    actual.update(aliases[name] for name in list(actual) if name in aliases)
+    for group in groups:
+        parent = group.parent
+        if not isinstance(parent, exp.Select):
+            continue
+        for expression in group.expressions:
+            if not isinstance(expression, exp.Literal) or not expression.is_int:
+                continue
+            position = int(expression.this) - 1
+            if 0 <= position < len(parent.expressions):
+                actual.update(
+                    item.name.casefold()
+                    for item in parent.expressions[position].find_all(exp.Column)
+                )
+    missing = [name for name in required_grain if name.split(".")[-1].casefold() not in actual]
+    if not missing:
+        return [SemanticFinding(
+            status="PASS", code="GROUPING_DIMENSIONS_PRESENT",
+            evidence="Required grouping columns occur in GROUP BY expressions.",
+        )]
+    # A CTE/window can transform a dimension before the final grouping. Without
+    # lineage proof, do not turn that into a false rejection.
+    uncertain = bool(list(root.find_all(exp.CTE)) or list(root.find_all(exp.Window)))
+    return [SemanticFinding(
+        status="UNRESOLVED" if uncertain else "FAIL",
+        code="GROUPING_DIMENSION_MISMATCH",
+        evidence=f"Required grouping dimension(s) absent from GROUP BY: {', '.join(missing)}.",
+    )]
+
+
+def _measure_findings(
+    root: exp.Expression,
+    contract: SemanticContract,
+    verified_context: dict[str, object] | None,
+) -> list[SemanticFinding]:
+    if not contract.aggregation or not contract.measures or not verified_context:
+        return []
+    tables = verified_context.get("tables")
+    if not isinstance(tables, dict):
+        return []
+    physical = {
+        column.casefold()
+        for table in tables.values() if isinstance(table, dict)
+        for column in table.get("columns", {})
+    }
+    measures = {name.split(".")[-1].casefold() for name in contract.measures}
+    known_measures = measures & physical
+    if not known_measures:
+        return [SemanticFinding(
+            status="UNRESOLVED", code="MEASURE_LINEAGE_UNKNOWN",
+            evidence=("Requested measure is symbolic; no verified physical "
+                      "column mapping was supplied."),
+        )]
+    expected: dict[str, type[exp.AggFunc]] = {
+        "count": exp.Count, "sum": exp.Sum, "average": exp.Avg,
+        "min": exp.Min, "max": exp.Max,
+    }
+    aggregate_nodes = list(root.find_all(expected[contract.aggregation]))
+    if not aggregate_nodes:
+        return []  # The aggregation-presence finding already covers this case.
+    matched = any(
+        column.name.casefold() in known_measures
+        for aggregate in aggregate_nodes for column in aggregate.find_all(exp.Column)
+    )
+    if matched:
+        return [SemanticFinding(
+            status="PASS", code="AGGREGATED_MEASURE_PRESENT",
+            evidence="The requested physical measure occurs inside the required aggregate.",
+        )]
+    if contract.aggregation == "count" and any(
+        isinstance(node.this, exp.Star) for node in aggregate_nodes
+    ):
+        return [SemanticFinding(
+            status="UNRESOLVED", code="COUNT_MEASURE_EQUIVALENCE_UNKNOWN",
+            evidence="COUNT(*) may count the intended entity only if the input grain is verified.",
+        )]
+    uncertain = bool(list(root.find_all(exp.CTE)) or list(root.find_all(exp.Subquery)))
+    return [SemanticFinding(
+        status="UNRESOLVED" if uncertain else "FAIL", code="AGGREGATED_MEASURE_MISMATCH",
+        evidence="Required aggregate does not use the requested physical measure.",
+    )]
+
+
+def _filter_findings(
+    root: exp.Expression,
+    contract: SemanticContract,
+    verified_context: dict[str, object] | None,
+) -> list[SemanticFinding]:
+    findings: list[SemanticFinding] = []
+    aliases = {
+        table.alias_or_name.casefold(): table.name.casefold()
+        for table in root.find_all(exp.Table)
+    }
+    context_tables = verified_context.get("tables", {}) if verified_context else {}
+    predicates = [
+        node for where in root.find_all(exp.Where) for node in where.walk()
+        if isinstance(node, (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.In,
+                             exp.Between))
+    ]
+    for required in [*contract.filters, *contract.mandatory_metric_filters]:
+        column_name = required.operand.split(".")[-1].casefold()
+        required_table = (
+            required.operand.split(".", 1)[0].casefold()
+            if "." in required.operand else None
+        )
+        relevant = [
+            node for node in predicates
+            if any(
+                col.name.casefold() == column_name
+                and (
+                    required_table is None
+                    or (col.table and aliases.get(col.table.casefold(), col.table.casefold())
+                        == required_table)
+                    or (not col.table and set(aliases.values()) == {required_table})
+                )
+                for col in node.find_all(exp.Column)
+            )
+        ]
+        requested = (
+            {str(value).casefold() for value in required.value}
+            if isinstance(required.value, list)
+            else {str(required.value).casefold()}
+        )
+        matches = [
+            node for node in relevant
+            if _operator_name(node) == required.operator
+            and requested.issubset({
+                str(item.this).casefold() for item in node.find_all(exp.Literal)
+            })
+        ]
+        if matches:
+            ambiguous = (
+                required_table is None and isinstance(context_tables, dict)
+                and sum(
+                    column_name in {str(name).casefold() for name in table.get("columns", {})}
+                    for table in context_tables.values() if isinstance(table, dict)
+                ) > 1
+                and any(not col.table for node in matches for col in node.find_all(exp.Column))
+            )
+            status: Literal["PASS", "UNRESOLVED"] = (
+                "UNRESOLVED"
+                if ambiguous or any(node.find_ancestor(exp.Or) for node in matches)
+                else "PASS"
+            )
+            findings.append(SemanticFinding(
+                status=status, code="FILTER_PREDICATE_MATCH",
+                evidence=(f"Found the required {required.operand} predicate "
+                          "with its operator and value."),
+            ))
+        elif relevant:
+            findings.append(SemanticFinding(
+                status="FAIL", code="REQUIRED_FILTER_PREDICATE_MISMATCH",
+                evidence=(f"SQL filters {required.operand}, but not with "
+                          "the required operator/value."),
+            ))
+        elif not (len(requested) == 1 and re.fullmatch(r"\d{4}", next(iter(requested)))):
+            findings.append(SemanticFinding(
+                status="FAIL", code="REQUIRED_FILTER_VALUE_MISSING",
+                evidence=(f"No required predicate for {required.operand} "
+                          "appears in SQL WHERE clauses."),
+            ))
+        else:
+            findings.append(SemanticFinding(
+                status="UNRESOLVED", code="TEMPORAL_PREDICATE_EQUIVALENCE_UNKNOWN",
+                evidence="A year may be represented by date bounds; equivalence is not proven.",
+            ))
+    return findings
+
+
+def _operator_name(node: exp.Expression) -> str:
+    operators: dict[type[exp.Expression], str] = {
+        exp.EQ: "=", exp.NEQ: "!=", exp.GT: ">", exp.GTE: ">=",
+        exp.LT: "<", exp.LTE: "<=", exp.In: "IN", exp.Between: "BETWEEN",
+    }
+    return operators.get(type(node), "")
+
+
+def _fanout_findings(
+    root: exp.Expression, verified_context: dict[str, object] | None
+) -> list[SemanticFinding]:
+    if not verified_context or not any(root.find_all(exp.Sum, exp.Avg)):
+        return []
+    relationships = verified_context.get("relationships")
+    if not isinstance(relationships, list):
+        return []
+    cte_names = {cte.alias_or_name.casefold() for cte in root.find_all(exp.CTE)}
+    physical = {
+        table.name.casefold() for table in root.find_all(exp.Table)
+        if table.name.casefold() not in cte_names
+    }
+    for relationship in relationships:
+        if not isinstance(relationship, dict):
+            continue
+        left = str(relationship.get("left") or "").split(".")[0].casefold()
+        right = str(relationship.get("right") or "").split(".")[0].casefold()
+        if (left in physical and right in physical and left != right
+                and relationship.get("cardinality") == "MANY_TO_MANY"):
+            return [SemanticFinding(
+                status="UNRESOLVED",
+                code="FACT_JOIN_FANOUT_RISK",
+                evidence=(f"Aggregating after a many-to-many join between "
+                          f"{left} and {right} may multiply measures; a data-backed "
+                          "cardinality check is needed before rejection."),
+            )]
+    return []
 
 
 def repair_context(result: ValidationResult) -> str:

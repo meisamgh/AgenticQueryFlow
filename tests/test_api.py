@@ -660,3 +660,36 @@ def test_chat_job_reports_progress_and_completion() -> None:
     assert job["events"][0] == {"stage": "conversation", "elapsed_ms": 0}
     time.sleep(0.02)
     assert client.get(f"/api/chat/jobs/{job_id}").json()["elapsed_ms"] == job["elapsed_ms"]
+
+
+def test_history_restore_rebinds_plot_to_selected_result(
+    registry: Any, monkeypatch: Any, tmp_path: Any
+) -> None:
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
+    monkeypatch.setenv("TEXT2SQL_GLOSSARY_ROOT", str(tmp_path / "glossaries"))
+    model = FixedSQLModel(
+        "SELECT country, COUNT(*) AS customer_count FROM customers GROUP BY country"
+    )
+    store = RunHistoryStore(None)
+    client = TestClient(create_app(TextToSQLAgent(registry, model), run_history=store))
+    base = {
+        "session_id": "restore-result", "db_id": "shop",
+        "provider": "agentrouter", "model": "test-model",
+    }
+    first = client.post("/api/chat", json={**base, "message": "Count by country"}).json()
+    second = client.post("/api/chat", json={**base, "message": "Count by country again"}).json()
+    assert first["result_id"] != second["result_id"]
+    calls_before_restore = model.calls
+    restored = client.post(
+        f"/api/history/{first['run_id']}/continue", params={"session_id": "restore-result"}
+    )
+    assert restored.status_code == 200
+    chart = client.post("/api/chat", json={**base, "message": "Plot it"})
+    assert chart.status_code == 200
+    body = chart.json()
+    assert body["presentation"]["chart_spec"] is not None
+    assert body["result_id"] == first["result_id"]
+    assert body["presentation_state"]["source_run_id"] == first["run_id"]
+    assert body["presentation_state"]["source_result_id"] == first["result_id"]
+    assert model.calls == calls_before_restore

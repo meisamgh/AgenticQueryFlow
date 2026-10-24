@@ -11,6 +11,7 @@ from semantic_text2sql.models import (
     SchemaInfo,
     StrategyHints,
     ValidationResult,
+    VerifiedSchemaSnapshot,
 )
 from semantic_text2sql.validator import repair_context
 
@@ -50,6 +51,26 @@ def test_sql_only_generation_executes_read_only_query(registry) -> None:  # type
     assert result.accepted is True
     assert result.rows == [["Anna"], ["Luca"]]
     assert result.attempts[0].validation.code == "SQL_SAFETY_VALID"
+
+
+def test_request_snapshot_avoids_second_schema_inspection(registry, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    schema = registry.inspect("shop")
+
+    def unexpected_inspection(db_id: str) -> SchemaInfo:
+        raise AssertionError(f"Repeated schema inspection for {db_id}")
+
+    monkeypatch.setattr(registry, "inspect", unexpected_inspection)
+    result = asyncio.run(
+        TextToSQLAgent(registry, FakeModel(["SELECT name FROM customers"])).generate(
+            GenerateRequest(
+                db_id="shop", question="List customer names", execute=False,
+                schema_snapshot=VerifiedSchemaSnapshot(
+                    db_id="shop", dialect="sqlite", live_schema=schema,
+                ),
+            )
+        )
+    )
+    assert result.accepted is True
 
 
 def test_database_error_is_returned_to_model_for_focused_repair(registry) -> None:  # type: ignore[no-untyped-def]

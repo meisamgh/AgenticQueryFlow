@@ -98,6 +98,12 @@ def resolve_semantic_contract(
             ]
             values["aggregation_stages"] = []
             values["output_operations"] = []
+            values["mandatory_metric_filters"] = []
+            values["required_output_aliases"] = []
+            values["structural_formulas"] = []
+            values["required_columns"] = []
+            values["aggregation"] = None
+            values["ranked_metric"] = None
         elif change.operation == "CHANGE_AGGREGATION" and replacement.casefold() in {
             "count", "sum", "average", "min", "max"
         }:
@@ -108,6 +114,16 @@ def resolve_semantic_contract(
             values["requires_grouping"] = True
         elif change.operation == "ADD_FILTER" and change.new_value is not None:
             candidate = SemanticFilter(operand=target, operator="=", value=change.new_value)
+            conflicting = [
+                item for item in values["filters"]
+                if item["operand"].casefold() == target.casefold()
+                and item["operator"] == "=" and item["value"] != change.new_value
+            ]
+            if conflicting:
+                raise ValueError(
+                    "This field already has a different equality filter. "
+                    "Specify replacement, comparison, or intersection."
+                )
             if candidate.model_dump() not in values["filters"]:
                 values["filters"].append(candidate.model_dump())
         elif change.operation == "REMOVE_FILTER":
@@ -117,6 +133,10 @@ def resolve_semantic_contract(
             ]
             if change.previous_value is None and len(candidates) != 1:
                 raise ValueError("REMOVE_FILTER requires one unambiguous matching filter.")
+            if change.previous_value is not None and not any(
+                str(item["value"]) == str(change.previous_value) for item in candidates
+            ):
+                raise ValueError("REMOVE_FILTER did not match an existing filter value.")
             values["filters"] = [
                 item for item in values["filters"]
                 if not (item["operand"].casefold() == target.casefold()
@@ -138,12 +158,40 @@ def resolve_semantic_contract(
                 for item in values["filters"]
             ]
         elif change.operation == "CHANGE_PERIOD" and replacement:
+            old_period = (
+                str(change.previous_value)
+                if change.previous_value is not None else values["active_period"]
+            )
+            if old_period:
+                old_year = re.fullmatch(r"\d{4}", old_period)
+                old_end = str(int(old_period) + 1) if old_year else None
+                for field in ("filters", "temporal_boundaries"):
+                    values[field] = [
+                        item for item in values[field]
+                        if not (
+                            re.search(r"date|year|month|time|period", item["operand"], re.I)
+                            and (
+                                str(item["value"]).startswith(old_period)
+                                or (old_end is not None
+                                    and item["operator"] in {"<", "<="}
+                                    and str(item["value"]).startswith(old_end))
+                            )
+                        )
+                    ]
             values["active_period"] = replacement
         elif change.operation == "COMPARE" and replacement:
             if replacement not in values["comparison_periods"]:
                 values["comparison_periods"].append(replacement)
         elif change.operation == "CHANGE_RANKING" and replacement:
             values["requires_ordering"] = True
+            normalized = replacement.casefold()
+            if re.search(r"\b(bottom|lowest|least|ascending)\b", normalized):
+                values["ranking_direction"] = "ASC"
+            elif re.search(r"\b(top|highest|most|descending)\b", normalized):
+                values["ranking_direction"] = "DESC"
+            ranked = re.search(r"\bby\s+([\w.]+)", replacement, re.I)
+            if ranked:
+                values["ranked_metric"] = ranked.group(1)
             limit_match = re.search(r"\b(?:top|bottom|first|last)\s+(\d+)\b", replacement, re.I)
             if limit_match:
                 values["limit"] = int(limit_match.group(1))

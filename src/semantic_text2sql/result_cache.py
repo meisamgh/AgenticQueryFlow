@@ -18,6 +18,8 @@ from semantic_text2sql.models import (
 @dataclass(frozen=True, slots=True)
 class RecentResult:
     run_id: str | None
+    result_id: str | None
+    chart_id: str | None
     db_id: str
     question: str
     provider: ModelProvider
@@ -44,7 +46,13 @@ class RecentResult:
         if generation is None or not generation.accepted or generation.sql is None:
             raise ValueError("Only accepted, executed results may be cached.")
         return cls(
-            run_id=response.run_id,
+            run_id=(
+                response.presentation_state.source_run_id
+                if response.presentation_state and response.presentation_state.mode == "chart"
+                else response.run_id
+            ),
+            result_id=response.result_id,
+            chart_id=response.chart_id,
             db_id=generation.db_id,
             question=generation.question,
             provider=generation.provider,

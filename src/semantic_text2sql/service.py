@@ -36,6 +36,7 @@ from semantic_text2sql.models import (
     RetrievalTrace,
     SemanticContract,
     TokenUsage,
+    VerifiedSchemaSnapshot,
 )
 from semantic_text2sql.postgres import PostgresRegistry
 from semantic_text2sql.profiling import ProfileStore
@@ -324,6 +325,9 @@ class TextToSQLService:
             planner_call_used=planner_call_used,
             planner_token_usage=planner_usage,
             historical_examples=historical_examples,
+            schema_snapshot=VerifiedSchemaSnapshot(
+                db_id=db_id, dialect=dialect, live_schema=schema, profile=database_profile,
+            ),
         )
         try:
             generated = await budget.wait(

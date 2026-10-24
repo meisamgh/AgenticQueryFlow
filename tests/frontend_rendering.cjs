@@ -12,6 +12,55 @@ const explorer = explorerContext.window.QueryflowChartExplorer;
 const filtersContext = vm.createContext({window: {}});
 vm.runInContext(fs.readFileSync(`${__dirname}/../web/query_filters.js`, 'utf8'), filtersContext);
 const queryFilters = filtersContext.window.QueryflowFilters;
+test('an asynchronous Plotly failure switches the same chart handle to ECharts', async () => {
+  const chartSource = source.slice(source.indexOf('function renderChartInto('),
+    source.indexOf('/* Response views are local'));
+  const classes = new Set();
+  const slot = {
+    classList: {
+      add: name => classes.add(name),
+      remove: name => classes.delete(name),
+      toggle: (name, value) => value ? classes.add(name) : classes.delete(name),
+    },
+    replaceChildren() {},
+    append() {},
+    removeEventListener() {},
+  };
+  let rejectPlotly;
+  let selected = false;
+  let plotlyDisposed = false;
+  const echarts = {
+    renderer: 'echarts',
+    onSelect(callback) { callback(); },
+    dispose() {},
+  };
+  const context = vm.createContext({
+    window: {
+      Plotly: {
+        newPlot() { return new Promise((_resolve, reject) => { rejectPlotly = reject; }); },
+        purge() { plotlyDisposed = true; },
+      },
+      QueryflowECharts: {render() { return echarts; }},
+    },
+    document: {createElement: () => ({})},
+    console,
+  });
+  vm.runInContext(fs.readFileSync(`${__dirname}/../web/plotly_view.js`, 'utf8'), context);
+  vm.runInContext(`${chartSource}\nglobalThis.renderChartIntoTest = renderChartInto;`, context);
+  const {echarts: handle} = context.renderChartIntoTest(slot, {chart_spec: {
+    chart_type: 'bar', x: 'Category', y: 'Value',
+    data: [{Category: 'A', Value: 1}],
+  }}, {});
+  handle.onSelect(() => { selected = true; });
+  rejectPlotly(new Error('render rejected'));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(handle.renderer, 'echarts');
+  assert.equal(slot._echart, handle);
+  assert.ok(plotlyDisposed);
+  assert.ok(selected);
+  assert.ok(classes.has('chart-slot-ec'));
+  assert.ok(!classes.has('chart-slot-plotly'));
+});
 test('inspector counts model calls without counting tools as models', () => {
   const summary = source.slice(source.indexOf('function renderInspectorTokenSummary('),
     source.indexOf('function wireSqlIdents('));

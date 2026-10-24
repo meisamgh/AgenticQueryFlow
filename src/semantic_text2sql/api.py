@@ -288,6 +288,30 @@ def create_app(
     # Complete bounded results are kept only for the active process. Persisted
     # history retains a smaller preview and is reused only when it is complete.
     recent_results: dict[tuple[str, str], RecentResult] = {}
+
+    def restore_cached_result(record: RunRecord) -> None:
+        """Keep the in-process result reference aligned with restored history."""
+        key = (record.session_id, record.db_id)
+        recent_results.pop(key, None)
+        if not record.accepted or record.preview_truncated or record.truncated:
+            return
+        if record.row_count != len(record.rows_preview) or not record.sql:
+            return
+        if not record.state_snapshot or record.state_snapshot.last_sql != record.sql:
+            return
+        try:
+            payload = dict(record.response_payload)
+            if isinstance(payload.get("generation"), dict):
+                payload["generation"] = {
+                    key: value for key, value in payload["generation"].items()
+                    if key != "formatted_sql"
+                }
+            response = ChatResponse.model_validate(payload)
+            if not response.result_id:
+                response = response.model_copy(update={"result_id": record.run_id})
+            recent_results[key] = RecentResult.from_response(response)
+        except (ValueError, TypeError):
+            logger.warning("history_result_restore_unavailable run_id=%s", record.run_id)
     chat_jobs: dict[str, dict[str, Any]] = {}
     job_ttl_seconds = max(60, int(os.environ.get("TEXT2SQL_JOB_TTL_SECONDS", "3600")))
     max_jobs = max(10, int(os.environ.get("TEXT2SQL_MAX_JOBS", "500")))
@@ -418,10 +442,14 @@ def create_app(
             raise HTTPException(status_code=409, detail="This older turn has no restorable state.")
         current = conversations.get(session_id)
         try:
-            return conversations.put(
+            restored = conversations.put(
                 record.state_snapshot,
                 expected_version=current.version if current else None,
             )
+            for key in [key for key in recent_results if key[0] == session_id]:
+                recent_results.pop(key, None)
+            restore_cached_result(record)
+            return restored
         except ConversationConflict as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
 
@@ -809,7 +837,9 @@ def create_app(
             )
         return await asyncio.to_thread(active_agent.check, request)
 
-    async def process_chat(request: ChatRequest) -> ChatResponse:
+    async def process_chat(
+        request: ChatRequest, *, persist_state: bool = True
+    ) -> ChatResponse:
         assistant_enabled = conversational_agent_enabled()
         if enforce_model_catalog and not supports_model(request.provider, request.model):
             raise HTTPException(
@@ -856,6 +886,7 @@ def create_app(
             ):
                 prior_response = None
             source = prior_response.generation if prior_response else None
+            source_record: RunRecord | None = None
             if source is None or source.sql != previous.last_sql or source.truncated:
                 candidates = (
                     [runs.get(request.parent_run_id, request.session_id)]
@@ -867,11 +898,15 @@ def create_app(
                         continue
                     if record.db_id != request.db_id or record.sql != previous.last_sql:
                         continue
+                    source_record = record
                     if record.truncated or record.row_count != len(record.rows_preview):
                         break
                     raw = record.response_payload.get("generation")
                     if raw:
-                        source = GenerateResponse.model_validate(raw)
+                        source = GenerateResponse.model_validate({
+                            key: value for key, value in raw.items()
+                            if key != "formatted_sql"
+                        })
                     break
             if source and source.accepted and not source.truncated:
                 explanation = (
@@ -1114,11 +1149,29 @@ def create_app(
                         )
                     return ChatResponse(
                         session_id=request.session_id,
+                        result_id=(
+                            prior_response.result_id if prior_response
+                            else source_record.response_payload.get("result_id")
+                            if source_record else None
+                        ),
+                        chart_id=uuid4().hex if chart_presentation.chart_spec else None,
                         operation="VISUALIZE",
                         resolved_question=previous.resolved_question,
                         state=previous,
                         generation=source,
                         presentation=chart_presentation,
+                        presentation_state=PresentationState(
+                            mode="chart" if chart_presentation.chart_spec else "sql",
+                            source_run_id=(
+                                prior_response.run_id if prior_response
+                                else source_record.run_id if source_record else None
+                            ),
+                            source_result_id=(
+                                prior_response.result_id if prior_response
+                                else source_record.response_payload.get("result_id")
+                                if source_record else None
+                            ),
+                        ),
                         message=message,
                         previous_sql=previous.last_sql,
                         timings_ms={
@@ -1474,13 +1527,16 @@ def create_app(
                 # prior SQL authoritative unless a later explicit correction replaces it.
                 response_state = previous
             else:
-                try:
-                    response_state = conversations.put(
-                        pending,
-                        expected_version=previous.version if previous is not None else None,
-                    )
-                except ConversationConflict as exc:
-                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+                if persist_state:
+                    try:
+                        response_state = conversations.put(
+                            pending,
+                            expected_version=previous.version if previous is not None else None,
+                        )
+                    except ConversationConflict as exc:
+                        raise HTTPException(status_code=409, detail=str(exc)) from exc
+                else:
+                    response_state = pending
                 pending = response_state
             message = _conversational_answer(operation, generated)
             if generated.recovery and generated.recovery.mode in {
@@ -1557,15 +1613,18 @@ def create_app(
                     "last_failed_sql": generated.attempts[-1].sql if generated.attempts else None,
                 }
             )
-            try:
-                response_state = conversations.put(
-                    failure_state,
-                    expected_version=(
-                        prior_for_database.version if prior_for_database is not None else None
-                    ),
-                )
-            except ConversationConflict as exc:
-                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            if persist_state:
+                try:
+                    response_state = conversations.put(
+                        failure_state,
+                        expected_version=(
+                            prior_for_database.version if prior_for_database is not None else None
+                        ),
+                    )
+                except ConversationConflict as exc:
+                    raise HTTPException(status_code=409, detail=str(exc)) from exc
+            else:
+                response_state = failure_state
             if generated.termination_reason != "model_error":
                 recovery = generated.recovery
                 human_review = HumanReviewRequest(
@@ -1722,6 +1781,7 @@ def create_app(
             resolved_question=pending.resolved_question,
             conversation_interpretation=interpretation,
             state=response_state,
+            state_commit_pending=not persist_state,
             generation=generated,
             presentation=presentation,
             message=message,
@@ -1778,11 +1838,18 @@ def create_app(
                 series=spec.series,
                 size=spec.size,
                 title=spec.title,
-                source_run_id=response.run_id,
+                source_run_id=(
+                    response.presentation_state.source_run_id
+                    if response.presentation_state else response.run_id
+                ),
+                source_result_id=response.result_id,
                 data_complete=not (response.generation and response.generation.truncated),
             )
         if response.generation and response.generation.accepted and response.generation.sql:
-            return PresentationState(mode="sql", source_run_id=response.run_id)
+            return PresentationState(
+                mode="sql", source_run_id=response.run_id,
+                source_result_id=response.result_id,
+            )
         return response.presentation_state
 
     def remember_result(request: ChatRequest, response: ChatResponse) -> None:
@@ -1799,13 +1866,39 @@ def create_app(
         if response.operation == "RESET_CONTEXT":
             recent_results.pop((request.session_id, request.db_id), None)
             return response
+        if response.state_commit_pending and response.state is not None:
+            previous_state = conversations.get(request.session_id)
+            try:
+                committed = conversations.put(
+                    response.state,
+                    expected_version=(
+                        response.state.version if previous_state is not None else None
+                    ),
+                )
+            except ConversationConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            response = response.model_copy(update={
+                "state": committed, "state_commit_pending": False,
+            })
         run_id = uuid4().hex
+        result_id = response.result_id
+        if response.generation and response.generation.accepted and result_id is None:
+            result_id = uuid4().hex
+        chart_id = response.chart_id
+        if response.presentation and response.presentation.chart_spec and chart_id is None:
+            chart_id = uuid4().hex
         presentation_state = build_presentation_state(response)
         if presentation_state is not None and presentation_state.source_run_id is None:
             presentation_state = presentation_state.model_copy(update={"source_run_id": run_id})
+        if presentation_state is not None and presentation_state.source_result_id is None:
+            presentation_state = presentation_state.model_copy(
+                update={"source_result_id": result_id}
+            )
         response = response.model_copy(
             update={
                 "run_id": run_id,
+                "result_id": result_id,
+                "chart_id": chart_id,
                 "turn_id": run_id,
                 "recovery_events": recovery_events(response.generation, run_id),
                 "presentation_state": presentation_state,
@@ -1854,8 +1947,11 @@ def create_app(
                     )
                 except ConversationConflict as exc:
                     raise HTTPException(status_code=409, detail=str(exc)) from exc
+                for key in [key for key in recent_results if key[0] == request.session_id]:
+                    recent_results.pop(key, None)
+                restore_cached_result(parent)
         previous = conversations.get(request.session_id)
-        response = await process_chat(request)
+        response = await process_chat(request, persist_state=persist)
         if previous and previous.db_id == request.db_id and response.operation != "NEW_QUERY":
             response = response.model_copy(update={"previous_sql": previous.last_sql})
         return await save_response(request, response) if persist else response

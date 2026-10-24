@@ -130,7 +130,7 @@ window.QueryflowPlotly = (function () {
       displaylogo: false, modeBarButtonsToRemove: ["lasso2d", "select2d"]},
     domain, isTimeSeries};
   }
-  function render(container, presentation) {
+  function render(container, presentation, _generation, onFailure) {
     if (!container || !window.Plotly || !presentation?.chart_spec) return null;
     const spec = presentation.chart_spec;
     const figure = buildFigure(spec);
@@ -139,7 +139,10 @@ window.QueryflowPlotly = (function () {
     let disposed = false;
     const ready = Promise.resolve(plotly.newPlot(container, figure.data, figure.layout, figure.config))
       .catch(error => {
-        if (!disposed) console.warn(`Plotly chart failed: ${error.message}`);
+        if (!disposed) {
+          console.warn(`Plotly chart failed: ${error.message}`);
+          onFailure?.(error);
+        }
         return null;
       });
     const subscriptions = [];
