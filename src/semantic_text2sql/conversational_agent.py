@@ -25,7 +25,12 @@ from semantic_text2sql.conversational_bridge import (
     MetadataToolInput,
 )
 from semantic_text2sql.database import DatabaseError
-from semantic_text2sql.llm import ModelError, StructuredOutputUnsupported
+from semantic_text2sql.llm import (
+    ModelError,
+    ProviderRequestError,
+    StructuredOutputFallbackRequired,
+    StructuredOutputUnsupported,
+)
 from semantic_text2sql.models import (
     CallLedgerEntry,
     ChatRequest,
@@ -401,6 +406,21 @@ class ConversationalAnalyticsAgent:
     @staticmethod
     def _provider_failure_message(error: Exception) -> str:
         """Give actionable, non-sensitive provider diagnostics to the client."""
+        if isinstance(error, ProviderRequestError):
+            if error.status in {401, 403}:
+                cause = "The model provider rejected the configured credentials or access."
+            elif error.status == 404:
+                cause = f"The configured model {error.model} is unavailable or was not found."
+            elif error.status == 429:
+                cause = "The model provider is rate-limiting requests. Please try again shortly."
+            elif error.status == 400:
+                cause = (
+                    f"The model provider rejected the {error.phase} request "
+                    f"({error.code or 'invalid_request'}). Check the model ID and request format."
+                )
+            else:
+                cause = f"The model provider returned HTTP {error.status}."
+            return cause + " No query was run; please retry or select another configured model."
         detail = str(error).lower()
         if "not configured" in detail or ("api key" in detail and "missing" in detail):
             cause = "The selected model's API configuration is missing."
@@ -517,10 +537,19 @@ class ConversationalAnalyticsAgent:
         usage_total = TokenUsage()
         ledger: list[CallLedgerEntry] = []
         issues: list[str] = []
-        native_supported = callable(structured)
+        native_capability = getattr(completer, "native_schema_supported", None)
+        native_supported = callable(structured) and (
+            not callable(native_capability)
+            or bool(native_capability(model, "AgentDecision"))
+        )
+        task_completion = getattr(completer, "complete_task", None)
         for attempt in range(2):
             request_prompt = (
                 prompt if attempt == 0 or not issues else prompt + self._repair_tail(issues)
+            )
+            task = (
+                "decision_repair" if attempt else "final_answer" if state.observations
+                else "decision"
             )
             if native_supported:
                 call = cast(
@@ -529,19 +558,30 @@ class ConversationalAnalyticsAgent:
                         model, request_prompt, "AgentDecision", AGENT_DECISION_SCHEMA
                     ),
                 )
+            elif callable(task_completion):
+                call = task_completion(model, request_prompt, task, json_mode=True)
             else:
                 call = completer.complete_detailed(model, request_prompt)
             try:
                 raw, usage = await self._budget.wait(call, kind="model")
-            except StructuredOutputUnsupported:
+            except StructuredOutputFallbackRequired:
                 ledger.append(self._model_entry(provider, model, TokenUsage(), succeeded=False))
                 native_supported = False
                 try:
+                    fallback_call = (
+                        task_completion(model, request_prompt, task, json_mode=True)
+                        if callable(task_completion)
+                        else completer.complete_detailed(model, request_prompt)
+                    )
                     raw, usage = await self._budget.wait(
-                        completer.complete_detailed(model, request_prompt), kind="model"
+                        fallback_call, kind="model"
                     )
                 except Exception as exc:
-                    ledger.append(self._model_entry(provider, model, TokenUsage(), succeeded=False))
+                    failed_usage = getattr(exc, "usage", TokenUsage())
+                    usage_total = self._sum_usage(usage_total, failed_usage)
+                    ledger.append(self._model_entry(
+                        provider, model, failed_usage, succeeded=False
+                    ))
                     return _DecisionCompletion(
                         None,
                         usage_total,
@@ -562,7 +602,9 @@ class ConversationalAnalyticsAgent:
                     ),
                 )
             except Exception as exc:
-                ledger.append(self._model_entry(provider, model, TokenUsage(), succeeded=False))
+                failed_usage = getattr(exc, "usage", TokenUsage())
+                usage_total = self._sum_usage(usage_total, failed_usage)
+                ledger.append(self._model_entry(provider, model, failed_usage, succeeded=False))
                 transport_message = self._provider_failure_message(exc)
                 issues = [
                     *issues,
@@ -1196,6 +1238,10 @@ class ConversationalAnalyticsAgent:
                         state_commit_pending=(
                             source.state_commit_pending
                             if isinstance(source, ChatResponse) else False
+                        ),
+                        state_expected_version=(
+                            source.state_expected_version
+                            if isinstance(source, ChatResponse) else None
                         ),
                         operation="VISUALIZE",
                         resolved_question=source.generation.question,

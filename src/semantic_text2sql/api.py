@@ -1782,6 +1782,7 @@ def create_app(
             conversation_interpretation=interpretation,
             state=response_state,
             state_commit_pending=not persist_state,
+            state_expected_version=previous.version if previous else None,
             generation=generated,
             presentation=presentation,
             message=message,
@@ -1867,13 +1868,10 @@ def create_app(
             recent_results.pop((request.session_id, request.db_id), None)
             return response
         if response.state_commit_pending and response.state is not None:
-            previous_state = conversations.get(request.session_id)
             try:
                 committed = conversations.put(
                     response.state,
-                    expected_version=(
-                        response.state.version if previous_state is not None else None
-                    ),
+                    expected_version=response.state_expected_version,
                 )
             except ConversationConflict as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -1975,6 +1973,7 @@ def create_app(
         postgres=postgres,
         profiles=profiles,
         glossaries=glossaries,
+        semantic_catalogs=semantic_catalogs,
         retriever=hybrid_retriever,
         sql_handler=execute_chat,
     )

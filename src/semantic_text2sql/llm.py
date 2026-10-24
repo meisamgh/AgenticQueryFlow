@@ -4,28 +4,59 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 import shutil
 import tempfile
 from pathlib import Path
+from time import perf_counter
 from typing import Literal, Protocol, cast
 
 import httpx
 
 from semantic_text2sql.models import ModelProvider, SchemaInfo, StrategyHints, TokenUsage
 
+logger = logging.getLogger(__name__)
+
 
 class ModelError(RuntimeError):
-    pass
+    def __init__(self, message: str, *, usage: TokenUsage | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage or TokenUsage()
 
 
-class StructuredOutputUnsupported(ModelError):
+class ProviderRequestError(ModelError):
+    """Safe provider metadata; never contains a prompt, key or raw body."""
+
+    def __init__(
+        self, provider: str, model: str, phase: str, status: int,
+        code: str, request_id: str | None, latency_ms: int,
+        capability_rejection: bool = False,
+    ) -> None:
+        super().__init__(f"{provider} HTTP {status} ({code or 'unknown_error'})")
+        self.provider = provider
+        self.model = model
+        self.phase = phase
+        self.status = status
+        self.code = code
+        self.request_id = request_id
+        self.latency_ms = latency_ms
+        self.capability_rejection = capability_rejection
+
+
+class StructuredOutputFallbackRequired(ModelError):
+    """Native structured decoding failed; local validation is still mandatory."""
+
+
+class StructuredOutputUnsupported(StructuredOutputFallbackRequired):
     """The provider explicitly rejected native schema-constrained output."""
 
 
 def _structured_output_unsupported(error: ModelError) -> bool:
     """Only a documented schema-capability rejection permits plain JSON fallback."""
+    if isinstance(error, ProviderRequestError):
+        return error.capability_rejection
     message = str(error).lower()
     if any(term in message for term in (
         "response_format is not supported", "response_format unsupported",
@@ -119,13 +150,12 @@ class GroqSQLModel:
         self.base_url = base_url.rstrip("/")
         self.timeout = timeout
         self.transport = transport
-        # 180 was the historical default; longer decision/answer prompts can be
-        # truncated at that cap and forced into repair attempts, so it stays
-        # overridable per deployment without changing any request shape.
+        self._native_schema_unavailable: set[tuple[str, str]] = set()
+        # Shared fallback for callers without a task-specific completion path.
         self.max_completion_tokens = int(
             max_completion_tokens
             if max_completion_tokens is not None
-            else os.environ.get("TEXT2SQL_MAX_COMPLETION_TOKENS", "180")
+            else os.environ.get("TEXT2SQL_MAX_COMPLETION_TOKENS", "2048")
         )
 
     async def generate(self, **kwargs: object) -> tuple[str, int, TokenUsage]:
@@ -145,7 +175,8 @@ class GroqSQLModel:
         )
         started = perf_counter()
         content, usage = await self._complete_detailed(
-            str(kwargs["model"]), prompt, self.max_completion_tokens
+            str(kwargs["model"]), prompt,
+            int(os.environ.get("TEXT2SQL_SQL_MAX_TOKENS", str(self.max_completion_tokens))),
         )
         return content, round((perf_counter() - started) * 1_000), usage
 
@@ -156,6 +187,22 @@ class GroqSQLModel:
     async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
         return await self._complete_detailed(model, prompt, self.max_completion_tokens)
 
+    async def complete_task(
+        self, model: str, prompt: str, task: str, *, json_mode: bool = False,
+    ) -> tuple[str, TokenUsage]:
+        budget_name = {
+            "decision": "TEXT2SQL_TOP_DECISION_MAX_TOKENS",
+            "decision_repair": "TEXT2SQL_TOP_REPAIR_MAX_TOKENS",
+            "final_answer": "TEXT2SQL_TOP_ANSWER_MAX_TOKENS",
+            "context": "TEXT2SQL_CONTEXT_MAX_TOKENS",
+            "plotting": "TEXT2SQL_PLOTTING_MAX_TOKENS",
+        }.get(task, "TEXT2SQL_MAX_COMPLETION_TOKENS")
+        default = "2048" if task == "decision_repair" else "1536"
+        return await self._complete_detailed(
+            model, prompt, int(os.environ.get(budget_name, default)),
+            response_format={"type": "json_object"} if json_mode else None,
+        )
+
     async def complete_structured(
         self,
         model: str,
@@ -165,17 +212,30 @@ class GroqSQLModel:
     ) -> tuple[str, TokenUsage]:
         """Prefer Groq-native JSON-schema output; one plain retry keeps support for
         models whose gateway rejects ``response_format``."""
+        if not self.native_schema_supported(model, schema_name):
+            raise StructuredOutputFallbackRequired(
+                "Native structured output was rejected earlier for this model and schema."
+            )
         try:
             return await self._complete_detailed(
                 model,
                 prompt,
-                int(os.environ.get("TEXT2SQL_STRUCTURED_MAX_COMPLETION_TOKENS", "1024")),
+                int(os.environ.get("TEXT2SQL_STRUCTURED_MAX_COMPLETION_TOKENS", "1536")),
                 response_format=_openai_schema_format(schema_name, schema),
             )
-        except ModelError as exc:
+        except ProviderRequestError as exc:
+            if exc.code == "json_validate_failed":
+                self._native_schema_unavailable.add((model, schema_name))
+                raise StructuredOutputFallbackRequired(
+                    "Groq strict JSON generation failed; retrying in JSON mode."
+                ) from exc
             if not _structured_output_unsupported(exc):
                 raise
+            self._native_schema_unavailable.add((model, schema_name))
             raise StructuredOutputUnsupported(str(exc)) from exc
+
+    def native_schema_supported(self, model: str, schema_name: str) -> bool:
+        return (model, schema_name) not in self._native_schema_unavailable
 
     async def _complete_detailed(
         self,
@@ -186,6 +246,7 @@ class GroqSQLModel:
     ) -> tuple[str, TokenUsage]:
         if not self.api_key:
             raise ModelError("GROQ_API_KEY is not configured.")
+        started = perf_counter()
         try:
             async with httpx.AsyncClient(
                 base_url=self.base_url,
@@ -218,16 +279,46 @@ class GroqSQLModel:
                     await asyncio.sleep(_groq_retry_delay(response))
                 response.raise_for_status()
                 body = response.json()
-                content = body["choices"][0]["message"]["content"]
+                choice = body["choices"][0]
+                content = choice["message"]["content"]
         except httpx.HTTPStatusError as exc:
-            detail = exc.response.text[-500:].strip()
-            raise ModelError(
-                f"The Groq request failed: {detail or f'HTTP {exc.response.status_code}'}"
-            ) from exc
+            try:
+                error = exc.response.json().get("error") or {}
+                code = str(error.get("code") or error.get("type") or "")[:80]
+                detail = str(error.get("message") or "").lower()
+            except (ValueError, TypeError, AttributeError):
+                code = ""
+                detail = ""
+            capability_rejection = (
+                any(term in detail for term in ("response_format", "json_schema", "schema"))
+                and any(term in detail for term in (
+                    "unsupported", "not supported", "unknown parameter",
+                    "unrecognized parameter", "unsupported keyword",
+                ))
+            )
+            request_id = exc.response.headers.get("x-request-id")
+            phase = "structured" if response_format is not None else "completion"
+            problem = ProviderRequestError(
+                "groq", model, phase, exc.response.status_code,
+                code, request_id, round((perf_counter() - started) * 1000),
+                capability_rejection=capability_rejection,
+            )
+            logger.warning(
+                "provider_request_failed provider=%s model=%s phase=%s status=%s "
+                "code=%s request_id=%s latency_ms=%s",
+                problem.provider, problem.model, problem.phase, problem.status,
+                problem.code, problem.request_id, problem.latency_ms,
+            )
+            raise problem from exc
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
             raise ModelError(f"The Groq request failed: {exc}") from exc
         if not isinstance(content, str) or not content.strip():
             raise ModelError("Groq returned no text output.")
+        if choice.get("finish_reason") == "length":
+            raise ModelError(
+                "Groq output was truncated at the completion-token limit.",
+                usage=_token_usage(body.get("usage") or {}),
+            )
         return content, _token_usage(body.get("usage") or {})
 
 

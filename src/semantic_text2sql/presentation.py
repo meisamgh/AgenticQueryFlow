@@ -100,7 +100,12 @@ async def present_result(
         )
 
         async def call() -> tuple[str, TokenUsage]:
-            raw, call_usage = await completer.complete_detailed(model=model, prompt=prompt)
+            task_completion = getattr(completer, "complete_task", None)
+            raw, call_usage = await (
+                task_completion(model, prompt, "final_answer", json_mode=True)
+                if callable(task_completion)
+                else completer.complete_detailed(model=model, prompt=prompt)
+            )
             return str(raw), call_usage
 
         raw, usage = await asyncio.wait_for(budget.wait(call(), kind="model"), timeout=15)

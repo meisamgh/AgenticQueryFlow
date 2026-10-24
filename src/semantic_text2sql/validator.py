@@ -204,18 +204,73 @@ def validate_sql_semantics(
     elif contract.requires_grouping and required_grain:
         findings.extend(_grouping_findings(root, required_grain, groups))
     findings.extend(_measure_findings(root, contract, verified_context))
+    findings.extend(_approved_metric_findings(root, contract, dialect))
     findings.extend(_filter_findings(root, contract, verified_context))
     findings.extend(_fanout_findings(root, verified_context))
+    findings.extend(_ranking_findings(root, contract))
     if contract.requires_distinct and not any(root.find_all(exp.Distinct)):
         findings.append(SemanticFinding(
             status="UNRESOLVED", code="DISTINCT_NOT_OBVIOUS",
             evidence="No DISTINCT node was found; grouping or keys might still provide uniqueness.",
         ))
-    if contract.approved_metrics:
-        findings.append(SemanticFinding(
-            status="UNRESOLVED", code="METRIC_FORMULA_EQUIVALENCE_UNPROVEN",
-            evidence="Approved metric formula equivalence needs lineage-aware validation.",
-        ))
+    return findings
+
+
+def _approved_metric_findings(
+    root: exp.Expression, contract: SemanticContract,
+    dialect: Literal["sqlite", "postgres"],
+) -> list[SemanticFinding]:
+    findings: list[SemanticFinding] = []
+    aliases = {
+        table.alias_or_name.casefold(): table.name.casefold()
+        for table in root.find_all(exp.Table)
+    }
+    complex_lineage = bool(list(root.find_all(exp.CTE)) or list(root.find_all(exp.Subquery)))
+    for metric in contract.approved_metrics:
+        try:
+            formula = sqlglot.parse_one(metric.formula, read=dialect)
+        except (ParseError, TokenError):
+            formula = None
+        if not isinstance(formula, exp.AggFunc) or not isinstance(formula.this, exp.Column):
+            findings.append(SemanticFinding(
+                status="UNRESOLVED", code="METRIC_FORMULA_EQUIVALENCE_UNPROVEN",
+                evidence=f"The approved {metric.id} formula needs derived-expression lineage.",
+            ))
+            continue
+        required_column = formula.this.name.casefold()
+        candidates = [
+            node for node in root.find_all(type(formula))
+            if isinstance(node.this, exp.Column)
+            and node.this.name.casefold() == required_column
+        ]
+        if candidates:
+            source = metric.source_relation.casefold()
+            proven = any(
+                (node.this.table and aliases.get(node.this.table.casefold(),
+                                                  node.this.table.casefold()) == source)
+                or (not node.this.table and set(aliases.values()) == {source})
+                for node in candidates
+            )
+            proven = proven and not complex_lineage and len(list(root.find_all(type(formula)))) == 1
+            findings.append(SemanticFinding(
+                status="PASS" if proven else "UNRESOLVED",
+                code="APPROVED_METRIC_INPUT_MATCH" if proven
+                else "METRIC_FORMULA_EQUIVALENCE_UNPROVEN",
+                evidence=(f"The {metric.id} aggregate uses its approved input."
+                          if proven else f"The {metric.id} input matches by name, but "
+                          "its source relation is not proven."),
+            ))
+        else:
+            direct_wrong_input = bool(list(root.find_all(type(formula)))) and all(
+                isinstance(node.this, exp.Column)
+                for node in root.find_all(type(formula))
+            )
+            findings.append(SemanticFinding(
+                status="FAIL" if direct_wrong_input and not complex_lineage else "UNRESOLVED",
+                code="APPROVED_METRIC_INPUT_MISMATCH",
+                evidence=f"No direct {type(formula).__name__.upper()} on "
+                         f"{metric.source_relation}.{required_column} implements {metric.id}.",
+            ))
     return findings
 
 
@@ -336,7 +391,11 @@ def _filter_findings(
         if isinstance(node, (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.In,
                              exp.Between))
     ]
-    for required in [*contract.filters, *contract.mandatory_metric_filters]:
+    for required, temporal in [
+        *((item, False) for item in contract.filters),
+        *((item, False) for item in contract.mandatory_metric_filters),
+        *((item, True) for item in contract.temporal_boundaries),
+    ]:
         column_name = required.operand.split(".")[-1].casefold()
         required_table = (
             required.operand.split(".", 1)[0].casefold()
@@ -387,14 +446,22 @@ def _filter_findings(
                           "with its operator and value."),
             ))
         elif relevant:
+            uncertain = temporal and bool(
+                list(root.find_all(exp.CTE)) or list(root.find_all(exp.Subquery))
+            )
             findings.append(SemanticFinding(
-                status="FAIL", code="REQUIRED_FILTER_PREDICATE_MISMATCH",
+                status="UNRESOLVED" if uncertain else "FAIL",
+                code="REQUIRED_FILTER_PREDICATE_MISMATCH",
                 evidence=(f"SQL filters {required.operand}, but not with "
                           "the required operator/value."),
             ))
         elif not (len(requested) == 1 and re.fullmatch(r"\d{4}", next(iter(requested)))):
+            uncertain = temporal and bool(
+                list(root.find_all(exp.CTE)) or list(root.find_all(exp.Subquery))
+            )
             findings.append(SemanticFinding(
-                status="FAIL", code="REQUIRED_FILTER_VALUE_MISSING",
+                status="UNRESOLVED" if uncertain else "FAIL",
+                code="REQUIRED_FILTER_VALUE_MISSING",
                 evidence=(f"No required predicate for {required.operand} "
                           "appears in SQL WHERE clauses."),
             ))
@@ -442,6 +509,49 @@ def _fanout_findings(
                           "cardinality check is needed before rejection."),
             )]
     return []
+
+
+def _ranking_findings(root: exp.Expression, contract: SemanticContract) -> list[SemanticFinding]:
+    if not contract.requires_ordering and not contract.ranking_direction and contract.limit is None:
+        return []
+    findings: list[SemanticFinding] = []
+    outer_order = root.args.get("order")
+    complex_ranking = bool(list(root.find_all(exp.Window)) or list(root.find_all(exp.CTE)))
+    if contract.requires_ordering and not isinstance(outer_order, exp.Order):
+        findings.append(SemanticFinding(
+            status="UNRESOLVED" if complex_ranking else "FAIL",
+            code="RANKING_ORDER_MISSING",
+            evidence="No final ORDER BY is present; an intermediate ranking may still select rows.",
+        ))
+    if contract.ranking_direction and isinstance(outer_order, exp.Order):
+        first = outer_order.expressions[0] if outer_order.expressions else None
+        if isinstance(first, exp.Ordered):
+            actual_direction = "DESC" if first.args.get("desc") else "ASC"
+            findings.append(SemanticFinding(
+                status="PASS" if actual_direction == contract.ranking_direction else "FAIL",
+                code="RANKING_DIRECTION_MATCH" if actual_direction == contract.ranking_direction
+                else "RANKING_DIRECTION_MISMATCH",
+                evidence=f"The first final ORDER BY key is {actual_direction}; expected "
+                         f"{contract.ranking_direction}.",
+            ))
+    outer_limit = root.args.get("limit")
+    if contract.limit is not None:
+        actual_limit = outer_limit.expression if isinstance(outer_limit, exp.Limit) else None
+        if isinstance(actual_limit, exp.Literal) and actual_limit.is_int:
+            actual_count = int(actual_limit.this)
+            findings.append(SemanticFinding(
+                status="PASS" if actual_count == contract.limit else "FAIL",
+                code="RANKING_LIMIT_MATCH" if actual_count == contract.limit
+                else "RANKING_LIMIT_MISMATCH",
+                evidence=f"The final LIMIT is {actual_count}; expected {contract.limit}.",
+            ))
+        else:
+            findings.append(SemanticFinding(
+                status="UNRESOLVED" if complex_ranking else "FAIL",
+                code="RANKING_LIMIT_MISSING",
+                evidence="No literal final LIMIT implements the requested rank count.",
+            ))
+    return findings
 
 
 def repair_context(result: ValidationResult) -> str:

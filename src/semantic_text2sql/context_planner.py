@@ -76,8 +76,11 @@ MINIMUM PREVIOUS ACCEPTED CONTEXT (follow-up/correction only):
 REQUIRED JSON SCHEMA:
 {json.dumps(shape, separators=(",", ":"))}
 """
+    task_completion = getattr(completer, "complete_task", None)
     detailed = getattr(completer, "complete_detailed", None)
-    if callable(detailed):
+    if callable(task_completion):
+        raw, usage = await cast(Any, task_completion)(model, prompt, "context", json_mode=True)
+    elif callable(detailed):
         raw, usage = await cast(Any, detailed)(model, prompt)
     else:
         raw = await completer.complete(model, prompt)

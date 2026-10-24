@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from semantic_text2sql.models import SemanticContract, SemanticFilter
+from semantic_text2sql.models import ApprovedMetricDefinition, SemanticContract, SemanticFilter
 from semantic_text2sql.validator import validate_sql_semantics
 
 
@@ -140,3 +140,80 @@ def test_preaggregated_fact_join_requires_review_not_false_rejection() -> None:
     )
     assert not any(item.code == "FACT_JOIN_FANOUT_RISK" and item.status == "FAIL"
                    for item in result)
+
+
+def test_explicit_temporal_boundaries_are_checked_against_sql() -> None:
+    contract = SemanticContract(temporal_boundaries=[
+        SemanticFilter(operand="yearmonth.Date", operator=">=", value="201301"),
+        SemanticFilter(operand="yearmonth.Date", operator="<", value="201401"),
+    ])
+    correct = _codes(
+        "SELECT SUM(Consumption) FROM yearmonth "
+        "WHERE Date >= '201301' AND Date < '201401'", contract,
+    )
+    wrong = _codes(
+        "SELECT SUM(Consumption) FROM yearmonth "
+        "WHERE Date >= '201201' AND Date < '201401'", contract,
+    )
+    assert correct["FILTER_PREDICATE_MATCH"] == "PASS"
+    assert wrong["REQUIRED_FILTER_PREDICATE_MISMATCH"] == "FAIL"
+
+
+def test_transformed_temporal_boundary_is_unresolved_not_rejected() -> None:
+    contract = SemanticContract(temporal_boundaries=[
+        SemanticFilter(operand="yearmonth.Date", operator=">=", value="201301"),
+    ])
+    result = _codes(
+        "WITH periods AS (SELECT Date, Consumption FROM yearmonth) "
+        "SELECT SUM(Consumption) FROM periods WHERE Date >= '201301'", contract,
+    )
+    assert result["REQUIRED_FILTER_VALUE_MISSING"] == "UNRESOLVED"
+
+
+def test_direct_ranking_direction_and_limit_are_checked() -> None:
+    contract = SemanticContract(requires_ordering=True, ranking_direction="DESC", limit=3)
+    correct = _codes("SELECT CustomerID FROM customers ORDER BY Score DESC LIMIT 3", contract)
+    wrong = _codes("SELECT CustomerID FROM customers ORDER BY Score ASC LIMIT 5", contract)
+    assert correct["RANKING_DIRECTION_MATCH"] == "PASS"
+    assert correct["RANKING_LIMIT_MATCH"] == "PASS"
+    assert wrong["RANKING_DIRECTION_MISMATCH"] == "FAIL"
+    assert wrong["RANKING_LIMIT_MISMATCH"] == "FAIL"
+
+
+def test_window_rank_without_outer_order_is_not_falsely_rejected() -> None:
+    contract = SemanticContract(requires_ordering=True, ranking_direction="DESC", limit=1)
+    result = _codes(
+        "WITH ranked AS (SELECT CustomerID, ROW_NUMBER() OVER "
+        "(ORDER BY Score DESC) AS rn FROM customers) "
+        "SELECT CustomerID FROM ranked WHERE rn = 1", contract,
+    )
+    assert result["RANKING_ORDER_MISSING"] == "UNRESOLVED"
+    assert result["RANKING_LIMIT_MISSING"] == "UNRESOLVED"
+
+
+def test_simple_approved_metric_input_is_proven_or_rejected() -> None:
+    contract = SemanticContract(approved_metrics=[ApprovedMetricDefinition(
+        id="total_spending", formula="SUM(Price)",
+        source_relation="transactions_1k", required_fields=["Price"],
+    )])
+    good = _codes("SELECT SUM(t.Price) FROM transactions_1k AS t", contract)
+    bad = _codes("SELECT SUM(t.Amount) FROM transactions_1k AS t", contract)
+    transformed = _codes(
+        "SELECT SUM(CAST(t.Price AS REAL)) FROM transactions_1k AS t", contract,
+    )
+    ambiguous = _codes(
+        "SELECT SUM(t.Price), SUM(t.Amount) FROM transactions_1k AS t", contract,
+    )
+    assert good["APPROVED_METRIC_INPUT_MATCH"] == "PASS"
+    assert bad["APPROVED_METRIC_INPUT_MISMATCH"] == "FAIL"
+    assert transformed["APPROVED_METRIC_INPUT_MISMATCH"] == "UNRESOLVED"
+    assert ambiguous["METRIC_FORMULA_EQUIVALENCE_UNPROVEN"] == "UNRESOLVED"
+
+
+def test_derived_metric_formula_stays_unresolved() -> None:
+    contract = SemanticContract(approved_metrics=[ApprovedMetricDefinition(
+        id="margin", formula="SUM(Profit) / NULLIF(SUM(Revenue), 0)",
+        source_relation="sales", required_fields=["Profit", "Revenue"],
+    )])
+    result = _codes("SELECT SUM(Profit) / SUM(Revenue) FROM sales", contract)
+    assert result["METRIC_FORMULA_EQUIVALENCE_UNPROVEN"] == "UNRESOLVED"

@@ -200,6 +200,24 @@ def resolve_semantic_contract(
             continue
         else:
             raise ValueError(f"Unsupported or incomplete contract change: {change.operation}.")
+    active_period = values.get("active_period")
+    if isinstance(active_period, str) and re.fullmatch(r"\d{4}", active_period):
+        comparison_years = {
+            str(period) for period in values.get("comparison_periods", [])
+            if re.fullmatch(r"\d{4}", str(period))
+        }
+        for item in [*values["filters"], *values["temporal_boundaries"]]:
+            if item["operator"] != "=" or not re.search(
+                r"date|year|month|time|period", item["operand"], re.I
+            ):
+                continue
+            value = str(item["value"])
+            match = re.match(r"^(\d{4})(?:$|\d{2}$|[-/]\d{2})", value)
+            if match and match.group(1) not in {active_period, *comparison_years}:
+                raise ValueError(
+                    f"The active period {active_period} conflicts with the explicit "
+                    f"{item['operand']} value {value}."
+                )
     return SemanticContract.model_validate(values)
 EXPLANATION_OPERATIONS = frozenset(
     {

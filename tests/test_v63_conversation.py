@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi.testclient import TestClient
 
 from semantic_text2sql.agent import TextToSQLAgent
@@ -93,6 +95,67 @@ def _post(client: TestClient, message: str, session: str = "same") -> dict[str, 
     return response.json()
 
 
+def test_top_layer_exclusively_routes_when_legacy_bridge_is_also_enabled(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    monkeypatch.setenv("TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED", "true")
+    top = ScriptedCompleter([_answer("DIRECT_ANSWER", "Handled by the top assistant.")])
+    sql = ScriptedSQL()
+    client = _client(tmp_path, monkeypatch, top, ScriptedCompleter([]), sql)
+    response = _post(client, "What does retention mean?", "router-boundary")
+    assert response["message"] == "Handled by the top assistant."
+    assert top.calls == 1
+    assert sql.calls == []
+
+
+def test_concurrent_same_session_sql_turns_cannot_overwrite_accepted_state(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    class ConcurrentSQL(ScriptedSQL):
+        def __init__(self) -> None:
+            super().__init__()
+            self.both_started = asyncio.Event()
+
+        async def generate(self, **kwargs: Any) -> tuple[str, int]:
+            self.calls.append(str(kwargs["question"]))
+            if len(self.calls) == 2:
+                self.both_started.set()
+            await asyncio.wait_for(self.both_started.wait(), timeout=3)
+            return "SELECT SUM(Consumption) AS total_consumption FROM yearmonth", 1
+
+    class ConcurrentTop:
+        calls = 0
+
+        async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            self.calls += 1
+            decision = (
+                _tool("NEW_QUERY", "ask_data", "Total consumption", operation="NEW_QUERY")
+                if self.calls <= 2 else _answer("NEW_QUERY", "The total is available.")
+            )
+            return json.dumps(decision), TokenUsage(input_tokens=10, output_tokens=5)
+
+    top = ConcurrentTop()
+    sql = ConcurrentSQL()
+    client = _client(tmp_path, monkeypatch, top, ScriptedCompleter([]), sql)
+
+    async def run_both() -> list[httpx.Response]:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=client.app), base_url="http://test"
+        ) as http:
+            payload = {
+                "session_id": "racing-turns", "db_id": "consumption",
+                "provider": "agentrouter", "model": "scripted",
+                "message": "Total consumption",
+            }
+            return list(await asyncio.gather(
+                http.post("/api/chat", json=payload), http.post("/api/chat", json=payload)
+            ))
+
+    responses = asyncio.run(run_both())
+    assert sorted(response.status_code for response in responses) == [200, 409]
+    assert len(sql.calls) == 2
+
+
 def test_total_then_currency_then_plot_reuses_complete_result(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -141,7 +204,8 @@ def test_combined_sql_and_plot_then_change_type_without_new_sql(
               operation="NEW_QUERY"),
         _tool("VISUALIZE", "change_visualization", "Plot total consumption by currency"),
         _answer("VISUALIZE", "Here is consumption by currency."),
-        _tool("VISUALIZE", "change_visualization", "Change to a horizontal bar"),
+        _tool("VISUALIZE", "change_visualization",
+              "Change the plot to a horizontal bar of total consumption by currency"),
         _answer("VISUALIZE", "The same values are shown horizontally."),
     ])
     plotting = ScriptedCompleter([
@@ -161,11 +225,32 @@ def test_combined_sql_and_plot_then_change_type_without_new_sql(
     assert combined["presentation"]["chart_spec"]["chart_type"] == "bar"
     assert len(sql.calls) == 1
     assert plotting.calls == 1
-    changed = _post(client, "Change the chart to a horizontal bar", "combined")
+    changed = _post(client,
+                    "Change the plot to a horizontal bar of total consumption by currency",
+                    "combined")
     assert changed["presentation"]["chart_spec"]["chart_type"] == "horizontal_bar"
     assert changed["generation"]["sql"] == combined["generation"]["sql"]
     assert len(sql.calls) == 1
     assert plotting.calls == 2
+
+
+def test_fresh_sql_result_missing_requested_dimension_cannot_be_plotted(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    top = ScriptedCompleter([
+        _tool("NEW_QUERY", "ask_data", "Total consumption by country",
+              operation="NEW_QUERY"),
+        _tool("VISUALIZE", "change_visualization", "Plot total consumption by country"),
+        _answer("VISUALIZE", "A country chart cannot be made from these rows."),
+    ])
+    plotting = ScriptedCompleter([])
+    sql = ScriptedSQL()  # Deliberately returns currency, not country.
+    client = _client(tmp_path, monkeypatch, top, plotting, sql)
+    response = _post(client, "Total consumption by country and plot it", "fresh-gap")
+    assert response["generation"]["accepted"] is True
+    assert response["presentation"] is None or response["presentation"]["chart_spec"] is None
+    assert response["plot_status"] == "REQUERY_REQUIRED"
+    assert plotting.calls == 0
 
 
 def test_missing_time_grain_is_not_invented_by_plotting(
@@ -189,6 +274,47 @@ def test_missing_time_grain_is_not_invented_by_plotting(
     assert "REQUERY_REQUIRED" in top.prompts[-1]
     assert "coarser grain" in response["message"]
     assert response["plot_status"] == "REQUERY_REQUIRED"
+
+
+def test_requery_required_can_continue_through_sql_to_validated_chart(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    class MonthlySQL(ScriptedSQL):
+        async def generate(self, **kwargs: Any) -> tuple[str, int]:
+            question = str(kwargs["question"])
+            if "monthly" in question.casefold():
+                self.calls.append(question)
+                return (
+                    "SELECT Date AS month, SUM(Consumption) AS total_consumption "
+                    "FROM yearmonth GROUP BY Date ORDER BY Date", 1,
+                )
+            return await super().generate(**kwargs)
+
+    top = ScriptedCompleter([
+        _tool("NEW_QUERY", "ask_data", "Total consumption", operation="NEW_QUERY"),
+        _answer("NEW_QUERY", "The total is available."),
+        _tool("VISUALIZE", "change_visualization", "Plot it over months"),
+        _tool("NEW_QUERY", "ask_data", "Monthly total consumption", operation="NEW_QUERY"),
+        _tool("VISUALIZE", "change_visualization", "Plot monthly total consumption"),
+        _answer("VISUALIZE", "Here is monthly consumption."),
+    ])
+    plotting = ScriptedCompleter([{
+        "primary_chart": {
+            "chart_type": "line", "x": "month", "x_components": [],
+            "y": "total_consumption", "y_measures": ["total_consumption"],
+            "series": None, "reason": "Monthly trend.",
+        }, "alternative_charts": [],
+    }])
+    sql = MonthlySQL()
+    client = _client(tmp_path, monkeypatch, top, plotting, sql)
+    first = _post(client, "Total consumption", "requery-plot")
+    chart = _post(client, "Plot it over months", "requery-plot")
+    assert first["generation"]["columns"] == ["total_consumption"]
+    assert chart["presentation"]["chart_spec"]["chart_type"] == "line"
+    assert chart["generation"]["columns"] == ["month", "total_consumption"]
+    assert chart["presentation_state"]["source_result_id"] == chart["result_id"]
+    assert len(sql.calls) == 2
+    assert plotting.calls == 1
 
 
 def test_failed_current_sql_cannot_plot_stale_accepted_result(

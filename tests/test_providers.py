@@ -15,6 +15,7 @@ from semantic_text2sql.llm import (
     GroqSQLModel,
     JustDoWorkSQLModel,
     ModelError,
+    ProviderRequestError,
     RoutingSQLModel,
     _prompt,
 )
@@ -365,7 +366,7 @@ def test_groq_qwen_uses_chat_completions_and_reports_usage() -> None:
     assert captured["body"]["model"] == "qwen/qwen3.6-27b"  # type: ignore[index]
     assert captured["body"]["reasoning_effort"] == "none"  # type: ignore[index]
     assert captured["body"]["reasoning_format"] == "hidden"  # type: ignore[index]
-    assert captured["body"]["max_completion_tokens"] == 180  # type: ignore[index]
+    assert captured["body"]["max_completion_tokens"] == 2_048  # type: ignore[index]
 
 
 def test_groq_fails_without_api_key() -> None:
@@ -611,7 +612,7 @@ def test_groq_native_structured_output_carries_full_json_schema() -> None:
     assert len(requests) == 1
     body = requests[0]
     response_format: dict[str, Any] = body["response_format"]
-    assert body["max_completion_tokens"] == 1_024
+    assert body["max_completion_tokens"] == 1_536
     assert response_format["type"] == "json_schema"
     json_schema: dict[str, Any] = response_format["json_schema"]
     assert json_schema["name"] == "AgentDecision"
@@ -808,7 +809,7 @@ def test_groq_max_completion_tokens_is_configurable(monkeypatch: pytest.MonkeyPa
 
     asyncio.run(env_model.complete_detailed("qwen/qwen3.6-27b", "Return SQL"))
 
-    # Default stays at the historical 180.
+    # The default no longer truncates a decision fallback at the old 180-token cap.
     monkeypatch.delenv("TEXT2SQL_MAX_COMPLETION_TOKENS", raising=False)
     default_model = GroqSQLModel(
         "groq-test-key",
@@ -817,4 +818,43 @@ def test_groq_max_completion_tokens_is_configurable(monkeypatch: pytest.MonkeyPa
     )
     asyncio.run(default_model.complete_detailed("qwen/qwen3.6-27b", "Return SQL"))
 
-    assert captured == [1_024, 1_024, 640, 180]
+    assert captured == [1_024, 1_536, 640, 2_048]
+
+
+@pytest.mark.parametrize("status,code", [
+    (400, "invalid_request_error"), (401, "authentication_error"),
+    (403, "permission_error"), (404, "model_not_found"),
+    (429, "rate_limit_exceeded"),
+])
+def test_groq_http_failure_is_typed_and_redacted(
+    status: int, code: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("semantic_text2sql.llm._groq_retry_delay", lambda response: 0)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, headers={"x-request-id": "req-safe"}, json={
+            "error": {"code": code, "message": "private prompt and secret-key"},
+        })
+
+    model = GroqSQLModel("test-key", transport=httpx.MockTransport(handler))
+    with pytest.raises(ProviderRequestError) as raised:
+        asyncio.run(model.complete_detailed("qwen/qwen3.8-27b", "Decide"))
+    error = raised.value
+    assert (error.status, error.code, error.request_id) == (status, code, "req-safe")
+    assert error.model == "qwen/qwen3.8-27b"
+    assert error.latency_ms >= 0
+    assert "private prompt" not in str(error)
+    assert "secret-key" not in str(error)
+
+
+def test_groq_length_finish_is_not_accepted_and_retains_usage() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"action":'}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 20, "completion_tokens": 180},
+        })
+
+    model = GroqSQLModel("test-key", transport=httpx.MockTransport(handler))
+    with pytest.raises(ModelError, match="truncated") as raised:
+        asyncio.run(model.complete_detailed("qwen/qwen3.8-27b", "Decide"))
+    assert raised.value.usage.total_tokens == 200

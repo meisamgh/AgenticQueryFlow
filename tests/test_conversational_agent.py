@@ -4,6 +4,8 @@ import asyncio
 import json
 from typing import Any
 
+import httpx
+import pytest
 from fastapi.testclient import TestClient
 
 from semantic_text2sql.agent import TextToSQLAgent
@@ -19,6 +21,7 @@ from semantic_text2sql.conversational_bridge import (
 from semantic_text2sql.data_requirement_validator import _stored_grain_capability
 from semantic_text2sql.glossary import GlossaryStore
 from semantic_text2sql.hybrid_retrieval import HybridSchemaRetriever
+from semantic_text2sql.llm import GroqSQLModel
 from semantic_text2sql.models import (
     CallLedgerEntry,
     ChatRequest,
@@ -1055,6 +1058,71 @@ def test_consistency_repair_when_call_tool_lacks_a_tool(registry: Any, tmp_path:
     assert "could not complete" not in response.message
 
 
+@pytest.mark.parametrize("code,message", [
+    ("json_validate_failed", "Failed to generate JSON"),
+    ("invalid_request_error", "response_format unsupported"),
+    ("invalid_request_error", "json_schema unsupported keyword maxLength"),
+])
+def test_qwen_native_failure_uses_bounded_json_mode_then_validates_tool(
+    registry: Any, tmp_path: Any, code: str, message: str
+) -> None:
+    bodies: list[dict[str, Any]] = []
+    decision = {
+        "action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
+        "tool_arguments": {"objective": "Count customers", "operation": "NEW_QUERY", "changes": []},
+        "instruction": None, "answer": None,
+    }
+    answer = {
+        "action": "ANSWER", "intent": "NEW_QUERY", "tool": None,
+        "tool_arguments": None, "instruction": None, "answer": "The query ran.",
+    }
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body: dict[str, Any] = json.loads(request.content)
+        bodies.append(body)
+        if len(bodies) == 1:
+            return httpx.Response(400, json={"error": {"code": code, "message": message}})
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": json.dumps(
+                decision if len(bodies) == 2 else answer
+            )}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 80},
+        })
+
+    model = GroqSQLModel("test-key", transport=httpx.MockTransport(handler))
+    calls: list[str] = []
+    response = asyncio.run(_decision_agent(registry, tmp_path, model, calls).run(
+        ChatRequest(session_id="qwen-fallback", db_id="shop", message="Count customers")
+    ))
+    assert calls == ["Count customers"]
+    assert response.message == "The query ran."
+    assert bodies[0]["response_format"]["type"] == "json_schema"
+    assert bodies[1]["response_format"] == {"type": "json_object"}
+    assert bodies[2]["response_format"] == {"type": "json_object"}
+    assert bodies[1]["max_completion_tokens"] >= 1_000
+    assert response.token_usage.total_tokens == 220
+    assert [entry.status for entry in response.call_ledger
+            if entry.component == "conversational_agent"] == [
+                "FAILED", "SUCCEEDED", "SUCCEEDED",
+            ]
+
+
+def test_qwen_unrelated_bad_request_never_executes_sql(registry: Any, tmp_path: Any) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {
+            "code": "invalid_request_error", "message": "invalid temperature parameter",
+        }})
+
+    model = GroqSQLModel("test-key", transport=httpx.MockTransport(handler))
+    calls: list[str] = []
+    response = asyncio.run(_decision_agent(registry, tmp_path, model, calls).run(
+        ChatRequest(session_id="qwen-bad-request", db_id="shop", message="Count customers")
+    ))
+    assert calls == []
+    assert "invalid_request_error" in response.message
+    assert response.call_ledger[-1].status == "FAILED"
+
+
 def test_plot_it_valid_visualize_decision_is_not_repaired(
     registry: Any, tmp_path: Any
 ) -> None:
@@ -1174,3 +1242,45 @@ def test_structured_completer_transport_failure_keeps_ledger_and_usage(
     # structured TokenUsage (not raw exception text), so no tokens leak or vanish.
     assert response.token_usage is not None
     assert response.token_usage.total_tokens == 0
+
+
+def test_final_answer_failure_preserves_accepted_sql_and_records_failed_call(
+    registry: Any, tmp_path: Any
+) -> None:
+    from semantic_text2sql.llm import ModelError
+
+    class FailingFinalAnswer:
+        calls = 0
+
+        async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            self.calls += 1
+            if self.calls == 1:
+                return json.dumps({
+                    "action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
+                    "tool_arguments": {"objective": "Show monthly revenue"}, "answer": None,
+                }), TokenUsage(input_tokens=12, output_tokens=8)
+            raise ModelError("Gateway unavailable", usage=TokenUsage(input_tokens=7))
+
+    completer = FailingFinalAnswer()
+    calls: list[str] = []
+    agent = _decision_agent(registry, tmp_path, completer, calls)
+
+    async def accepted_handler(request: ChatRequest) -> ChatResponse:
+        calls.append(request.message)
+        return ChatResponse(
+            session_id=request.session_id, operation="NEW_QUERY",
+            resolved_question=request.message, message="The query ran.",
+            generation=_accepted_result().generation,
+        )
+
+    agent.sql_handler = accepted_handler
+    response = asyncio.run(agent.run(ChatRequest(
+        session_id="partial-answer", db_id="shop", message="Show monthly revenue",
+    )))
+    assert calls == ["Show monthly revenue"]
+    assert response.generation is not None and response.generation.accepted
+    assert response.generation.sql == "SELECT month, revenue FROM revenue_by_month"
+    assert "assistant_response_unavailable" in response.provenance
+    assert response.token_usage.total_tokens == 27
+    assert [item.status for item in response.call_ledger
+            if item.component == "conversational_agent"] == ["SUCCEEDED", "FAILED"]

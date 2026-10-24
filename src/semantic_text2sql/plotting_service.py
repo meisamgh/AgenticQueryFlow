@@ -65,6 +65,16 @@ async def design_chart(
         return PlottingOutcome(
             "REQUERY_REQUIRED", "The accepted result is incomplete; a new governed query is needed."
         )
+    selected_dimensions = [
+        str(item.new_value or item.target) for item in changes or []
+        if item.operation == "ADD_DIMENSION"
+    ]
+    stored_names = {column.casefold() for column in generation.columns}
+    if any(name.casefold() not in stored_names for name in selected_dimensions):
+        return PlottingOutcome(
+            "REQUERY_REQUIRED",
+            "The executed result lacks the requested grouping column; new SQL is required.",
+        )
     if not fresh_result:
         analytical_changes = {
             "ADD_FILTER", "REMOVE_FILTER", "REPLACE_FILTER", "CHANGE_METRIC",
@@ -76,38 +86,92 @@ async def design_chart(
                 "REQUERY_REQUIRED",
                 "This request changes the underlying analysis; new validated SQL is required.",
             )
-        selected_dimensions = [
-            str(item.new_value or item.target) for item in changes or []
-            if item.operation == "ADD_DIMENSION"
-        ]
-        stored_names = {column.casefold() for column in generation.columns}
-        if any(name.casefold() not in stored_names for name in selected_dimensions):
-            return PlottingOutcome(
-                "REQUERY_REQUIRED",
-                "The saved result lacks the requested grouping column; new SQL is required.",
-            )
-        visualization_intent = parse_intent(objective, has_previous=True)
-        if not visualization_intent.requested:
-            visualization_intent = visualization_intent.model_copy(update={"requested": True})
-        requirement = validate_reusability(
-            plan_analytics(
-                objective,
-                viz_intent=visualization_intent,
-                previous=previous,
-                db_id=db_id or generation.db_id,
-            ),
-            stored_columns=generation.columns,
-            stored_rows=generation.rows,
-            stored_row_count=generation.row_count,
-            stored_truncated=generation.truncated,
+    visualization_intent = parse_intent(objective, has_previous=True)
+    if not visualization_intent.requested:
+        visualization_intent = visualization_intent.model_copy(update={"requested": True})
+    plan = plan_analytics(
+        objective,
+        viz_intent=visualization_intent,
+        previous=None if fresh_result else previous,
+        db_id=db_id or generation.db_id,
+    )
+    if (
+        not fresh_result
+        and previous is not None
+        and visualization_intent.explicit_type
+        and not changes
+        and previous.resolved_question
+    ):
+        # A chart-type request may repeat the existing metric and grouping in
+        # ordinary language. The lexical planner reports those mentions as
+        # changes, although the accepted rows already contain that analysis.
+        # Discard only provably identical analytical requirements; novel ones
+        # still pass through the result-reusability gate and require SQL.
+        baseline = plan_analytics(
+            previous.resolved_question,
+            viz_intent=parse_intent(previous.resolved_question, has_previous=False),
+            previous=None,
+            db_id=db_id or generation.db_id,
         )
-        if requirement.decision != "reuse_result":
-            status = cast(PlotStatus, {
-                "requery_database": "REQUERY_REQUIRED",
-                "need_clarification": "CLARIFICATION_REQUIRED",
-                "unsupported": "UNSUPPORTED",
-            }[requirement.decision])
-            return PlottingOutcome(status, requirement.reason)
+        requested = plan.requested_analysis
+        original = baseline.requested_analysis
+        if (
+            requested.metrics == original.metrics
+            and requested.dimensions == original.dimensions
+            and requested.time_grain == original.time_grain
+            and requested.aggregation == original.aggregation
+            and requested.derived_measures == original.derived_measures
+            and all(change.operation in {
+                "CHANGE_METRIC", "CHANGE_AGGREGATION", "ADD_DIMENSION"
+            } for change in plan.semantic_changes)
+        ):
+            aliases = {name.casefold(): name for name in generation.columns}
+            mapped_metrics = [
+                aliases.get(metric.casefold())
+                or next((name for name in generation.columns
+                         if name.casefold() in {
+                             f"{prefix}_{metric.casefold()}"
+                             for prefix in ("total", "sum", "avg", "average", "count")
+                         }), metric)
+                for metric in requested.metrics
+            ]
+            plan = plan.model_copy(update={
+                "semantic_changes": [],
+                "requested_analysis": requested.model_copy(update={"metrics": mapped_metrics}),
+            })
+    if fresh_result:
+        # A newly executed result has no *previous* analysis to change. Still
+        # check its actual columns and grain before giving it to the chart model.
+        aliases = {name.casefold(): name for name in generation.columns}
+        mapped_metrics = [
+            aliases.get(metric.casefold())
+            or next((name for name in generation.columns
+                     if name.casefold() in {
+                         f"{prefix}_{metric.casefold()}"
+                         for prefix in ("total", "sum", "avg", "average", "count")
+                     }), metric)
+            for metric in plan.requested_analysis.metrics
+        ]
+        plan = plan.model_copy(update={
+            "semantic_changes": [],
+            "requested_analysis": plan.requested_analysis.model_copy(
+                update={"metrics": mapped_metrics}
+            ),
+        })
+    requirement = validate_reusability(
+        plan,
+        stored_columns=generation.columns,
+        stored_rows=generation.rows,
+        stored_row_count=generation.row_count,
+        stored_truncated=generation.truncated,
+    )
+    if requirement.decision != "reuse_result":
+        status = cast(PlotStatus, {
+            "requery_database": "REQUERY_REQUIRED",
+            "need_clarification": "CLARIFICATION_REQUIRED",
+            "unsupported": "UNSUPPORTED",
+        }[requirement.decision])
+        return PlottingOutcome(status, requirement.reason)
     if not generation.rows or len(generation.columns) < 2:
         return PlottingOutcome(
             "UNSUPPORTED", "This result does not contain enough rows and columns for a chart."

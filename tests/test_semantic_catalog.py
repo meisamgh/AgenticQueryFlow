@@ -9,8 +9,15 @@ import pytest
 from fastapi.testclient import TestClient
 
 from semantic_text2sql.api import create_app
+from semantic_text2sql.conversational_bridge import (
+    ConversationalAnalyticsBridge,
+    MetadataToolInput,
+)
 from semantic_text2sql.database import DatabaseRegistry
-from semantic_text2sql.models import ColumnInfo, SchemaInfo, TableInfo
+from semantic_text2sql.glossary import GlossaryStore
+from semantic_text2sql.hybrid_retrieval import HybridSchemaRetriever
+from semantic_text2sql.models import ChatRequest, ChatResponse, ColumnInfo, SchemaInfo, TableInfo
+from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.semantic_catalog import (
     ApprovalRecord,
     CatalogDocument,
@@ -140,6 +147,50 @@ def _schema() -> SchemaInfo:
         ],
         relationships=[],
     )
+
+
+def test_conversation_metric_discovery_uses_approved_catalog_only(tmp_path: Path) -> None:
+    registry = _registry(tmp_path)
+    root = tmp_path / "catalog"
+    root.mkdir()
+    document = _document()
+    approved = document.metrics[0].model_copy(update={
+        "status": "approved", "approval": APPROVAL,
+    })
+    document = document.model_copy(update={"metrics": [approved]})
+    (root / "shop.json").write_text(document.model_dump_json())
+
+    class Encoder:
+        def encode(self, texts: list[str]) -> list[list[float]]:
+            return [[1.0, 0.0] for _ in texts]
+
+    async def sql_handler(request: ChatRequest) -> ChatResponse:
+        raise AssertionError("Metric discovery must not invoke SQL")
+
+    bridge = ConversationalAnalyticsBridge(
+        database=registry, postgres=None,
+        profiles=ProfileStore(tmp_path / "profiles"),
+        glossaries=GlossaryStore(tmp_path / "glossaries"),
+        semantic_catalogs=SemanticCatalogStore(root),
+        retriever=HybridSchemaRetriever(Encoder()),
+        sql_handler=sql_handler,
+    )
+    discovered = bridge.get_business_context(MetadataToolInput(
+        db_id="shop", question="What metrics are available?"
+    ))
+    assert discovered.found is True
+    assert any("Order total (order_total)" in fact and "SUM(amount)" in fact
+               for fact in discovered.facts)
+    (root / "shop.json").write_text(_document().model_dump_json())
+    inferred = ConversationalAnalyticsBridge(
+        database=registry, postgres=None,
+        profiles=ProfileStore(tmp_path / "profiles"),
+        glossaries=GlossaryStore(tmp_path / "glossaries"),
+        semantic_catalogs=SemanticCatalogStore(root),
+        retriever=HybridSchemaRetriever(Encoder()),
+        sql_handler=sql_handler,
+    ).get_business_context(MetadataToolInput(db_id="shop", question="What metrics are available?"))
+    assert inferred.found is False
 
 
 def test_approval_rules_can_never_be_invented() -> None:

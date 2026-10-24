@@ -78,6 +78,30 @@ def test_contract_filter_and_period_changes_preserve_unaffected_constraints() ->
     assert updated.comparison_periods == ["2024"]
 
 
+def test_active_period_rejects_conflicting_exact_date_filter() -> None:
+    base = SemanticContract(active_period="2025")
+    with pytest.raises(ValueError, match="active period 2025 conflicts"):
+        resolve_semantic_contract(
+            base, original_question="Use August 2024", resolved_question="Use August 2024",
+            changes=[RequestedChange(
+                operation="ADD_FILTER", target="orders.order_date",
+                new_value="2024-08-01",
+            )],
+        )
+
+
+def test_comparison_period_allows_exact_date_filter_for_other_year() -> None:
+    base = SemanticContract(active_period="2025", comparison_periods=["2024"])
+    updated = resolve_semantic_contract(
+        base, original_question="Compare August 2024", resolved_question="Compare August 2024",
+        changes=[RequestedChange(
+            operation="ADD_FILTER", target="orders.order_date",
+            new_value="2024-08-01",
+        )],
+    )
+    assert updated.filters[0].value == "2024-08-01"
+
+
 def test_contract_replacement_requires_unique_match() -> None:
     base = SemanticContract(filters=[
         SemanticFilter(operand="Date", operator=">=", value="2025-01-01"),

@@ -273,6 +273,18 @@ test('successful response template orders Answer, Data and SQL', () => {
   assert.ok(answerRenderer.includes('wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length)})'));
   assert.ok(!answerRenderer.includes('options.restored ? "sql"'));
 });
+test('a chart is not rendered against a different SQL result identity', () => {
+  const helper = source.slice(source.indexOf('function chartMatchesResultIdentity('),
+    source.indexOf('async function appendAssistant('));
+  const context = vm.createContext({});
+  vm.runInContext(helper, context);
+  const matches = context.chartMatchesResultIdentity;
+  assert.equal(matches({result_id: 'result-a', presentation_state: {source_result_id: 'result-a'}}), true);
+  assert.equal(matches({result_id: 'result-b', presentation_state: {source_result_id: 'result-a'}}), false);
+  assert.equal(matches({result_id: 'legacy', presentation_state: {}}), true);
+  assert.ok(source.includes('const chartDataComplete = chartMatchesResultIdentity(body)'));
+  assert.ok(source.includes('article.dataset.resultId = body.result_id || ""'));
+});
 const tabsContext = vm.createContext({window: {requestAnimationFrame: callback => callback()}});
 vm.runInContext(source.slice(source.indexOf('/* Response views are local'), source.indexOf('function wireChartSection(')), tabsContext);
 test('response tabs are independent, keep the chart and never execute a query', () => {

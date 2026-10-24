@@ -1385,6 +1385,11 @@ function renderAnswerPreview(fragment, body, mode) {
 }
 
 
+function chartMatchesResultIdentity(body) {
+  const sourceId = body.presentation_state?.source_result_id;
+  return !sourceId || !body.result_id || sourceId === body.result_id;
+}
+
 async function appendAssistant(body, elapsed, options = {}) {
   const fragment = $("#assistantTemplate").content.cloneNode(true);
   const article = fragment.querySelector("article");
@@ -1421,7 +1426,8 @@ async function appendAssistant(body, elapsed, options = {}) {
   const mode = presentationMode(body, { viz });
   const chartSection = fragment.querySelector(".chart-section");
   const presentation = body.presentation || null;
-  const chartDataComplete = body.presentation_state?.data_complete !== false
+  const chartDataComplete = chartMatchesResultIdentity(body)
+    && body.presentation_state?.data_complete !== false
     && !generation.truncated
     && (!(presentation?.chart_spec) || !presentation.chart_spec.source_row_count
       || presentation.chart_spec.source_row_count === generation.rows?.length);
@@ -1524,6 +1530,8 @@ async function appendAssistant(body, elapsed, options = {}) {
   $("#messages").append(fragment);
   if (!sqlNotAvailable && !explanatory) {
     article.dataset.runId = body.run_id || "";
+    article.dataset.resultId = body.result_id || "";
+    article.dataset.chartId = body.chart_id || "";
     wireDataScope(article, generation);
   }
   if (mode === "chart") wireChartSection(article, presentation, generation, body.run_id, body.chart_recommendations);

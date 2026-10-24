@@ -1007,6 +1007,7 @@ class ChatResponse(StrictModel):
     sql_version: int = 0
     history_saved: bool = False
     state_commit_pending: bool = Field(default=False, exclude=True)
+    state_expected_version: int | None = Field(default=None, exclude=True)
     previous_sql: str | None = Field(default=None, max_length=20_000)
     recovery_events: list[RecoveryEvent] = Field(default_factory=list, max_length=40)
     operation: Literal[

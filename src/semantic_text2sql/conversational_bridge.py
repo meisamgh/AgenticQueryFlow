@@ -24,6 +24,7 @@ from semantic_text2sql.models import ChatRequest, ChatResponse, StrictModel
 from semantic_text2sql.postgres import PostgresRegistry
 from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.runtime import RequestBudget
+from semantic_text2sql.semantic_catalog import SemanticCatalogStore
 
 Route = Literal["schema", "business", "sql"]
 SqlHandler = Callable[[ChatRequest], Awaitable[ChatResponse]]
@@ -105,11 +106,13 @@ class ConversationalAnalyticsBridge:
         glossaries: GlossaryStore,
         retriever: HybridSchemaRetriever,
         sql_handler: SqlHandler,
+        semantic_catalogs: SemanticCatalogStore | None = None,
     ) -> None:
         self.database = database
         self.postgres = postgres
         self.profiles = profiles
         self.glossaries = glossaries
+        self.semantic_catalogs = semantic_catalogs
         self.retriever = retriever
         self.sql_handler = sql_handler
         graph = StateGraph(_GraphState)
@@ -297,6 +300,25 @@ class ConversationalAnalyticsBridge:
                 ):
                     formula = f" Formula: {term.formula}." if term.formula else ""
                     facts.append(f"{term.term}: {term.definition}{formula}")
+                if len(facts) == 8:
+                    break
+        catalog = self.semantic_catalogs.load(tool_input.db_id) if self.semantic_catalogs else None
+        if catalog is not None and len(facts) < 8:
+            question = tool_input.question.casefold()
+            listing_metrics = bool(_METRICS_QUESTION.search(tool_input.question))
+            for metric in catalog.metrics:
+                if metric.status != "approved":
+                    continue
+                if listing_metrics or any(
+                    re.search(rf"(?<!\w){re.escape(name.casefold())}(?!\w)", question)
+                    for name in (metric.id, metric.label)
+                ):
+                    fact = (
+                        f"{metric.label} ({metric.id}): {metric.description} "
+                        f"Formula: {metric.formula}. Source: {metric.source_relation}."
+                    )
+                    if fact not in facts:
+                        facts.append(fact)
                 if len(facts) == 8:
                     break
         if not facts:
