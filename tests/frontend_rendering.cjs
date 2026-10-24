@@ -12,6 +12,18 @@ const explorer = explorerContext.window.QueryflowChartExplorer;
 const filtersContext = vm.createContext({window: {}});
 vm.runInContext(fs.readFileSync(`${__dirname}/../web/query_filters.js`, 'utf8'), filtersContext);
 const queryFilters = filtersContext.window.QueryflowFilters;
+test('inspector counts model calls without counting tools as models', () => {
+  const summary = source.slice(source.indexOf('function renderInspectorTokenSummary('),
+    source.indexOf('function wireSqlIdents('));
+  assert.ok(summary.includes('entry.kind === "MODEL"'));
+  assert.ok(summary.includes('usage.input_tokens == null && usage.output_tokens == null'));
+});
+test('explicit chart-type clicks enter the top-layer conversation path', () => {
+  const toolbar = source.slice(source.indexOf('function wireChartSection('),
+    source.indexOf('function closeChartFullscreen('));
+  assert.ok(toolbar.includes('sendFromAnswer(runId, `Change the previous chart'));
+  assert.ok(!toolbar.includes('settings.chartType = type'));
+});
 test('query filter utilities remain available without a visible filter bar', () => {
   const body = {
     resolved_question: 'Show orders by country and date',

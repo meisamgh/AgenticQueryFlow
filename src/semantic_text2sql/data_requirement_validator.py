@@ -210,7 +210,10 @@ def validate_reusability(
     # Any requested grouping that is absent from the stored rows forces new SQL.
     # A finance "stored as month | country" example: "now by region" has no
     # region column, so no amount of client-side work can fabricate it.
-    missing_dimensions = [name for name in dimensions if name not in stored_columns]
+    stored_names = {name.casefold() for name in stored_columns}
+    missing_dimensions = [
+        name for name in dimensions if name.casefold() not in stored_names
+    ]
     if missing_dimensions:
         return outcome(
             "requery_database",
@@ -265,7 +268,7 @@ def validate_reusability(
             )
 
     # Same-or-coarser requested grain with all dimensions present: reuse.
-    reuse_dimensions = [name for name in dimensions if name in stored_columns]
+    reuse_dimensions = [name for name in dimensions if name.casefold() in stored_names]
     return outcome(
         "reuse_result",
         "The complete stored rows already contain this analysis; no SQL runs again.",

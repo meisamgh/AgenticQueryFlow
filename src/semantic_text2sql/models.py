@@ -151,6 +151,12 @@ class StrategyHints(StrictModel):
     reasons: list[str] = Field(default_factory=list)
 
 
+class SemanticFinding(StrictModel):
+    status: Literal["PASS", "FAIL", "UNRESOLVED"]
+    code: str
+    evidence: str
+
+
 class ValidationResult(StrictModel):
     valid: bool
     code: str
@@ -161,6 +167,7 @@ class ValidationResult(StrictModel):
     available_columns: dict[str, list[str]] = Field(default_factory=dict)
     explain_plan: list[str] = Field(default_factory=list)
     semantic_checks: list[str] = Field(default_factory=list)
+    semantic_findings: list[SemanticFinding] = Field(default_factory=list)
 
 
 class TokenUsage(StrictModel):
@@ -243,6 +250,14 @@ class SemanticFilter(StrictModel):
     operand: str
     operator: Literal["=", "!=", ">", ">=", "<", "<=", "IN", "BETWEEN"]
     value: str | int | float | list[str] | list[int] | list[float]
+
+
+class ApprovedMetricDefinition(StrictModel):
+    id: str
+    formula: str
+    source_relation: str
+    required_fields: list[str] = Field(default_factory=list)
+    mandatory_filters: list[SemanticFilter] = Field(default_factory=list)
 
 
 class PlannerMetadataRequirement(StrictModel):
@@ -380,6 +395,16 @@ class SemanticContract(StrictModel):
     """High-confidence question requirements checked independently of the LLM."""
 
     aggregation: Literal["count", "sum", "average", "min", "max"] | None = None
+    original_question: str | None = Field(default=None, max_length=4_000)
+    resolved_question: str | None = Field(default=None, max_length=4_000)
+    approved_metrics: list[ApprovedMetricDefinition] = Field(default_factory=list)
+    required_output_aliases: list[str] = Field(default_factory=list)
+    mandatory_metric_filters: list[SemanticFilter] = Field(default_factory=list)
+    input_grain: list[str] = Field(default_factory=list)
+    output_grain: list[str] = Field(default_factory=list)
+    temporal_boundaries: list[SemanticFilter] = Field(default_factory=list)
+    comparison_periods: list[str] = Field(default_factory=list)
+    tie_policy: Literal["return_all", "deterministic_one"] | None = None
     requires_grouping: bool = False
     requires_distinct: bool = False
     requires_ordering: bool = False
@@ -496,12 +521,19 @@ class PipelineTelemetry(StrictModel):
 
 class RequestedChange(StrictModel):
     operation: Literal[
+        "ADD_DIMENSION",
+        "REMOVE_DIMENSION",
         "ADD_FILTER",
         "REMOVE_FILTER",
         "REPLACE_FILTER",
         "CHANGE_METRIC",
+        "CHANGE_AGGREGATION",
         "CHANGE_GRAIN",
+        "CHANGE_PERIOD",
         "CHANGE_RANKING",
+        "COMPARE",
+        "REQUEST_VISUALIZATION",
+        "CHANGE_VISUALIZATION",
         "OTHER",
     ]
     target: str = Field(max_length=200)
@@ -720,6 +752,14 @@ class ChatRequest(StrictModel):
         ]
         | None
     ) = None
+    # Internal top-layer handoff: objective and typed changes are verified by
+    # the governed conversation service before SQL generation. Public callers
+    # may provide them, but they confer no database authorization.
+    assistant_operation: Literal[
+        "NEW_QUERY", "REFINE", "CORRECTION", "COMPARE", "OPTIMIZE"
+    ] | None = None
+    assistant_changes: list[RequestedChange] = Field(default_factory=list, max_length=10)
+    assistant_original_question: str | None = Field(default=None, max_length=4_000)
 
 
 class ConversationState(StrictModel):
@@ -970,6 +1010,9 @@ class ChatResponse(StrictModel):
     clarification_question: str | None = None
     human_review: HumanReviewRequest | None = None
     chart_recommendations: ChartRecommendations | None = None
+    plot_status: Literal[
+        "CHART_READY", "REQUERY_REQUIRED", "CLARIFICATION_REQUIRED", "UNSUPPORTED"
+    ] | None = None
     suggested_filters: FilterCatalog | None = None
     provenance: list[str] = Field(default_factory=list)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)

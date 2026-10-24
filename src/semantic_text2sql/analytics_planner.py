@@ -129,6 +129,9 @@ _GRAIN_WORDS = {
     "by month": "monthly",
     "by quarter": "quarterly",
     "by year": "yearly",
+    "over months": "monthly",
+    "over years": "yearly",
+    "over days": "daily",
 }
 _AGGREGATION_WORDS = {
     "average": "average",

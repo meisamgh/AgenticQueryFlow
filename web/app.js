@@ -478,7 +478,7 @@ async function send(message, feedbackCategory = null) {
 function responseStatus(body, attempts) {
   const accepted = body.generation?.accepted === true;
   const explanatory = EXPLANATION_OPERATIONS_UI.has(body.operation || "");
-  const chartOnly = body.operation === "VISUALIZE";
+  const chartOnly = body.operation === "VISUALIZE" || Boolean(body.plot_status);
   const modelUnavailable = body.generation && !accepted && body.generation.termination_reason === "model_error";
   const status = chartOnly ? (body.presentation?.chart_spec ? "CHART FROM STORED DATA" : "CHART UNAVAILABLE")
     : explanatory ? "NO NEW QUERY"
@@ -538,7 +538,7 @@ function responseMode(body, opts = {}) {
   if (generation.accepted !== true) return "sql";
   const presentation = body.presentation;
   if (presentation?.chart_spec) return "chart";
-  if (opts.viz || body.operation === "VISUALIZE") return "chart_unavailable";
+  if (opts.viz || body.operation === "VISUALIZE" || body.plot_status) return "chart_unavailable";
   return "sql";
 }
 
@@ -547,6 +547,8 @@ function responseMode(body, opts = {}) {
    independent question comes back as "sql". Client heuristics only serve
    responses produced before this contract existed. */
 function presentationMode(body, opts = {}) {
+  if (body.plot_status && body.plot_status !== "CHART_READY"
+      && !body.presentation?.chart_spec && body.generation?.accepted) return "chart_unavailable";
   const stateMode = body.presentation_state?.mode;
   if (stateMode === "chart") {
     return body.presentation?.chart_spec ? "chart" : "chart_unavailable";
@@ -1076,11 +1078,9 @@ function wireChartSection(article, presentation, generation, runId, recommendati
         button.classList.toggle("active", type === next.chart_type);
         button.setAttribute("aria-pressed", String(type === next.chart_type));
         button.addEventListener("click", () => {
-          const proposal = recommended.find(item => item.chart_type === type);
-          if (proposal && article._chartViewState?.tryChart(proposal)) return;
-          settings.chartType = type;
-          saveSettings();
-          renderCurrent();
+          if (type !== next.chart_type && !state.busy) {
+            void sendFromAnswer(runId, `Change the previous chart to a ${type.replaceAll("_", " ")} chart.`);
+          }
         });
         kinds.append(button);
       });
@@ -1089,42 +1089,12 @@ function wireChartSection(article, presentation, generation, runId, recommendati
   article._echart = null;
   article._chartType = presentation.chart_type;
   kinds.hidden = !explorer;
-  /* Shared chart-view state (chartViewState): one controller for the chart
-     toolbar AND backend-suggested chips. `tryChart` re-validates a proposed
-     shape through the same deterministic chart explorer — display only, and
-     it may fall back to the conversational pipeline for missing data. */
+  /* Zoom and read-only row display stay local; explicit chart changes go
+     through the conversational orchestrator above. */
   article._chartViewState = {
     sourceRunId: runId,
     settings,
     accepted: original,
-    tryChart(chart) {
-      if (!chart || !chart.x || !chart.y) return false;
-      const specColumns = new Set([
-        ...Object.keys(original.data?.[0] || {}),
-        ...(original.source_columns || []),
-      ]);
-      if (!specColumns.has(chart.x)) return false;
-      const measures = [...new Set([...(chart.y_measures || []), chart.y].filter(Boolean))];
-      if (!measures.every(name => specColumns.has(name))) return false;
-      const merged = {
-        ...settings,
-        x: chart.x,
-        metrics: measures,
-        series: chart.series || null,
-        chartType: chart.chart_type,
-        rowFilters: {},
-        categories: [],
-        topN: null,
-      };
-      const applied = explorer?.apply(original, merged);
-      if (!applied || !applied.data.length) return false;
-      if (applied.chart_type !== chart.chart_type) return false;
-      Object.keys(settings).forEach(key => delete settings[key]);
-      Object.assign(settings, merged);
-      saveSettings();
-      renderCurrent();
-      return true;
-    },
     setRowFilters(rows) {
       settings.rowFilters = (Array.isArray(rows) ? rows : [rows]).reduce((map, filter) => {
         if (!filter?.column) return map;
@@ -1406,8 +1376,9 @@ async function appendAssistant(body, elapsed, options = {}) {
     state.lastPresentationMode = "chart_incomplete";
   } else if (mode === "chart_unavailable") {
     chartSection.remove();
-    renderCallout(fragment, "warn", "alert", presentation?.chart_reason
-      || body.message || "This result cannot support the requested chart. SQL and data are available in their tabs.");
+    const reason = presentation?.chart_reason || body.message
+      || "This result cannot support the requested chart. SQL and data are available in their tabs.";
+    if (!sameDisplayText(responseMessage, reason)) renderCallout(fragment, "warn", "alert", reason);
   } else {
     chartSection.remove();
   }
@@ -2075,7 +2046,9 @@ function renderInspectorTokenSummary(body) {
   const generation = body.generation || {};
   const usage = body.token_usage || generation.token_usage || {};
   const total = usage.input_tokens == null && usage.output_tokens == null ? null : (usage.input_tokens || 0) + (usage.output_tokens || 0);
-  box.append(metaRow("Model calls in ledger", String((body.call_ledger || []).length)));
+  box.append(metaRow("Model calls in ledger", String(
+    (body.call_ledger || []).filter((entry) => entry.kind === "MODEL").length
+  )));
   box.append(metaRow("Total tokens", total == null ? "unavailable" : total.toLocaleString()));
 }
 

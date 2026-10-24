@@ -18,7 +18,7 @@ from typing import Literal
 
 from pydantic import Field, model_validator
 
-from semantic_text2sql.models import DatabaseProfile, SchemaInfo, StrictModel
+from semantic_text2sql.models import DatabaseProfile, SchemaInfo, SemanticFilter, StrictModel
 
 MetadataStatus = Literal[
     "observed", "inferred", "reviewed", "approved", "stale", "conflicting"
@@ -125,6 +125,7 @@ class MetricCatalogEntry(ApprovableFact):
     source_relation: str = Field(min_length=1)
     formula: str = Field(min_length=1)
     required_fields: list[str] = Field(min_length=1)
+    mandatory_filters: list[SemanticFilter] = Field(default_factory=list)
     dimensions: list[str] = Field(default_factory=list)
     valid_time_grains: list[TimeGrain] = Field(min_length=1)
     unit: str = Field(min_length=1)

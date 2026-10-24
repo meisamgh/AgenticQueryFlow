@@ -3,8 +3,9 @@
 A conversational Text-to-SQL application for SQLite and allowlisted PostgreSQL databases. The
 normal path retrieves and grounds a compact schema, generates read-only SQL, and executes it.
 Failures, empty or unexpected `NULL` results, and explicit correctness reviews can activate a
-bounded evidence-gathering recovery agent. In assistant mode, the existing deterministic chart
-validator controls presentation and the top-layer model writes the client-facing answer.
+bounded evidence-gathering recovery agent. In assistant mode, a top-layer model chooses bounded
+tools, the governed Text-to-SQL engine supplies query results, and a separate plotting model
+may propose a chart over those accepted rows. Chart proposals remain deterministically validated.
 
 <p align="center">
   <img src="Arch-pic" alt="Semantic Text-to-SQL architecture" width="1000" />
@@ -25,10 +26,21 @@ top-layer model decides the action for every conversation turn, including greeti
 questions, plot follow-ups and analytical questions. Bounded tools ground factual answers;
 the chart-reusability gate and SQL safety checks remain deterministic. Analytical
 questions still use the same governed Text-to-SQL engine; the assistant cannot execute SQL
-directly. Set the flag to `false` to retain the older path. The earlier
+directly. Follow-up `ask_data` calls now carry the top model's resolved objective and typed
+changes into a provisional semantic contract. The contract is accepted only with a successfully
+validated and executed query. A plotting specialist operates on complete accepted result rows:
+it can propose type, axes and formatting but cannot execute SQL or invent data. If a requested
+dimension or time grain is absent, the result-reusability gate requires a new governed query.
+Set `TEXT2SQL_PLOTTING_PROVIDER` and `TEXT2SQL_PLOTTING_MODEL` to route plotting separately;
+they default to the selected request model. The plotting call shares the request-wide model
+budget. Set the assistant flag to `false` to retain the older path. The earlier
 [V6 bridge](docs/V6_CONVERSATIONAL_BRIDGE.md) remains available as a separate fallback.
 The assistant is not yet recommended for multi-user production deployment; see the documented
 limitations and evaluation requirements.
+V6.3 orchestration is still being hardened: the executable SQLite conversation tests cover
+total-to-grouped follow-ups, one-turn SQL plus plotting, chart-type reuse, and missing-grain
+rejection. This does **not** establish full business-semantic correctness or live-provider
+reliability. PostgreSQL and provider integration require separately configured credentials.
 Local cold/warm and transport measurements, including their limitations, are
 documented in [Performance](docs/PERFORMANCE.md).
 
@@ -63,8 +75,9 @@ The default context method is retrieval-only. Users may select optional Model 1 
 and choose the SQL model separately. Model 1 selects context; it does not write SQL. Historical SQL
 examples are disabled by default and, when enabled, are admitted only after compatibility checks.
 The legacy path can still use the selected SQL model for chart choice and result explanation.
-In V6.2 assistant mode these extra presentation-model calls are skipped; the top-layer model
-explains the validated result. A chart is never evidence that SQL is business-correct.
+In assistant mode the top-layer model explains the validated result. Plot requests can invoke
+the independent plotting model; a repeated validated chart does not require another model call.
+A chart is never evidence that SQL is business-correct.
 
 ### Stakeholder answers and charts
 
@@ -86,8 +99,8 @@ fresh query state within the same chat, without inheriting the previous SQL or c
 The inspector separates verified context, schema, recovery trace, measured pipeline timing,
 and token usage into dedicated tabs.
 The browser requests up to 500 read-only result rows, which the server holds in bounded RAM for
-later "plot it" follow-ups. A visualization-only follow-up uses those rows and deterministic
-chart selection: it does not recall data through an LLM or regenerate SQL. Results exceeding the
+later "plot it" follow-ups. In assistant mode, a visualization-only follow-up can use those rows
+with a bounded plotting-model call, without regenerating SQL. Results exceeding the
 row limit are not plotted as if complete. Saved history retains only a 20-row preview, so a server
 restart requires rerunning the question before plotting it.
 For an explicit plot request with more than two returned columns, the selected model may propose

@@ -16,15 +16,43 @@ from semantic_text2sql.conversation import (
     ConversationStore,
     classify_operation,
     requires_model_interpretation,
+    resolve_semantic_contract,
     resolve_turn,
 )
 from semantic_text2sql.models import (
     DEFAULT_MODEL,
     ConversationState,
+    RequestedChange,
     SchemaInfo,
+    SemanticContract,
+    SemanticFilter,
     StrategyHints,
     TokenUsage,
 )
+
+
+def test_typed_followup_preserves_unaffected_approved_requirements() -> None:
+    accepted = SemanticContract(
+        measures=["total_consumption"], aggregation="sum",
+        filters=[SemanticFilter(operand="Country", operator="=", value="Germany")],
+        required_literals=["Germany"], output_grain=["customer"],
+    )
+    updated = resolve_semantic_contract(
+        accepted,
+        original_question="Add currency category",
+        resolved_question="Total consumption in Germany by currency",
+        changes=[RequestedChange(
+            operation="ADD_DIMENSION", target="Currency", new_value="Currency",
+            source="model_interpretation",
+        )],
+    )
+    assert updated.measures == ["total_consumption"]
+    assert updated.aggregation == "sum"
+    assert updated.filters == accepted.filters
+    assert updated.required_literals == ["Germany"]
+    assert updated.grain == ["Currency"]
+    assert updated.output_grain == ["customer"]
+    assert accepted.grain == []
 
 
 def test_explicit_filter_value_correction_replaces_stored_question() -> None:

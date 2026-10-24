@@ -31,11 +31,16 @@ from semantic_text2sql.models import (
     ChatRequest,
     ChatResponse,
     ConversationState,
+    PresentationState,
+    RequestedChange,
+    ResultPresentation,
     StrictModel,
     TokenUsage,
 )
+from semantic_text2sql.plotting_service import design_chart
 from semantic_text2sql.result_cache import RecentResult
 from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded, use_request_budget
+from semantic_text2sql.visualization import parse_intent
 
 ToolName = Literal[
     "list_tables",
@@ -59,6 +64,8 @@ class ToolInput(StrictModel):
     """The only model-controlled tool arguments; never executable SQL."""
 
     objective: str = Field(min_length=1, max_length=4_000)
+    operation: Literal["NEW_QUERY", "REFINE", "CORRECTION", "COMPARE", "OPTIMIZE"] | None = None
+    changes: list[RequestedChange] = Field(default_factory=list, max_length=10)
 
 
 class AgentDecision(StrictModel):
@@ -93,7 +100,11 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
         "action": "CALL_TOOL",
         "intent": "NEW_QUERY",
         "tool": "ask_data",
-        "tool_arguments": {"objective": "Show total consumption by month"},
+        "tool_arguments": {
+            "objective": "Show total consumption by month",
+            "operation": "NEW_QUERY",
+            "changes": [],
+        },
         "instruction": None,
         "answer": None,
     },
@@ -101,7 +112,11 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
         "action": "CALL_TOOL",
         "intent": "VISUALIZE",
         "tool": "change_visualization",
-        "tool_arguments": {"objective": "Plot the accepted monthly result"},
+        "tool_arguments": {
+            "objective": "Plot the accepted monthly result",
+            "operation": None,
+            "changes": [],
+        },
         "instruction": None,
         "answer": None,
     },
@@ -119,8 +134,43 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
 _TOOL_INPUT_SCHEMA: dict[str, object] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["objective"],
-    "properties": {"objective": {"type": "string", "minLength": 1, "maxLength": 4_000}},
+    "required": ["objective", "operation", "changes"],
+    "properties": {
+        "objective": {"type": "string", "minLength": 1, "maxLength": 4_000},
+        "operation": {
+            "anyOf": [
+                {
+                    "type": "string",
+                    "enum": ["NEW_QUERY", "REFINE", "CORRECTION", "COMPARE", "OPTIMIZE"],
+                },
+                {"type": "null"},
+            ]
+        },
+        "changes": {
+            "type": "array",
+            "maxItems": 10,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["operation", "target", "previous_value", "new_value", "source"],
+                "properties": {
+                    "operation": {"type": "string", "enum": [
+                        "ADD_DIMENSION", "REMOVE_DIMENSION", "ADD_FILTER", "REMOVE_FILTER",
+                        "REPLACE_FILTER", "CHANGE_METRIC", "CHANGE_AGGREGATION", "CHANGE_GRAIN",
+                        "CHANGE_PERIOD", "CHANGE_RANKING", "COMPARE", "REQUEST_VISUALIZATION",
+                        "CHANGE_VISUALIZATION", "OTHER",
+                    ]},
+                    "target": {"type": "string", "maxLength": 200},
+                    "previous_value": {"type": ["string", "integer", "number", "null"]},
+                    "new_value": {"type": ["string", "integer", "number", "null"]},
+                    "source": {
+                        "type": "string",
+                        "enum": ["model_interpretation", "user_correction"],
+                    },
+                },
+            },
+        },
+    },
 }
 
 
@@ -159,8 +209,11 @@ _DECISION_INSTRUCTIONS = (
     "tool must be exactly one of: "
     + ", ".join(_TOOL_VALUES)
     + " or null. "
-    'For CALL_TOOL, tool_arguments is {"objective": "a short, scoped natural-language '
-    'objective"}; otherwise use null. The legacy instruction key is accepted '
+    'For CALL_TOOL, tool_arguments contains objective, operation and typed changes; '
+    'use operation NEW_QUERY only for independent questions, REFINE for follow-ups, '
+    'and null for non-SQL tools. Each change names an operation and target. '
+    'Preserve the previous accepted metric and filters unless a change explicitly '
+    'replaces them. Otherwise use null. The legacy instruction key is accepted '
     "for compatibility, but prefer tool_arguments. Complete JSON schema:\n"
     + json.dumps(AGENT_DECISION_SCHEMA, separators=(",", ":"))
     + "\nExamples:\n"
@@ -235,6 +288,14 @@ def _consistency_issue_lines(decision: AgentDecision) -> list[str]:
         and decision.tool not in intent_tools[decision.intent]
     ):
         issues.append(f"tool {decision.tool} is incompatible with intent {decision.intent}")
+    tool_input = decision.tool_arguments
+    if tool_input is not None and tool_input.operation is not None:
+        if decision.tool != "ask_data":
+            issues.append("tool_arguments.operation is only valid for ask_data")
+        elif decision.intent == "NEW_QUERY" and tool_input.operation != "NEW_QUERY":
+            issues.append("NEW_QUERY intent requires NEW_QUERY operation")
+        elif decision.intent == "MODIFY_QUERY" and tool_input.operation == "NEW_QUERY":
+            issues.append("MODIFY_QUERY must preserve the previous accepted analysis")
     return issues
 
 
@@ -653,6 +714,8 @@ class ConversationalAnalyticsAgent:
             "existing result use change_visualization, and for a new plot requiring data "
             "use ask_data. Do not claim a chart exists before observing a chart result. "
             "Use ask_data for new, corrected or optimized analytical questions; "
+            "If one request needs both new data and a chart, call ask_data first, then "
+            "change_visualization on the accepted result, then answer. "
             "use check_sql_correctness only when the client requests a correctness review. "
             "Only ask_data may delegate governed SQL generation. Never ask tools to "
             "execute arbitrary SQL. "
@@ -726,11 +789,45 @@ class ConversationalAnalyticsAgent:
                 decision = decision.model_copy(
                     update={"action": "CALL_TOOL", "tool": required_tool, "answer": None}
                 )
+        if (
+            decision.action == "ANSWER"
+            and state.base_response is not None
+            and state.base_response.generation is not None
+            and state.base_response.generation.accepted
+            and parse_intent(self._request.message).requested
+            and not any(item.get("tool") == "change_visualization" for item in state.observations)
+            and not (
+                state.base_response.presentation
+                and state.base_response.presentation.chart_spec
+            )
+        ):
+            decision = decision.model_copy(update={
+                "action": "CALL_TOOL",
+                "intent": "VISUALIZE",
+                "tool": "change_visualization",
+                "tool_arguments": ToolInput(objective=self._request.message),
+                "answer": None,
+            })
         merged_usage = self._sum_usage(state.usage, completion.usage)
         ledger = [*state.ledger, *completion.ledger]
         if decision.action != "CALL_TOOL":
             answer = decision.answer or "I could not complete that request safely."
             base = state.base_response or self._plain(answer)
+            plot_issue = next(
+                (
+                    item for item in reversed(state.observations)
+                    if item.get("tool") == "change_visualization"
+                    and item.get("status") != "CHART_READY"
+                ),
+                None,
+            )
+            if plot_issue is not None and not (
+                base.presentation and base.presentation.chart_spec
+            ):
+                # The final conversational model cannot claim an unavailable
+                # chart exists. Keep the governed SQL result, if any, intact.
+                answer = str(plot_issue.get("reason") or plot_issue.get("error")
+                             or "The requested chart is unavailable.")
             evidence_runs = [
                 str(item.get("run_id") or item["evidence_id"])
                 for item in state.observations
@@ -739,7 +836,12 @@ class ConversationalAnalyticsAgent:
             presentation = base.presentation
             if presentation is not None:
                 presentation = presentation.model_copy(
-                    update={"summary": answer[:1800], "source": "model"}
+                    update={
+                        "summary": answer[:1800], "source": "model",
+                        "chart_reason": (
+                            answer[:300] if plot_issue is not None else presentation.chart_reason
+                        ),
+                    }
                 )
             return state.model_copy(
                 update={
@@ -749,6 +851,10 @@ class ConversationalAnalyticsAgent:
                     "response": base.model_copy(
                         update={
                             "message": answer,
+                            "plot_status": (
+                                str(plot_issue.get("status") or "UNSUPPORTED")
+                                if plot_issue is not None else base.plot_status
+                            ),
                             "explanation": answer if base.explanation is not None else None,
                             "presentation": presentation,
                             "provenance": [*base.provenance, *evidence_runs],
@@ -835,7 +941,17 @@ class ConversationalAnalyticsAgent:
                         "steps": state.steps + 1,
                     })
             else:
-                request_message = self._request.message
+                # The specialist must receive the objective the orchestrator
+                # actually resolved, not the short surface follow-up.
+                request_message = question
+            assistant_operation = None
+            if tool == "ask_data" and state.decision.intent != "INVESTIGATE":
+                assistant_operation = tool_input.operation or {
+                    "NEW_QUERY": "NEW_QUERY",
+                    "MODIFY_QUERY": "REFINE",
+                    "CORRECT": "CORRECTION",
+                    "OPTIMIZE": "OPTIMIZE",
+                }.get(state.decision.intent)
             investigation_evidence = self._request.evidence
             if state.decision.intent == "INVESTIGATE":
                 accepted = previous if previous and previous.db_id == self._request.db_id else None
@@ -865,6 +981,14 @@ class ConversationalAnalyticsAgent:
                         else self._request.parent_run_id
                     ),
                     "evidence": investigation_evidence,
+                    "assistant_operation": assistant_operation,
+                    "assistant_changes": tool_input.changes,
+                    "assistant_original_question": self._request.message,
+                    "visualization": (
+                        False
+                        if tool == "ask_data" and parse_intent(self._request.message).requested
+                        else self._request.visualization
+                    ),
                 }
             )
             handler = (
@@ -965,36 +1089,77 @@ class ConversationalAnalyticsAgent:
                     message=last.message,
                 )
         elif tool == "change_visualization":
-            # The established visualization path is authoritative for the
-            # reusability gate, chart validity, and whether fresh SQL is needed.
-            prior_result = self.get_last_response(self._request.session_id, self._request.db_id)
-            message = self._request.message
-            if tool == "change_visualization" and message.strip().casefold() in {
-                "plot", "chart", "graph", "visualize", "visualise",
-            }:
-                # The top model chose a visualization of the accepted result;
-                # make a bare command referential for the existing reuse gate.
-                message = f"{message.strip()} it"
-            request = self._request.model_copy(update={"message": message})
-            response = await self.sql_handler(request)
-            facts = {"tool": tool, **self._result_facts(response)}
-            downstream_usage = response.token_usage
-            downstream_ledger = response.call_ledger
-            base = response.model_copy(
-                update={"token_usage": TokenUsage(), "call_ledger": []}
+            # The plotting specialist receives the exact accepted rows, including
+            # a result produced earlier in this same user turn. It cannot run SQL.
+            source = (
+                state.base_response
+                if state.base_response and state.base_response.generation
+                and state.base_response.generation.accepted
+                else last
             )
-            if (
-                tool == "change_visualization"
-                and prior_result and prior_result.generation and response.generation
-                and response.operation == "VISUALIZE"
-                and response.generation.sql == prior_result.generation.sql
-                and not any(item.kind == "MODEL" for item in response.call_ledger)
-            ):
-                downstream_ledger.append(
-                    CallLedgerEntry(
-                        component="result_cache_reuse", kind="TOOL", status="SUCCEEDED"
-                    )
+            plot_provider = os.environ.get("TEXT2SQL_PLOTTING_PROVIDER") or self._request.provider
+            plot_model = os.environ.get("TEXT2SQL_PLOTTING_MODEL") or self._request.model
+            plot_completer = self.completers.get(plot_provider)
+            if plot_completer is None:
+                facts = {"tool": tool, "error": "Plotting model provider is unavailable."}
+            else:
+                plot_objective = (
+                    self._request.message
+                    if self._request.message.strip().casefold().rstrip(".")
+                    in {"plot", "plot it", "chart", "chart it", "graph", "show the chart"}
+                    else question
                 )
+                outcome = await design_chart(
+                    result=source,
+                    objective=plot_objective,
+                    completer=plot_completer,
+                    provider=plot_provider,
+                    model=plot_model,
+                    budget=self._budget,
+                    previous=previous,
+                    db_id=self._request.db_id,
+                    fresh_result=source is state.base_response and source is not None,
+                    changes=tool_input.changes,
+                )
+                facts = {"tool": tool, "status": outcome.status, "reason": outcome.reason}
+                downstream_usage = outcome.usage
+                downstream_ledger = list(outcome.ledger)
+                if outcome.spec is None or source is None or source.generation is None:
+                    facts["error"] = outcome.reason
+                else:
+                    presentation = source.presentation or ResultPresentation(summary=source.message)
+                    presentation = presentation.model_copy(update={
+                        "chart_spec": outcome.spec,
+                        "chart_type": outcome.spec.chart_type,
+                        "x": outcome.spec.x,
+                        "y": outcome.spec.y,
+                        "title": outcome.spec.title,
+                        "x_label": outcome.spec.x_label,
+                        "y_label": outcome.spec.y_label,
+                        "number_format": outcome.spec.number_format,
+                        "time_format": outcome.spec.time_format,
+                    })
+                    base = ChatResponse(
+                        session_id=self._request.session_id,
+                        operation="VISUALIZE",
+                        resolved_question=source.generation.question,
+                        generation=source.generation,
+                        message=source.message,
+                        presentation=presentation,
+                        presentation_state=PresentationState(
+                            mode="chart", chart_type=outcome.spec.chart_type,
+                            x=outcome.spec.x, y=outcome.spec.y,
+                            title=outcome.spec.title, source_run_id=source.run_id,
+                        ),
+                        chart_recommendations=outcome.recommendations,
+                        plot_status="CHART_READY",
+                        provenance=[*source.provenance, "validated_plotting_result"],
+                    )
+                    facts["chart"] = outcome.spec.model_dump(exclude={"data"})
+                    facts["row_count"] = source.generation.row_count
+                    downstream_ledger.append(CallLedgerEntry(
+                        component="result_cache_reuse", kind="TOOL", status="SUCCEEDED"
+                    ))
         else:
             facts = {"tool": tool, "error": "Unsupported tool."}
         return state.model_copy(

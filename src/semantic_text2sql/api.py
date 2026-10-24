@@ -37,6 +37,7 @@ from semantic_text2sql.conversation import (
     intent_target,
     interpret_turn_detailed,
     requires_model_interpretation,
+    resolve_semantic_contract,
     resolve_turn,
 )
 from semantic_text2sql.conversational_agent import ConversationalAnalyticsAgent
@@ -833,6 +834,8 @@ def create_app(
         previous = conversations.get(request.session_id)
         has_matching_state = previous is not None and previous.db_id == request.db_id
         viz_intent = parse_intent(request.message, has_previous=has_matching_state)
+        if request.visualization is False:
+            viz_intent = viz_intent.model_copy(update={"requested": False})
         if request.visualization is True and not viz_intent.requested:
             viz_intent = viz_intent.model_copy(update={"requested": True})
         if viz_intent.requested and viz_intent.followup and previous and previous.last_sql:
@@ -1171,6 +1174,19 @@ def create_app(
                     provider=request.provider,
                     model=request.model,
                 )
+        if interpretation is None and assistant_enabled and request.assistant_operation:
+            interpretation = TurnInterpretation(
+                operation=request.assistant_operation,
+                depends_on_previous=request.assistant_operation != "NEW_QUERY",
+                resolved_instruction=request.message,
+                correction_type=request.feedback_category,
+                target=None,
+                confidence=1.0,
+                source="model",
+                provider=request.provider,
+                model=request.model,
+                changes=request.assistant_changes,
+            )
         if interpretation is None:
             rule_operation = classify_operation(
                 request.message,
@@ -1251,6 +1267,15 @@ def create_app(
             request.feedback_category,
             interpretation,
         )
+        if pending is not None and operation not in EXPLANATION_OPERATIONS:
+            pending = pending.model_copy(update={
+                "semantic_contract": resolve_semantic_contract(
+                    previous.semantic_contract if operation != "NEW_QUERY" and previous else None,
+                    original_question=request.assistant_original_question or request.message,
+                    resolved_question=pending.resolved_question,
+                    changes=request.assistant_changes or interpretation.changes,
+                )
+            })
         if operation == "RESET_CONTEXT":
             conversations.reset(request.session_id)
             return ChatResponse(
@@ -1378,11 +1403,7 @@ def create_app(
             context_model=request.context_model,
             execute=request.execute,
             max_rows=request.max_rows,
-            semantic_contract=(
-                previous.semantic_contract
-                if operation == "OPTIMIZE" and previous and previous.semantic_contract
-                else None
-            ),
+            semantic_contract=pending.semantic_contract,
             previous_intent=(
                 previous.semantic_contract
                 if operation != "NEW_QUERY" and previous and previous.semantic_contract

@@ -166,7 +166,7 @@ def test_agent_delegates_analytical_question_and_explains_it(registry: Any, tmp_
         )
     )
     assert response.message == "The query ran."
-    assert calls == ["How many customers are there?"]
+    assert calls == ["Count customers"]
     assert completer.calls == 2
 
 
@@ -531,7 +531,16 @@ def test_plot_followup_is_selected_by_top_model_and_uses_no_new_sql(
     monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
     monkeypatch.setenv("TEXT2SQL_GLOSSARY_ROOT", str(tmp_path / "glossaries"))
     monkeypatch.setenv("TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED", "true")
+    monkeypatch.setenv("TEXT2SQL_PLOTTING_PROVIDER", "groq")
     model = SQLModel()
+    plot_completer = Completer([{
+        "primary_chart": {
+            "chart_type": "bar", "x": "country", "x_components": [],
+            "y": "total", "y_measures": ["total"], "series": None,
+            "reason": "Compare customer counts by country.",
+        },
+        "alternative_charts": [],
+    }])
     completer = Completer(
         [
             {"action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
@@ -556,7 +565,7 @@ def test_plot_followup_is_selected_by_top_model_and_uses_no_new_sql(
     client = TestClient(
         create_app(
             TextToSQLAgent(registry, model),
-            conversation_completers={"agentrouter": completer},
+            conversation_completers={"agentrouter": completer, "groq": plot_completer},
             run_history=history,
         )
     )
@@ -589,6 +598,7 @@ def test_plot_followup_is_selected_by_top_model_and_uses_no_new_sql(
     )
     assert model.calls == 1
     assert completer.calls == 4
+    assert plot_completer.calls == 1
     saved_plot = history.get(plotted.json()["run_id"], "agent-chart")
     assert saved_plot is not None
     assert saved_plot.response_payload["message"] == plotted.json()["message"]
@@ -597,6 +607,7 @@ def test_plot_followup_is_selected_by_top_model_and_uses_no_new_sql(
     assert bare_plot.json()["presentation"]["chart_spec"] is not None
     assert model.calls == 1
     assert completer.calls == 6
+    assert plot_completer.calls == 1
     reset = client.post("/api/chat", json={**base, "message": "Start over"})
     assert reset.status_code == 200
     assert reset.json()["operation"] == "RESET_CONTEXT"
@@ -732,7 +743,9 @@ def test_structured_schema_enumerates_every_allowed_value() -> None:
         assert expected in tool_enum
     assert "run_arbitrary_sql" not in tool_enum
 
-    assert arguments_spec["anyOf"][0]["required"] == ["objective"]  # type: ignore[index]
+    assert arguments_spec["anyOf"][0]["required"] == [  # type: ignore[index]
+        "objective", "operation", "changes"
+    ]
     assert AGENT_DECISION_SCHEMA["required"] == [
         "action", "intent", "tool", "tool_arguments", "instruction", "answer"
     ]
@@ -760,7 +773,7 @@ def test_agent_prompt_carries_schema_rules_and_examples(
     assert "action must be exactly one of: ANSWER, CALL_TOOL." in prompt
     assert "NEW_QUERY" in prompt and "MODIFY_QUERY" in prompt
     assert "tool must be exactly one of: list_tables" in prompt
-    assert 'tool_arguments is {"objective": "a short, scoped natural-language objective"}' in prompt
+    assert "tool_arguments contains objective, operation and typed changes" in prompt
     assert '"intent":"NEW_QUERY"' in prompt  # NEW_QUERY example
     assert '"intent":"VISUALIZE"' in prompt  # VISUALIZE example
     assert '"action":"ANSWER"' in prompt  # ANSWER example
@@ -792,7 +805,7 @@ def test_prose_intent_is_repaired_not_converted_for_total_consumption(
     response = asyncio.run(
         agent.run(ChatRequest(session_id="prose", db_id="shop", message="total consumption"))
     )
-    assert calls == ["total consumption"]  # the tool executed exactly once
+    assert calls == ["Show total consumption"]  # the resolved objective was forwarded
     assert response.message == "The query ran."
     # Measured model-call count: 1 rejected attempt + 1 repair + 1 final answer, no more.
     assert len(completer.calls) == 3
@@ -864,7 +877,7 @@ def test_prose_wrapped_json_never_executes_before_repair(registry: Any, tmp_path
     response = asyncio.run(_decision_agent(registry, tmp_path, completer, calls).run(
         ChatRequest(session_id="wrapped", db_id="shop", message="total consumption")
     ))
-    assert calls == ["total consumption"]
+    assert calls == ["Show total consumption"]
     assert len(completer.calls) == 3
     statuses = [
         entry.status for entry in response.call_ledger
@@ -918,7 +931,7 @@ def test_removed_clarify_action_repairs_to_query_for_total_consumption(
     response = asyncio.run(_decision_agent(registry, tmp_path, completer, calls).run(
         ChatRequest(session_id="no-clarify", db_id="shop", message="total consumption")
     ))
-    assert calls == ["total consumption"]
+    assert calls == ["Show total consumption"]
     assert len(completer.calls) == 3
     assert "Which date range" not in response.message
 
@@ -1000,8 +1013,9 @@ def test_plot_it_valid_visualize_decision_is_not_repaired(
     response = asyncio.run(
         agent.run(ChatRequest(session_id="viz", db_id="shop", message="plot it"))
     )
-    assert calls == ["plot it"]
-    assert response.message == "Here is a chart of the stored result."
+    assert calls == []  # no accepted result exists; plotting never invokes SQL directly
+    assert response.presentation is None
+    assert response.message
     assert len(completer.calls) == 2  # one decision per round; zero repair calls
 
 
@@ -1031,7 +1045,7 @@ def test_add_currency_category_prose_intent_is_repaired_to_modify_query(
             ChatRequest(session_id="modify", db_id="shop", message="add currency category")
         )
     )
-    assert calls == ["add currency category"]
+    assert calls == ["Add a currency category breakdown"]
     assert response.message == "The query ran with the currency breakdown."
     assert len(completer.calls) == 3  # 1 invalid + 1 repaired + 1 final answer
     assert "Validation issues:" in completer.prompts[1]

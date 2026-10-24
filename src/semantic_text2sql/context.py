@@ -184,6 +184,29 @@ def model_context_payload(
     ]
     if formulas:
         payload["approved_formulas"] = formulas
+    hard_fields = (
+        "approved_metrics", "mandatory_metric_filters", "required_output_aliases",
+        "required_literals", "outputs", "filters", "measures", "aggregation_stages",
+        "selectors", "output_operations", "named_outputs", "structural_formulas",
+        "grain", "input_grain", "output_grain", "temporal_boundaries",
+        "comparison_periods", "tie_policy", "aggregation", "requires_grouping",
+        "requires_distinct", "requires_ordering", "limit", "required_columns",
+    )
+    advisory_fields = (
+        "advisory_outputs", "entities", "proposed_tables", "proposed_joins",
+        "proposed_filters", "ambiguities", "interpreter_confidence", "rationale",
+    )
+    contract_values = contract.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+    payload["resolved_analytical_contract"] = {
+        "original_question": contract.original_question or question,
+        "resolved_question": contract.resolved_question or question,
+        "hard_requirements": {
+            key: contract_values[key] for key in hard_fields if key in contract_values
+        },
+        "advisory_hints": {
+            key: contract_values[key] for key in advisory_fields if key in contract_values
+        },
+    }
     if historical_examples:
         payload["historical_examples"] = [
             {

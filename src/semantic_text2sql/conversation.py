@@ -17,6 +17,8 @@ from semantic_text2sql.models import (
     ConversationState,
     ModelProvider,
     RequestedChange,
+    SemanticContract,
+    SemanticFilter,
     TokenUsage,
     TurnInterpretation,
 )
@@ -53,7 +55,69 @@ __all__ = [
     "interpret_turn_detailed",
     "requires_model_interpretation",
     "resolve_turn",
+    "resolve_semantic_contract",
 ]
+
+
+def resolve_semantic_contract(
+    previous: SemanticContract | None,
+    *,
+    original_question: str,
+    resolved_question: str,
+    changes: list[RequestedChange],
+) -> SemanticContract:
+    """Apply typed follow-up deltas without discarding unaffected requirements.
+
+    The values remain symbolic until verified against schema and glossary. A
+    delta never grants a new table or database permission.
+    """
+    base = previous.model_copy(deep=True) if previous else SemanticContract()
+    values = base.model_dump()
+    values["original_question"] = original_question
+    values["resolved_question"] = resolved_question
+    for change in changes:
+        target = change.target.strip()
+        replacement = str(change.new_value).strip() if change.new_value is not None else target
+        if change.operation == "ADD_DIMENSION" and replacement:
+            if replacement.casefold() not in {item.casefold() for item in values["grain"]}:
+                values["grain"].append(replacement)
+            values["requires_grouping"] = True
+        elif change.operation == "REMOVE_DIMENSION":
+            values["grain"] = [
+                item for item in values["grain"] if item.casefold() != target.casefold()
+            ]
+            values["requires_grouping"] = bool(values["grain"])
+        elif change.operation == "CHANGE_METRIC" and replacement:
+            values["measures"] = [replacement]
+        elif change.operation == "CHANGE_AGGREGATION" and replacement.casefold() in {
+            "count", "sum", "average", "min", "max"
+        }:
+            values["aggregation"] = replacement.casefold()
+        elif change.operation == "CHANGE_GRAIN" and replacement:
+            values["output_grain"] = [replacement]
+        elif change.operation == "ADD_FILTER" and change.new_value is not None:
+            candidate = SemanticFilter(operand=target, operator="=", value=change.new_value)
+            values["filters"] = [
+                item for item in values["filters"]
+                if item["operand"].casefold() != target.casefold()
+            ] + [candidate.model_dump()]
+        elif change.operation == "REMOVE_FILTER":
+            values["filters"] = [
+                item for item in values["filters"]
+                if item["operand"].casefold() != target.casefold()
+            ]
+        elif change.operation == "REPLACE_FILTER" and change.new_value is not None:
+            values["filters"] = [
+                {**item, "value": change.new_value}
+                if item["operand"].casefold() == target.casefold() else item
+                for item in values["filters"]
+            ]
+        elif change.operation == "CHANGE_PERIOD" and replacement:
+            values["comparison_periods"] = [replacement]
+        elif change.operation == "COMPARE" and replacement:
+            if replacement not in values["comparison_periods"]:
+                values["comparison_periods"].append(replacement)
+    return SemanticContract.model_validate(values)
 EXPLANATION_OPERATIONS = frozenset(
     {
         "EXPLAIN",
