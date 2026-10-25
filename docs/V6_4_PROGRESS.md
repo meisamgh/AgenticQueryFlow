@@ -1,5 +1,10 @@
 # V6.4 progress checkpoint
 
+October 25 chart-follow-up improvement (review branch, tests not run here):
+
+- The plotting model now receives the existing validated ChartSpec and the Top-layer's typed changes. Chart-type-only edits preserve prior x/y/measure/series encodings; model proposals that silently alter them are rejected and a deterministic validated fallback retains the existing data. Analytical filter/period/grain changes still require governed SQL where the reusability gate finds the result insufficient.
+- Added focused mocked-model and PlottingService regression tests for prompt context, type-only edits, incorrect model encodings, and period-change requery. Tests still require execution in the local project environment; this is IMPLEMENTED_UNVERIFIED, not a claim of a passing suite.
+
 October 25 provider continuation (uncommitted):
 
 - Live, credential-backed Groq probes used only a synthetic decision prompt: text, JSON-object and tiny strict schema returned HTTP 200. The full Queryflow AgentDecision instructions returned HTTP 400 `json_validate_failed` in strict-schema mode; the same full prompt succeeded in JSON-object mode and passed local Pydantic validation. This establishes a prompt/schema-size-dependent Groq/Qwen strict-decoding failure, not a missing model or invalid key.
