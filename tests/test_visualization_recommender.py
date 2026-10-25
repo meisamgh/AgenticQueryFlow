@@ -6,8 +6,16 @@ import asyncio
 import json
 from typing import Any
 
-from semantic_text2sql.models import RequestedChange, TokenUsage
-from semantic_text2sql.plotting_service import _type_only_chart_change
+from semantic_text2sql.models import (
+    ChatResponse,
+    GenerateResponse,
+    RequestedChange,
+    ResultPresentation,
+    StrategyHints,
+    TokenUsage,
+)
+from semantic_text2sql.plotting_service import _type_only_chart_change, design_chart
+from semantic_text2sql.runtime import RequestBudget
 from semantic_text2sql.visualization import VisualizationError, VisualizationIntent, plan_chart
 from semantic_text2sql.visualization_recommender import (
     ChartRecommendations,
@@ -319,6 +327,62 @@ def test_only_unambiguous_chart_type_changes_preserve_existing_encodings() -> No
         "Change to a line chart", columns, prior,
         [RequestedChange(operation="CHANGE_PERIOD", target="year", new_value="2026")],
     )
+
+
+def test_plotting_fallback_preserves_previous_metric_and_requeries_changes() -> None:
+    columns = ["country", "revenue", "cost"]
+    rows = [["Germany", 100.0, 60.0], ["France", 80.0, 40.0]]
+    prior = plan_chart(
+        VisualizationIntent(requested=True, chart_type="bar", x="country", y="revenue"),
+        question="", columns=columns, rows=rows, truncated=False,
+    )
+    result = ChatResponse(
+        session_id="same", operation="NEW_QUERY",
+        resolved_question="Revenue by country", message="Here is revenue by country.",
+        generation=GenerateResponse(
+            db_id="shop", question="Revenue by country", provider="agentrouter",
+            model="test", strategy=StrategyHints(mode="exact"),
+            sql="SELECT country, revenue, cost FROM sales", accepted=True,
+            columns=columns, rows=rows, row_count=2,
+        ),
+        presentation=ResultPresentation(summary="Revenue by country", chart_spec=prior),
+    )
+
+    class WrongMetricModel:
+        calls = 0
+
+        async def complete_detailed(self, *, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            self.calls += 1
+            return json.dumps({
+                "primary_chart": {
+                    "chart_type": "horizontal_bar", "x": "country",
+                    "x_components": [], "y": "cost", "y_measures": ["cost"],
+                    "series": None, "reason": "Inappropriate measure switch.",
+                }, "alternative_charts": [],
+            }), TokenUsage()
+
+    chart_model = WrongMetricModel()
+    outcome = asyncio.run(design_chart(
+        result=result, objective="Change the chart to a horizontal bar",
+        completer=chart_model, provider="agentrouter", model="test",
+        budget=RequestBudget(timeout_seconds=10, max_model_calls=3),
+    ))
+    assert chart_model.calls == 1
+    assert outcome.status == "CHART_READY"
+    assert outcome.spec is not None
+    assert outcome.spec.chart_type == "horizontal_bar"
+    assert outcome.spec.x == "country"
+    assert outcome.spec.y == "revenue"
+    assert outcome.spec.data == prior.data
+
+    blocked = asyncio.run(design_chart(
+        result=result, objective="Change to a horizontal bar for 2026",
+        completer=chart_model, provider="agentrouter", model="test",
+        budget=RequestBudget(timeout_seconds=10, max_model_calls=3),
+        changes=[RequestedChange(operation="CHANGE_PERIOD", target="year", new_value="2026")],
+    ))
+    assert blocked.status == "REQUERY_REQUIRED"
+    assert chart_model.calls == 1
 
 
 def test_truncated_result_yields_no_recommendation() -> None:
