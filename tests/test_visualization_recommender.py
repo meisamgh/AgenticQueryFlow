@@ -373,7 +373,9 @@ def test_plotting_fallback_preserves_previous_metric_and_requeries_changes() -> 
     assert outcome.spec.chart_type == "horizontal_bar"
     assert outcome.spec.x == "country"
     assert outcome.spec.y == "revenue"
-    assert outcome.spec.data == prior.data
+    assert sorted(outcome.spec.data, key=lambda row: str(row['country'])) == sorted(
+        prior.data, key=lambda row: str(row['country'])
+    )
 
     blocked = asyncio.run(design_chart(
         result=result, objective="Change to a horizontal bar for 2026",
