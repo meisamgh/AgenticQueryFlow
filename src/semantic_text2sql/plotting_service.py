@@ -7,6 +7,7 @@ row identity, chart shape, and truncation before any proposal reaches Plotly.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import re
 from typing import Any, Literal, cast
 
 from semantic_text2sql.analytics_planner import plan_analytics
@@ -22,7 +23,12 @@ from semantic_text2sql.models import (
 )
 from semantic_text2sql.result_cache import RecentResult
 from semantic_text2sql.runtime import RequestBudget
-from semantic_text2sql.visualization import VisualizationError, parse_intent, plan_chart
+from semantic_text2sql.visualization import (
+    VisualizationError,
+    parse_intent,
+    plan_chart,
+    requested_plot_columns,
+)
 from semantic_text2sql.visualization_recommender import (
     materialize_recommendation,
     recommend_charts,
@@ -32,6 +38,35 @@ from semantic_text2sql.visualization_recommender import (
 PlotStatus = Literal[
     "CHART_READY", "REQUERY_REQUIRED", "CLARIFICATION_REQUIRED", "UNSUPPORTED"
 ]
+
+
+def _type_only_chart_change(
+    objective: str,
+    columns: list[str],
+    previous_chart: ChartSpec | None,
+    changes: list[RequestedChange] | None,
+) -> bool:
+    """Preserve existing encodings only for unambiguous presentation-only type edits."""
+    if previous_chart is None or any(
+        change.operation not in {"CHANGE_VISUALIZATION", "REQUEST_VISUALIZATION"}
+        for change in (changes or [])
+    ):
+        return False
+    if re.search(
+        r"\b(?:x[- ]?axis|y[- ]?axis|axes|series|split\s+by|colou?r\s+by|"
+        r"filter|only|exclude|include|compare|instead\s+of|per\s+month|"
+        r"monthly|weekly|quarterly|yearly|daily|sort|rank|order)\b",
+        objective,
+        re.I,
+    ):
+        return False
+    existing = {
+        previous_chart.x, previous_chart.y, *previous_chart.x_components,
+        *previous_chart.y_measures,
+        *([previous_chart.series] if previous_chart.series else []),
+    }
+    # Naming an additional result column is a potential axis/metric/series edit.
+    return requested_plot_columns(objective, columns).issubset(existing)
 
 
 @dataclass(frozen=True)
@@ -185,6 +220,11 @@ async def design_chart(
     }:
         return PlottingOutcome("CHART_READY", "Reused the validated chart.", spec=prior)
 
+    preserve_encodings = bool(
+        intent.explicit_type
+        and _type_only_chart_change(objective, generation.columns, prior, changes)
+    )
+
     # The dedicated model sees a bounded profile/sample, not the full result;
     # its proposal is always rechecked against every executed row.
     calls_before = budget.model_calls
@@ -198,6 +238,9 @@ async def design_chart(
         truncated=False,
         budget=budget,
         required_chart_type=intent.chart_type if intent.explicit_type else None,
+        previous_chart=prior,
+        chart_changes=changes,
+        preserve_previous_encodings=preserve_encodings,
     )
     model_called = budget.model_calls > calls_before
     ledger = (
@@ -231,8 +274,18 @@ async def design_chart(
     # A failed model proposal cannot enter the client. A deterministic chart
     # may still be possible, and is explicitly identified as a fallback.
     try:
+        fallback_intent = intent
+        if preserve_encodings and prior is not None:
+            fallback_intent = intent.model_copy(update={
+                "x": prior.x,
+                "x_components": list(prior.x_components),
+                "y": prior.y,
+                "y_measures": list(prior.y_measures),
+                "series": prior.series,
+                "size": prior.size,
+            })
         spec = plan_chart(
-            intent,
+            fallback_intent,
             question=objective,
             columns=generation.columns,
             rows=generation.rows,
