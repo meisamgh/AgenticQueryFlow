@@ -6,8 +6,8 @@ row identity, chart shape, and truncation before any proposal reaches Plotly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import re
+from dataclasses import dataclass, field
 from typing import Any, Literal, cast
 
 from semantic_text2sql.analytics_planner import plan_analytics
