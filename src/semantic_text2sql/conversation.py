@@ -158,6 +158,12 @@ def resolve_semantic_contract(
                 for item in values["filters"]
             ]
         elif change.operation == "CHANGE_PERIOD" and replacement:
+            if (
+                change.previous_value is not None
+                and values["active_period"] is not None
+                and str(change.previous_value) != str(values["active_period"])
+            ):
+                raise ValueError("CHANGE_PERIOD does not match the accepted active period.")
             old_period = (
                 str(change.previous_value)
                 if change.previous_value is not None else values["active_period"]
@@ -179,6 +185,10 @@ def resolve_semantic_contract(
                         )
                     ]
             values["active_period"] = replacement
+            values["comparison_periods"] = [
+                period for period in values["comparison_periods"]
+                if str(period) != replacement
+            ]
         elif change.operation == "COMPARE" and replacement:
             if replacement not in values["comparison_periods"]:
                 values["comparison_periods"].append(replacement)

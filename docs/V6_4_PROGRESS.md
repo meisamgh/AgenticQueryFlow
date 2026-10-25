@@ -40,3 +40,18 @@ October 24 continuation (uncommitted):
 Still open: full semantic equivalence (derived formulas, temporal bounds, ranking, units, proven join fanout), complete delta/state semantics, all plotting-source identity/cancellation cases, conversational tool sequence consolidation, production identity/authorization, and the requested complete SQLite scenario matrix. See `V6_4_MATRIX.md` for individual statuses.
 
 To resume: read this file and `V6_4_MATRIX.md`; inspect `git status`; complete the next high-severity NOT_STARTED or IN_PROGRESS row. Do not reimplement already VERIFIED behavior. Run `uv run pytest -q`, `uv run ruff check src tests`, `uv run mypy src`, `deno test --allow-read tests/frontend_rendering.cjs tests/voice_input_test.mjs`, and `git diff --check` after code changes. Record live-provider/PostgreSQL tests separately as NOT RUN when unavailable.
+
+October 25 conversation-hardening checkpoint (uncommitted):
+
+- The Top-layer prompt now includes the accepted analytical contract's approved metrics, formulas, mandatory filters, period/comparison boundaries, grouping, ranking, measure and correction context. A prompt regression confirms key fields are actually sent.
+- A stale `CHANGE_PERIOD.previous_value` is rejected without mutating the previous contract. Simple final ranking validates the requested ranked metric as well as direction/limit. Complex ranking still remains `UNRESOLVED`.
+- `parent_run_id` no longer writes a historical snapshot into accepted state before executing the new request. Its state and complete cached result are request-local; a successful branch commits against the current live version. Failed SQL no longer persists a failure-state copy as accepted state. An unresolved-branch regression and the existing branch/restart integration test pass.
+- SQL safety success with unresolved semantic findings is now labeled `SQL_SEMANTICS_UNRESOLVED`, not `SQL_SAFETY_VALID`; execution still does not prove business correctness.
+- Verification: full Python pytest passed with one skipped test, 72 Deno frontend tests passed, Ruff passed, mypy passed over 55 source files. Live PostgreSQL/provider tests were NOT RUN. Full derived-formula/date equivalence, cancellation matrix and all 32 requested SQLite scenarios remain open; do not mark V6.4 complete.
+
+October 25 PR #3 chart-follow-up integration (local, uncommitted):
+
+- Reviewed the open GitHub PR `#3` and integrated its chart-follow-up behavior into the local working tree without merging the PR or overwriting the earlier uncommitted conversation fixes.
+- The plotting model receives the prior validated chart encodings and Top-layer typed changes. A chart-type-only request cannot silently switch x, y, metric, components, or series; invalid proposals fall back to deterministic chart validation preserving the prior encodings. A period change still returns `REQUERY_REQUIRED` before the plotting model is called.
+- Replaced the chart proposal prompt with the requested expert business-analytics visualization-planner instructions, retaining the application's JSON schema and bounded result sample.
+- Verification: focused visualization/V6.3 tests, full Python pytest (one skipped), 72 Deno frontend tests, Ruff, mypy over 55 source files, and `git diff --check` passed. No live-provider call was made; improved chart quality in live use remains unmeasured.

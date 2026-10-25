@@ -512,7 +512,8 @@ def _fanout_findings(
 
 
 def _ranking_findings(root: exp.Expression, contract: SemanticContract) -> list[SemanticFinding]:
-    if not contract.requires_ordering and not contract.ranking_direction and contract.limit is None:
+    if (not contract.requires_ordering and not contract.ranking_direction
+            and contract.limit is None and not contract.ranked_metric):
         return []
     findings: list[SemanticFinding] = []
     outer_order = root.args.get("order")
@@ -533,6 +534,33 @@ def _ranking_findings(root: exp.Expression, contract: SemanticContract) -> list[
                 else "RANKING_DIRECTION_MISMATCH",
                 evidence=f"The first final ORDER BY key is {actual_direction}; expected "
                          f"{contract.ranking_direction}.",
+            ))
+    if contract.ranked_metric:
+        first = (
+            outer_order.expressions[0]
+            if isinstance(outer_order, exp.Order) and outer_order.expressions else None
+        )
+        key = first.this if isinstance(first, exp.Ordered) else None
+        expected_name = contract.ranked_metric.split(".")[-1].casefold()
+        actual_name = key.name.casefold() if isinstance(key, exp.Column) else None
+        if actual_name == expected_name:
+            findings.append(SemanticFinding(
+                status="PASS", code="RANKED_METRIC_MATCH",
+                evidence=f"The final ORDER BY uses {contract.ranked_metric}.",
+            ))
+        else:
+            projected_names = {
+                expression.alias_or_name.casefold()
+                for expression in root.expressions if expression.alias_or_name
+            }
+            uncertain = (
+                complex_ranking or not isinstance(key, exp.Column)
+                or expected_name not in projected_names
+            )
+            findings.append(SemanticFinding(
+                status="UNRESOLVED" if uncertain else "FAIL",
+                code="RANKED_METRIC_UNPROVEN" if uncertain else "RANKED_METRIC_MISMATCH",
+                evidence=f"The final ORDER BY does not directly use {contract.ranked_metric}.",
             ))
     outer_limit = root.args.get("limit")
     if contract.limit is not None:

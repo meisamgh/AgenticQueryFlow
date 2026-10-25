@@ -24,6 +24,7 @@ from semantic_text2sql.models import (
 from semantic_text2sql.models import (
     ChartSpec,
     ChartType,
+    RequestedChange,
     StrictModel,
     TokenUsage,
 )
@@ -530,27 +531,51 @@ class LLMChartProposals(StrictModel):
     alternative_charts: list[LLMChartProposal] = Field(default_factory=list, max_length=3)
 
 
-_VIZ_PROMPT = """Propose faithful charts for one executed analytical result.
-Return ONLY one JSON object with exactly these keys:
+_VIZ_PROMPT = """You are an expert Business Analytics Visualization Planner.
+Given the current user request, previous validated ChartSpec, typed requested
+changes, and executed SQL result, select the most informative and accurate
+visualization.
+
+Instructions:
+1. Understand whether the user wants a new chart or a modification of the previous chart.
+2. For chart-type-only changes, preserve ALL prior chart encodings exactly:
+   X-axis, Y-axis, measures, series, and underlying data.
+3. For explicitly requested axis or series changes, use only compatible columns
+   already present in the executed result.
+4. Select charts based on analytical intent: trends, comparisons, distributions,
+   relationships, composition, or ranking.
+5. Consider column types, cardinality, temporal granularity, metric units, and
+   business interpretability.
+6. Never silently change the metric, grouping, filters, time period, or underlying analysis.
+7. Never invent values, aggregate rows, fill missing data, generate SQL, or produce JavaScript.
+8. If different analytical data is required, do not fabricate a chart. The Top-layer
+   LLM and governed SQL pipeline own analytical changes.
+9. Return only valid JSON matching the existing LLMChartProposals schema: one
+   primary chart and up to three meaningful alternatives.
+
+JSON schema shape (return ONLY this object):
 {{"primary_chart": {{"chart_type": str, "x": str|null, "x_components": [str], "y": str,
 "y_measures": [str], "series": str|null, "reason": str}},
 "alternative_charts": [same shape, up to 3]}}
 Allowed chart_type values: {chart_types}.
-Rules:
-- Only use columns from "Columns"; never invent columns, values or measures.
-- Use only explicitly requested plot columns when the question names two or more.
-- For separate Year and Month columns, you may set x="Year-Month" and
-  x_components=["Year", "Month"] for a monthly time axis. Otherwise x_components=[].
-- Do not aggregate, fill gaps, or compute a new measure.
-- y and every y_measures entry must be a numeric measure column.
-- Prefer multiple measures only when their units are comparable (see "Units").
-- Explain the business reason in one short sentence ("reason").
-- No JavaScript, no ECharts options, no SQL.
-Question: {question}
-Required chart type (if specified by the user): {required_chart_type}
-Columns (name: role, unit, distinct values): {profile}
-Row count: {rows_count}
-Bounded sample (first rows): {sample}
+Use only explicitly requested plot columns when the request names two or more.
+For separate Year and Month columns, you may set x="Year-Month" and
+x_components=["Year", "Month"] for a monthly time axis. Otherwise x_components=[].
+The y and y_measures fields must reference numeric result columns. Prefer multiple
+measures only when their units are compatible. Keep reason to one short sentence.
+
+Context:
+- Current user chart request: {question}
+- Previous validated chart: {previous_chart}
+- Top-layer requested changes: {chart_changes}
+- Preserve existing encodings: {preserve_previous_encodings}
+- Required chart type: {required_chart_type}
+- Available columns and profiles: {profile}
+- Executed row count: {rows_count}
+- Bounded sample: {sample}
+
+Prioritize analytical correctness, stakeholder readability, and faithful
+preservation of the accepted result.
 """
 
 
@@ -590,11 +615,24 @@ def _validated_rank_chart(
     truncated: bool,
     score: float,
     required_chart_type: ChartType | None = None,
+    previous_chart: ChartSpec | None = None,
+    preserve_previous_encodings: bool = False,
 ) -> RecommendedChart | None:
     """Validate one LLM proposal through the deterministic chart pipeline."""
     named_columns = set(columns)
     if required_chart_type is not None and proposal.chart_type != required_chart_type:
         return None
+    if preserve_previous_encodings and previous_chart is not None:
+        proposed_measures = proposal.y_measures or ([proposal.y] if proposal.y else [])
+        existing_measures = previous_chart.y_measures or [previous_chart.y]
+        if (
+            proposal.x != previous_chart.x
+            or proposal.x_components != previous_chart.x_components
+            or proposal.y != previous_chart.y
+            or proposed_measures != existing_measures
+            or proposal.series != previous_chart.series
+        ):
+            return None
     requested_columns = requested_plot_columns(question, columns)
     components = proposal.x_components
     if components and (len(components) != 2 or proposal.x != "Year-Month"):
@@ -654,6 +692,9 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     timeout_seconds: float = 12.0,
     budget: RequestBudget | None = None,
     required_chart_type: ChartType | None = None,
+    previous_chart: ChartSpec | None = None,
+    chart_changes: list[RequestedChange] | None = None,
+    preserve_previous_encodings: bool = False,
 ) -> tuple[ChartRecommendations | None, TokenUsage, int]:
     """One bounded model call proposing charts for an executed result.
 
@@ -666,10 +707,27 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     if truncated or not rows or len(columns) < 2:
         return None, usage, 0
     profile, sample = _result_profile(columns, rows)
+    prior_context = (
+        json.dumps({
+            "chart_type": previous_chart.chart_type,
+            "x": previous_chart.x,
+            "x_components": previous_chart.x_components,
+            "y": previous_chart.y,
+            "y_measures": previous_chart.y_measures,
+            "series": previous_chart.series,
+        }, separators=(",", ":")) if previous_chart is not None else "None"
+    )
+    requested_changes = json.dumps(
+        [change.model_dump(mode="json", exclude_none=True) for change in (chart_changes or [])],
+        separators=(",", ":"),
+    )
     prompt = _VIZ_PROMPT.format(
         chart_types=", ".join(sorted(_TYPE_BASE)),
         question=question,
         required_chart_type=required_chart_type or "model may choose",
+        previous_chart=prior_context,
+        chart_changes=requested_changes,
+        preserve_previous_encodings=preserve_previous_encodings,
         profile=profile,
         rows_count=len(rows),
         sample=sample,
@@ -705,6 +763,8 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
         truncated=truncated,
         score=1.0,
         required_chart_type=required_chart_type,
+        previous_chart=previous_chart,
+        preserve_previous_encodings=preserve_previous_encodings,
     )
     if primary is None:
         return None, usage, round((perf_counter() - started) * 1000)
@@ -729,6 +789,8 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
             truncated=truncated,
             score=llm_score,
             required_chart_type=required_chart_type,
+            previous_chart=previous_chart,
+            preserve_previous_encodings=preserve_previous_encodings,
         )
         if validated is None:
             continue

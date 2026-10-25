@@ -6,7 +6,16 @@ import asyncio
 import json
 from typing import Any
 
-from semantic_text2sql.models import TokenUsage
+from semantic_text2sql.models import (
+    ChatResponse,
+    GenerateResponse,
+    RequestedChange,
+    ResultPresentation,
+    StrategyHints,
+    TokenUsage,
+)
+from semantic_text2sql.plotting_service import _type_only_chart_change, design_chart
+from semantic_text2sql.runtime import RequestBudget
 from semantic_text2sql.visualization import VisualizationError, VisualizationIntent, plan_chart
 from semantic_text2sql.visualization_recommender import (
     ChartRecommendations,
@@ -227,7 +236,7 @@ def test_model_can_select_combined_time_axis_but_not_unrequested_columns() -> No
 def test_model_chart_prompt_receives_only_a_bounded_row_sample() -> None:
     class CapturingModel:
         async def complete_detailed(self, *, model: str, prompt: str) -> tuple[str, TokenUsage]:
-            assert "Row count: 20" in prompt
+            assert "Executed row count: 20" in prompt
             assert "row_4" in prompt
             assert "row_5" not in prompt
             assert "row_19" not in prompt
@@ -239,6 +248,114 @@ def test_model_chart_prompt_receives_only_a_bounded_row_sample() -> None:
         rows=[[f"row_{index}", float(index)] for index in range(20)],
     ))
     assert recommendation is None
+
+
+def test_chart_type_only_followup_preserves_accepted_axes_and_metric() -> None:
+    columns = ["country", "revenue", "cost"]
+    rows = [["Germany", 100.0, 60.0], ["France", 80.0, 40.0]]
+    prior = plan_chart(
+        VisualizationIntent(requested=True, chart_type="bar", x="country", y="revenue"),
+        question="", columns=columns, rows=rows, truncated=False,
+    )
+    changes = [RequestedChange(
+        operation="CHANGE_VISUALIZATION", target="chart_type", new_value="horizontal_bar",
+    )]
+
+    class ChartModel:
+        def __init__(self, measure: str) -> None:
+            self.measure = measure
+            self.prompts: list[str] = []
+
+        async def complete_detailed(self, *, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            self.prompts.append(prompt)
+            return json.dumps({"primary_chart": {
+                "chart_type": "horizontal_bar", "x": "country", "x_components": [],
+                "y": self.measure, "y_measures": [self.measure], "series": None,
+                "reason": "Compare the same country totals horizontally.",
+            }, "alternative_charts": []}), TokenUsage()
+
+    wrong = ChartModel("cost")
+    rejected, _, _ = asyncio.run(refine_charts_with_model(
+        wrong, provider="agentrouter", model="test", question="Change to a horizontal bar chart",
+        columns=columns, rows=rows, required_chart_type="horizontal_bar",
+        previous_chart=prior, chart_changes=changes, preserve_previous_encodings=True,
+    ))
+    assert rejected is None
+    assert '"chart_type":"bar"' in wrong.prompts[0]
+    assert '"operation":"CHANGE_VISUALIZATION"' in wrong.prompts[0]
+    assert "expert Business Analytics Visualization Planner" in wrong.prompts[0]
+
+    accepted, _, _ = asyncio.run(refine_charts_with_model(
+        ChartModel("revenue"), provider="agentrouter", model="test",
+        question="Change to a horizontal bar chart", columns=columns, rows=rows,
+        required_chart_type="horizontal_bar", previous_chart=prior,
+        chart_changes=changes, preserve_previous_encodings=True,
+    ))
+    assert accepted is not None
+    assert accepted.primary_chart.x == prior.x
+    assert accepted.primary_chart.y == prior.y
+
+
+def test_plotting_fallback_keeps_previous_measure_and_requeries_period_change() -> None:
+    columns = ["country", "revenue", "cost"]
+    rows = [["Germany", 100.0, 60.0], ["France", 80.0, 40.0]]
+    prior = plan_chart(
+        VisualizationIntent(requested=True, chart_type="bar", x="country", y="revenue"),
+        question="", columns=columns, rows=rows, truncated=False,
+    )
+    result = ChatResponse(
+        session_id="chart", operation="NEW_QUERY", resolved_question="Revenue by country",
+        message="Revenue by country", generation=GenerateResponse(
+            db_id="shop", question="Revenue by country", provider="agentrouter",
+            model="test", strategy=StrategyHints(mode="exact"),
+            sql="SELECT country, revenue, cost FROM sales", accepted=True,
+            columns=columns, rows=rows, row_count=2, termination_reason="accepted",
+        ), presentation=ResultPresentation(summary="Revenue by country", chart_spec=prior),
+    )
+
+    class WrongMetricModel:
+        calls = 0
+
+        async def complete_detailed(self, *, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            self.calls += 1
+            return json.dumps({"primary_chart": {
+                "chart_type": "horizontal_bar", "x": "country", "x_components": [],
+                "y": "cost", "y_measures": ["cost"], "series": None,
+                "reason": "This improperly changes the measure.",
+            }, "alternative_charts": []}), TokenUsage()
+
+    model = WrongMetricModel()
+    outcome = asyncio.run(design_chart(
+        result=result, objective="Change the chart to a horizontal bar",
+        completer=model, provider="agentrouter", model="test",
+        budget=RequestBudget(timeout_seconds=10, max_model_calls=3),
+    ))
+    assert outcome.status == "CHART_READY"
+    assert outcome.spec is not None
+    assert outcome.spec.x == prior.x and outcome.spec.y == prior.y
+    assert outcome.spec.data == prior.data
+    assert model.calls == 1
+    blocked = asyncio.run(design_chart(
+        result=result, objective="Change to a horizontal bar for 2026",
+        completer=model, provider="agentrouter", model="test",
+        budget=RequestBudget(timeout_seconds=10, max_model_calls=3),
+        changes=[RequestedChange(operation="CHANGE_PERIOD", target="year", new_value="2026")],
+    ))
+    assert blocked.status == "REQUERY_REQUIRED"
+    assert model.calls == 1
+
+
+def test_type_only_detection_excludes_new_analysis() -> None:
+    columns = ["country", "revenue", "cost"]
+    rows = [["Germany", 100.0, 60.0], ["France", 80.0, 40.0]]
+    prior = plan_chart(
+        VisualizationIntent(requested=True, chart_type="bar", x="country", y="revenue"),
+        question="", columns=columns, rows=rows, truncated=False,
+    )
+    assert _type_only_chart_change("Change to a horizontal bar of revenue by country",
+                                   columns, prior, None)
+    assert not _type_only_chart_change("Put cost on the Y-axis", columns, prior, None)
+    assert not _type_only_chart_change("Only show Germany", columns, prior, None)
 
 
 def test_truncated_result_yields_no_recommendation() -> None:

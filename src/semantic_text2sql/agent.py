@@ -398,14 +398,20 @@ class TextToSQLAgent:
                     dialect=request.dialect,
                 )
                 failures = [item for item in findings if item.status == "FAIL"]
+                unresolved = [item for item in findings if item.status == "UNRESOLVED"]
                 validation = validation.model_copy(
                     update={
                         "valid": not failures,
-                        "code": failures[0].code if failures else "SQL_SAFETY_VALID",
+                        "code": (
+                            failures[0].code if failures else
+                            "SQL_SEMANTICS_UNRESOLVED" if unresolved else "SQL_SAFETY_VALID"
+                        ),
                         "message": (
                             failures[0].evidence if failures else
-                            "SQL passed syntax and read-only safety validation. "
-                            "Unresolved semantic checks do not prove business correctness."
+                            "SQL passed syntax and read-only safety validation; "
+                            "some business semantics remain unresolved."
+                            if unresolved else
+                            "SQL passed syntax and read-only safety validation."
                         ),
                         "semantic_findings": findings,
                     }

@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.api import create_app
+from semantic_text2sql.conversation import ConversationStore
 from semantic_text2sql.models import ChatRequest
 from semantic_text2sql.run_history import RunHistoryStore
 
@@ -20,6 +21,36 @@ class FixedSQLModel:
     async def generate(self, **kwargs: Any) -> tuple[str, int]:
         self.calls += 1
         return self.sql, 1
+
+
+def test_unresolved_history_branch_preserves_accepted_state_and_result(
+    registry: Any, monkeypatch: Any, tmp_path: Any,
+) -> None:
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    state_path = tmp_path / "conversation.sqlite"
+    monkeypatch.setenv("TEXT2SQL_CONVERSATION_STORE", str(state_path))
+    model = FixedSQLModel("SELECT COUNT(*) AS customer_count FROM customers")
+    history = RunHistoryStore(None)
+    client = TestClient(create_app(TextToSQLAgent(registry, model), run_history=history))
+    base = {"session_id": "branch-isolation", "db_id": "shop",
+            "provider": "agentrouter", "model": "test-model"}
+    first = client.post("/api/chat", json={**base, "message": "Count customers"}).json()
+    assert first["generation"]["accepted"]
+    store = ConversationStore(state_path)
+    original = store.get("branch-isolation")
+    assert original is not None
+    accepted = store.put(original.model_copy(update={
+        "resolved_question": "Count orders", "last_sql": "SELECT COUNT(*) FROM orders",
+    }), expected_version=original.version)
+    model.sql = "SELECT missing_column FROM missing_table"
+    failed = client.post("/api/chat", json={
+        **base, "message": "New question: count customers again", "parent_run_id": first["run_id"],
+    })
+    assert failed.status_code == 200
+    assert failed.json()["generation"] is None or failed.json()["generation"]["accepted"] is False
+    after = ConversationStore(state_path).get("branch-isolation")
+    assert after is not None and after.version == accepted.version
+    assert after.last_sql == accepted.last_sql
 
 
 def test_new_conversation_reset_does_not_call_model_or_delete_history(

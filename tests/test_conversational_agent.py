@@ -28,6 +28,8 @@ from semantic_text2sql.models import (
     ChatResponse,
     ConversationState,
     GenerateResponse,
+    SemanticContract,
+    SemanticFilter,
     StrategyHints,
     TokenUsage,
 )
@@ -848,6 +850,34 @@ def test_agent_prompt_carries_schema_rules_and_examples(
     assert '"intent":"NEW_QUERY"' in prompt  # NEW_QUERY example
     assert '"intent":"VISUALIZE"' in prompt  # VISUALIZE example
     assert '"action":"ANSWER"' in prompt  # ANSWER example
+
+
+def test_top_layer_receives_accepted_analytical_contract(
+    registry: Any, tmp_path: Any,
+) -> None:
+    calls: list[str] = []
+    completer = Completer([{
+        "action": "ANSWER", "intent": "DIRECT_ANSWER", "tool": None,
+        "tool_arguments": None, "answer": "I have the accepted context.",
+    }])
+    agent = _agent(registry, tmp_path, completer, calls)
+    accepted = ConversationState(
+        session_id="contract", db_id="shop", root_question="Revenue",
+        resolved_question="Revenue in 2025", last_sql="SELECT 1",
+        semantic_contract=SemanticContract(
+            measures=["revenue"], aggregation="sum", active_period="2025",
+            comparison_periods=["2024"], output_grain=["country"],
+            ranked_metric="revenue", ranking_direction="DESC",
+            filters=[SemanticFilter(operand="status", operator="=", value="paid")],
+        ),
+    )
+    agent.get_state = lambda session_id: accepted
+    asyncio.run(agent.run(ChatRequest(session_id="contract", db_id="shop", message="Explain it")))
+    prompt = completer.prompts[0]
+    for expected in ('"active_period": "2025"', '"comparison_periods": ["2024"]',
+                     '"ranked_metric": "revenue"', '"output_grain": ["country"]',
+                     '"aggregation": "sum"', '"value": "paid"'):
+        assert expected in prompt
     assert "Do not ask the client to name" in prompt
 
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
 from time import monotonic, perf_counter
@@ -295,17 +296,27 @@ def create_app(
     # Complete bounded results are kept only for the active process. Persisted
     # history retains a smaller preview and is reused only when it is complete.
     recent_results: dict[tuple[str, str], RecentResult] = {}
+    branch_context: ContextVar[
+        tuple[str, ConversationState, RecentResult | None, int | None] | None
+    ] = ContextVar("queryflow_branch_context", default=None)
 
-    def restore_cached_result(record: RunRecord) -> None:
-        """Keep the in-process result reference aligned with restored history."""
-        key = (record.session_id, record.db_id)
-        recent_results.pop(key, None)
+    def accepted_state(session_id: str) -> ConversationState | None:
+        branch = branch_context.get()
+        return branch[1] if branch and branch[0] == session_id else conversations.get(session_id)
+
+    def accepted_result(session_id: str, db_id: str) -> RecentResult | None:
+        branch = branch_context.get()
+        if branch and branch[0] == session_id:
+            return branch[2] if branch[1].db_id == db_id else None
+        return recent_results.get((session_id, db_id))
+
+    def result_from_history(record: RunRecord) -> RecentResult | None:
         if not record.accepted or record.preview_truncated or record.truncated:
-            return
+            return None
         if record.row_count != len(record.rows_preview) or not record.sql:
-            return
+            return None
         if not record.state_snapshot or record.state_snapshot.last_sql != record.sql:
-            return
+            return None
         try:
             payload = dict(record.response_payload)
             if isinstance(payload.get("generation"), dict):
@@ -316,9 +327,18 @@ def create_app(
             response = ChatResponse.model_validate(payload)
             if not response.result_id:
                 response = response.model_copy(update={"result_id": record.run_id})
-            recent_results[key] = RecentResult.from_response(response)
+            return RecentResult.from_response(response)
         except (ValueError, TypeError):
             logger.warning("history_result_restore_unavailable run_id=%s", record.run_id)
+            return None
+
+    def restore_cached_result(record: RunRecord) -> None:
+        """Keep the in-process result reference aligned with restored history."""
+        key = (record.session_id, record.db_id)
+        recent_results.pop(key, None)
+        restored = result_from_history(record)
+        if restored is not None:
+            recent_results[key] = restored
     chat_jobs: dict[str, dict[str, Any]] = {}
     job_ttl_seconds = max(60, int(os.environ.get("TEXT2SQL_JOB_TTL_SECONDS", "3600")))
     max_jobs = max(10, int(os.environ.get("TEXT2SQL_MAX_JOBS", "500")))
@@ -890,7 +910,7 @@ def create_app(
             max_database_calls=int(os.environ.get("TEXT2SQL_REQUEST_MAX_DATABASE_CALLS", "24")),
         )
         set_session_stage(request.session_id, "conversation")
-        previous = conversations.get(request.session_id)
+        previous = accepted_state(request.session_id)
         has_matching_state = previous is not None and previous.db_id == request.db_id
         viz_intent = parse_intent(request.message, has_previous=has_matching_state)
         if request.visualization is False:
@@ -898,7 +918,7 @@ def create_app(
         if request.visualization is True and not viz_intent.requested:
             viz_intent = viz_intent.model_copy(update={"requested": True})
         if viz_intent.requested and viz_intent.followup and previous and previous.last_sql:
-            prior_response = recent_results.get((request.session_id, request.db_id))
+            prior_response = accepted_result(request.session_id, request.db_id)
             if (
                 request.parent_run_id
                 and prior_response
@@ -1390,7 +1410,7 @@ def create_app(
         # Versioned presentation state: an analytical correction that follows a
         # chart-producing turn keeps the chart as the primary answer. The mode
         # comes from backend conversation state, never from a client heuristic.
-        last_accepted = recent_results.get((request.session_id, request.db_id))
+        last_accepted = accepted_result(request.session_id, request.db_id)
         last_chart_spec = (
             last_accepted.presentation.chart_spec
             if last_accepted and last_accepted.presentation
@@ -1627,24 +1647,8 @@ def create_app(
         else:
             message = _failure_message(generated)
             prior_for_database = previous if has_matching_state else None
-            failure_state = (prior_for_database or pending).model_copy(
-                update={
-                    "last_failure": message,
-                    "last_failed_sql": generated.attempts[-1].sql if generated.attempts else None,
-                }
-            )
-            if persist_state:
-                try:
-                    response_state = conversations.put(
-                        failure_state,
-                        expected_version=(
-                            prior_for_database.version if prior_for_database is not None else None
-                        ),
-                    )
-                except ConversationConflict as exc:
-                    raise HTTPException(status_code=409, detail=str(exc)) from exc
-            else:
-                response_state = failure_state
+            # A rejected candidate is a run-history observation, never accepted state.
+            response_state = prior_for_database
             if generated.termination_reason != "model_error":
                 recovery = generated.recovery
                 human_review = HumanReviewRequest(
@@ -1795,14 +1799,18 @@ def create_app(
                     )
                 except (DatabaseError, OSError, ValueError):
                     logger.warning("Filter discovery failed", exc_info=True)
+        branch = branch_context.get()
         response = ChatResponse(
             session_id=request.session_id,
             operation=operation,
             resolved_question=pending.resolved_question,
             conversation_interpretation=interpretation,
             state=response_state,
-            state_commit_pending=not persist_state,
-            state_expected_version=previous.version if previous else None,
+            state_commit_pending=not persist_state and generated.accepted,
+            state_expected_version=(
+                branch[3] if branch else
+                previous.version if previous else None
+            ),
             generation=generated,
             presentation=presentation,
             message=message,
@@ -1887,6 +1895,15 @@ def create_app(
         if response.operation == "RESET_CONTEXT":
             recent_results.pop((request.session_id, request.db_id), None)
             return response
+        branch = branch_context.get()
+        if (
+            branch and response.state is not None and response.generation
+            and response.generation.accepted
+        ):
+            response = response.model_copy(update={
+                "state_commit_pending": True,
+                "state_expected_version": branch[3],
+            })
         if response.state_commit_pending and response.state is not None:
             try:
                 committed = conversations.put(
@@ -1950,29 +1967,29 @@ def create_app(
             return response
 
     async def execute_chat(request: ChatRequest, *, persist: bool = True) -> ChatResponse:
-        if request.parent_run_id:
+        token = None
+        if request.parent_run_id and branch_context.get() is None:
             parent = runs.get(request.parent_run_id, request.session_id)
-            if parent is None or parent.db_id != request.db_id:
+            if parent is None or parent.db_id != request.db_id or parent.state_snapshot is None:
                 raise HTTPException(
                     status_code=409, detail="The selected previous turn is unavailable."
                 )
-            if parent.state_snapshot is not None:
-                current = conversations.get(request.session_id)
-                try:
-                    conversations.put(
-                        parent.state_snapshot,
-                        expected_version=current.version if current else None,
-                    )
-                except ConversationConflict as exc:
-                    raise HTTPException(status_code=409, detail=str(exc)) from exc
-                for key in [key for key in recent_results if key[0] == request.session_id]:
-                    recent_results.pop(key, None)
-                restore_cached_result(parent)
-        previous = conversations.get(request.session_id)
-        response = await process_chat(request, persist_state=persist)
-        if previous and previous.db_id == request.db_id and response.operation != "NEW_QUERY":
-            response = response.model_copy(update={"previous_sql": previous.last_sql})
-        return await save_response(request, response) if persist else response
+            current = conversations.get(request.session_id)
+            token = branch_context.set((
+                request.session_id, parent.state_snapshot,
+                result_from_history(parent), current.version if current else None,
+            ))
+        try:
+            previous = accepted_state(request.session_id)
+            response = await process_chat(
+                request, persist_state=persist and branch_context.get() is None
+            )
+            if previous and previous.db_id == request.db_id and response.operation != "NEW_QUERY":
+                response = response.model_copy(update={"previous_sql": previous.last_sql})
+            return await save_response(request, response) if persist else response
+        finally:
+            if token is not None:
+                branch_context.reset(token)
 
     async def assistant_sql_handler(request: ChatRequest) -> ChatResponse:
         # The top model still has to produce its final answer. Save the
@@ -2005,8 +2022,8 @@ def create_app(
     conversational_agent = ConversationalAnalyticsAgent(
         bridge=bridge,
         completers=turn_completers,
-        get_state=conversations.get,
-        get_last_response=lambda session_id, db_id: recent_results.get((session_id, db_id)),
+        get_state=accepted_state,
+        get_last_response=accepted_result,
         reset_handler=reset_assistant_context,
         sql_handler=assistant_sql_handler,
         investigation_handler=assistant_investigation_handler,
@@ -2015,8 +2032,27 @@ def create_app(
     @app.post("/api/chat", response_model=ChatResponse)
     async def chat(request: ChatRequest) -> ChatResponse:
         if conversational_agent_enabled():
-            response = await conversational_agent.run(request)
-            return response if response.history_saved else await save_response(request, response)
+            token = None
+            if request.parent_run_id:
+                parent = runs.get(request.parent_run_id, request.session_id)
+                if parent is None or parent.db_id != request.db_id or parent.state_snapshot is None:
+                    raise HTTPException(
+                        status_code=409, detail="The selected previous turn is unavailable."
+                    )
+                current = conversations.get(request.session_id)
+                token = branch_context.set((
+                    request.session_id, parent.state_snapshot, result_from_history(parent),
+                    current.version if current else None,
+                ))
+            try:
+                response = await conversational_agent.run(request)
+                return (
+                    response if response.history_saved
+                    else await save_response(request, response)
+                )
+            finally:
+                if token is not None:
+                    branch_context.reset(token)
         if os.environ.get("TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED", "false").casefold() != "true":
             return await execute_chat(request)
         try:

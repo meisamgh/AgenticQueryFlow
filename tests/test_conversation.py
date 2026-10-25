@@ -78,6 +78,19 @@ def test_contract_filter_and_period_changes_preserve_unaffected_constraints() ->
     assert updated.comparison_periods == ["2024"]
 
 
+def test_period_delta_rejects_stale_previous_value() -> None:
+    base = SemanticContract(active_period="2025", measures=["revenue"])
+    with pytest.raises(ValueError, match="accepted active period"):
+        resolve_semantic_contract(
+            base, original_question="Use 2026", resolved_question="Revenue in 2026",
+            changes=[RequestedChange(
+                operation="CHANGE_PERIOD", target="period",
+                previous_value="2024", new_value="2026",
+            )],
+        )
+    assert base.active_period == "2025"
+
+
 def test_active_period_rejects_conflicting_exact_date_filter() -> None:
     base = SemanticContract(active_period="2025")
     with pytest.raises(ValueError, match="active period 2025 conflicts"):

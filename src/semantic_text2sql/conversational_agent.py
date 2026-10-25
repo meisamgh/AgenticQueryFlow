@@ -717,20 +717,18 @@ class ConversationalAnalyticsAgent:
                 last and last.generation and last.generation.accepted
             ),
             "result_columns": previous.last_columns if previous else [],
-            "accepted_filters": (
-                previous.semantic_contract.filters
-                if previous and previous.semantic_contract
-                else []
-            ),
-            "accepted_measures": (
-                previous.semantic_contract.measures
-                if previous and previous.semantic_contract
-                else []
-            ),
-            "accepted_grain": (
-                previous.semantic_contract.grain
-                if previous and previous.semantic_contract
-                else []
+            "accepted_analytical_contract": (
+                previous.semantic_contract.model_dump(
+                    mode="json", exclude_none=True, exclude_defaults=True,
+                    include={
+                        "approved_metrics", "mandatory_metric_filters", "structural_formulas",
+                        "aggregation_stages", "output_operations", "outputs", "filters",
+                        "measures", "aggregation", "input_grain", "output_grain",
+                        "temporal_boundaries", "active_period", "comparison_periods",
+                        "grain", "requires_grouping", "requires_ordering", "ranking_direction",
+                        "ranked_metric", "limit", "tie_policy", "required_columns",
+                    },
+                ) if previous and previous.semantic_contract else {}
             ),
             "corrections": previous.corrections[-3:] if previous else [],
             "chart": (

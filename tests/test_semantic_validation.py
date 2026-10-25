@@ -49,6 +49,23 @@ def test_alternate_average_formula_is_unresolved_not_falsely_rejected() -> None:
     ] == "UNRESOLVED"
 
 
+def test_ranked_metric_must_match_final_order_key() -> None:
+    contract = SemanticContract(
+        requires_ordering=True, ranking_direction="DESC",
+        ranked_metric="total_spending", limit=1,
+    )
+    wrong = _codes(
+        "SELECT customer_id, SUM(price) AS total_spending, SUM(amount) AS quantity "
+        "FROM sales GROUP BY customer_id ORDER BY quantity DESC LIMIT 1", contract,
+    )
+    assert wrong["RANKED_METRIC_MISMATCH"] == "FAIL"
+    correct = _codes(
+        "SELECT customer_id, SUM(price) AS total_spending "
+        "FROM sales GROUP BY customer_id ORDER BY total_spending DESC LIMIT 1", contract,
+    )
+    assert correct["RANKED_METRIC_MATCH"] == "PASS"
+
+
 def _verified_context() -> dict[str, object]:
     return {
         "tables": {
