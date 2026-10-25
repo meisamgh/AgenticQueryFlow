@@ -253,6 +253,10 @@ def test_ui_config_reads_safe_model_defaults_from_environment(monkeypatch) -> No
         "context_mode": "model1",
         "context_provider": "groq",
         "context_model": "qwen/qwen3.8-27b",
+        "assistant_provider": "agentrouter",
+        "assistant_model": "gpt-5.6-sol",
+        "plotting_provider": "agentrouter",
+        "plotting_model": "gpt-5.6-sol",
         "default_db_id": "books",
     }
 
@@ -434,6 +438,7 @@ def test_model_catalog_contains_configured_remote_providers(monkeypatch) -> None
         "groq",
         "justdowork",
         "codecraft",
+        "true_sota",
     }
     agentrouter = [item for item in options if item["provider"] == "agentrouter"]
     assert [item["model"] for item in agentrouter] == [

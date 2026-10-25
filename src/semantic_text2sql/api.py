@@ -68,6 +68,7 @@ from semantic_text2sql.llm import (
     JustDoWorkSQLModel,
     ModelError,
     RoutingSQLModel,
+    TrueSotaSQLModel,
 )
 from semantic_text2sql.models import (
     DEFAULT_MODEL,
@@ -206,9 +207,14 @@ def create_app(
         os.environ.get("CODECRAFT_BASE_URL", "https://codecraftapi.com/v1"),
         float(os.environ.get("CODECRAFT_TIMEOUT_SECONDS", "120")),
     )
+    true_sota = TrueSotaSQLModel(
+        os.environ.get("TRUE_SOTA_API_KEY"),
+        os.environ.get("TRUE_SOTA_BASE_URL", "https://true-sota.com"),
+        float(os.environ.get("TRUE_SOTA_TIMEOUT_SECONDS", "180")),
+    )
     active_agent = agent or TextToSQLAgent(
         sqlite,
-        RoutingSQLModel(agentrouter, groq, justdowork, codecraft),
+        RoutingSQLModel(agentrouter, groq, justdowork, codecraft, true_sota),
         postgres,
         profiles,
     )
@@ -217,6 +223,7 @@ def create_app(
         "groq": groq,
         "justdowork": justdowork,
         "codecraft": codecraft,
+        "true_sota": true_sota,
     }
     def conversational_agent_enabled() -> bool:
         return (
@@ -370,12 +377,25 @@ def create_app(
     @app.get("/api/ui-config")
     async def ui_config(response: Response) -> dict[str, str | None]:
         response.headers["Cache-Control"] = "no-store"
+        sql_provider = os.environ.get("TEXT2SQL_SQL_PROVIDER") or "agentrouter"
+        sql_model = os.environ.get("TEXT2SQL_SQL_MODEL") or DEFAULT_MODEL
+        context_mode = os.environ.get("TEXT2SQL_CONTEXT_MODE") or "retrieval"
         return {
-            "sql_provider": os.environ.get("TEXT2SQL_SQL_PROVIDER") or "agentrouter",
-            "sql_model": os.environ.get("TEXT2SQL_SQL_MODEL") or DEFAULT_MODEL,
-            "context_mode": os.environ.get("TEXT2SQL_CONTEXT_MODE") or "retrieval",
-            "context_provider": os.environ.get("TEXT2SQL_CONTEXT_PROVIDER") or None,
-            "context_model": os.environ.get("TEXT2SQL_CONTEXT_MODEL") or None,
+            "sql_provider": sql_provider,
+            "sql_model": sql_model,
+            "context_mode": context_mode,
+            "context_provider": (
+                os.environ.get("TEXT2SQL_CONTEXT_PROVIDER") or sql_provider
+                if context_mode == "model1" else None
+            ),
+            "context_model": (
+                os.environ.get("TEXT2SQL_CONTEXT_MODEL") or sql_model
+                if context_mode == "model1" else None
+            ),
+            "assistant_provider": os.environ.get("TEXT2SQL_ASSISTANT_PROVIDER") or sql_provider,
+            "assistant_model": os.environ.get("TEXT2SQL_ASSISTANT_MODEL") or sql_model,
+            "plotting_provider": os.environ.get("TEXT2SQL_PLOTTING_PROVIDER") or sql_provider,
+            "plotting_model": os.environ.get("TEXT2SQL_PLOTTING_MODEL") or sql_model,
             "default_db_id": os.environ.get("TEXT2SQL_DEFAULT_DB_ID") or "debit_card_specializing",
         }
 

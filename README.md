@@ -446,11 +446,11 @@ Important settings:
 | `TEXT2SQL_RETRIEVAL_COLUMNS` | Approximate columns per table | `5` |
 | `TEXT2SQL_SCHEMA_RERANKER_ENABLED` | Enable LightGBM column reranking | `true` |
 | `TEXT2SQL_HISTORY_ENABLED` | Enable strongly matched historical examples | `false` |
-| `TEXT2SQL_SQL_PROVIDER` | SQL provider used by default for chat requests | `agentrouter` |
-| `TEXT2SQL_SQL_MODEL` | SQL model used by default for chat requests | `gpt-5.6-sol` |
+| `TEXT2SQL_SQL_PROVIDER` | SQL provider used by default for chat requests | `groq` in `.env.example` |
+| `TEXT2SQL_SQL_MODEL` | SQL model used by default for chat requests | `qwen/qwen3.8-27b` in `.env.example` |
 | `TEXT2SQL_CONTEXT_MODE` | `model1` or `retrieval` for chat requests | `retrieval` |
-| `TEXT2SQL_CONTEXT_PROVIDER` | Provider for Model 1 when enabled | unset |
-| `TEXT2SQL_CONTEXT_MODEL` | Model for Model 1 when enabled | unset |
+| `TEXT2SQL_CONTEXT_PROVIDER` | Provider for Model 1 when enabled | selected SQL provider unless overridden |
+| `TEXT2SQL_CONTEXT_MODEL` | Model for Model 1 when enabled | selected SQL model unless overridden |
 | `TEXT2SQL_REQUEST_TIMEOUT_SECONDS` | Shared end-to-end request deadline | `180` |
 | `TEXT2SQL_REQUEST_MAX_MODEL_CALLS` | Maximum model-call budget per request | `6` |
 | `TEXT2SQL_REQUEST_MAX_DATABASE_CALLS` | Maximum database-call budget per request | `24` |

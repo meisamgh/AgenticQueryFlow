@@ -226,9 +226,14 @@ test('pipeline bars represent measured stage time and leave missing stages unmea
   const pipeline = vm.runInNewContext(`${source.slice(source.indexOf('function renderPipelineDetails('),
     source.indexOf('function showError('))}; renderPipelineDetails`, {
     document: {createElement: makeNode},
+    state: {modelConfig: {assistant_provider: 'groq', assistant_model: 'qwen/qwen3.8-27b',
+      context_mode: 'retrieval', sql_provider: 'groq', sql_model: 'qwen/qwen3.8-27b',
+      plotting_provider: 'groq', plotting_model: 'qwen/qwen3.8-27b'}},
   });
   pipeline(fragment, {total: 2000, routing: 500}, {}, {});
   assert.equal(container.children[0].children[1].textContent, '2.0 s');
+  const assistant = container.children.find(row => row.children[0]?.textContent === 'Assistant model');
+  assert.equal(assistant.children[1].textContent, 'groq · qwen/qwen3.8-27b');
   const routing = container.children.find(row => row.children[0]?.textContent === 'Routing');
   assert.equal(routing.children[2].children[0].style.width, '25%');
   const unknown = container.children.find(row => row.children[0]?.textContent === 'Context planning');

@@ -1,5 +1,12 @@
 # V6.4 progress checkpoint
 
+October 25 provider continuation (uncommitted):
+
+- Live, credential-backed Groq probes used only a synthetic decision prompt: text, JSON-object and tiny strict schema returned HTTP 200. The full Queryflow AgentDecision instructions returned HTTP 400 `json_validate_failed` in strict-schema mode; the same full prompt succeeded in JSON-object mode and passed local Pydantic validation. This establishes a prompt/schema-size-dependent Groq/Qwen strict-decoding failure, not a missing model or invalid key.
+- The existing per-model/schema strict-mode failure cache and bounded JSON-object fallback remain active. Groq 429 retries now consume the shared model-call budget; a specific budget-exhausted error is no longer mislabeled as a deadline. Safe failure logs include response format and retry count. `/api/ui-config` now exposes effective assistant, context, SQL and plotting model identities without credentials, and the frontend Pipeline inspector displays them.
+- Added a separate True SOTA Responses adapter and opt-in model catalog entry from the prior user request. This is not evidence of live True SOTA connectivity; no `TRUE_SOTA_API_KEY` was configured. The local, untracked `.env` now selects Groq/Qwen for Top-layer, Model 1, SQL and plotting; True SOTA remains selectable by configuration.
+- A live end-to-end debit-card `/api/chat` test was blocked by the environment's data-egress review because it would send database schema and profile information to Groq. No such live debit-card request was made. A separate live end-to-end test used only a temporary synthetic books database: the initial strict AgentDecision call failed with `json_validate_failed`, JSON-object fallback succeeded, Model 1 and SQL generation succeeded, and read-only execution returned fiction=2/history=1. The final client answer was correct for those synthetic rows. This does not establish accuracy on BIRD or PostgreSQL.
+
 Baseline: `c2564d4` on `main`. Untracked `screenshots/` belongs to the user and is not part of V6.4 work.
 
 Implemented in this checkpoint:

@@ -420,7 +420,10 @@ class ConversationalAnalyticsAgent:
                 )
             else:
                 cause = f"The model provider returned HTTP {error.status}."
-            return cause + " No query was run; please retry or select another configured model."
+            return (
+                f"{cause} Provider: {error.provider}; model: {error.model}. "
+                "No query was run; please retry or select another configured model."
+            )
         detail = str(error).lower()
         if "not configured" in detail or ("api key" in detail and "missing" in detail):
             cause = "The selected model's API configuration is missing."

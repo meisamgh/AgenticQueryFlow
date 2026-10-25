@@ -16,6 +16,7 @@ from typing import Literal, Protocol, cast
 import httpx
 
 from semantic_text2sql.models import ModelProvider, SchemaInfo, StrategyHints, TokenUsage
+from semantic_text2sql.runtime import active_request_budget
 
 logger = logging.getLogger(__name__)
 
@@ -254,6 +255,10 @@ class GroqSQLModel:
                 transport=self.transport,
             ) as client:
                 for attempt in range(3):
+                    if attempt:
+                        budget = active_request_budget()
+                        if budget is not None:
+                            budget.claim("model")
                     response = await client.post(
                         "chat/completions",
                         headers={
@@ -305,20 +310,21 @@ class GroqSQLModel:
             )
             logger.warning(
                 "provider_request_failed provider=%s model=%s phase=%s status=%s "
-                "code=%s request_id=%s latency_ms=%s",
+                "code=%s request_id=%s latency_ms=%s response_format=%s retry_count=%s",
                 problem.provider, problem.model, problem.phase, problem.status,
                 problem.code, problem.request_id, problem.latency_ms,
+                response_format.get("type") if response_format else "text", attempt,
             )
             raise problem from exc
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
             raise ModelError(f"The Groq request failed: {exc}") from exc
-        if not isinstance(content, str) or not content.strip():
-            raise ModelError("Groq returned no text output.")
         if choice.get("finish_reason") == "length":
             raise ModelError(
                 "Groq output was truncated at the completion-token limit.",
                 usage=_token_usage(body.get("usage") or {}),
             )
+        if not isinstance(content, str) or not content.strip():
+            raise ModelError("Groq returned no text output.")
         return content, _token_usage(body.get("usage") or {})
 
 
@@ -1134,6 +1140,68 @@ class AgentRouterModel:
             raise
 
 
+class TrueSotaSQLModel(AgentRouterCodexModel):
+    """OpenAI-compatible Responses transport, isolated from Codex CLI settings."""
+
+    def __init__(
+        self, api_key: str | None, base_url: str = "https://true-sota.com",
+        timeout: float = 180.0, transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        super().__init__(api_key, base_url, timeout, transport=transport)
+
+    async def _complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+        if not self.api_key:
+            raise ModelError("TRUE_SOTA_API_KEY is not configured.")
+        return await self._complete_over_http(model, prompt)
+
+    async def complete_structured(
+        self, model: str, prompt: str, schema_name: str, schema: dict[str, object],
+    ) -> tuple[str, TokenUsage]:
+        if not self.api_key:
+            raise ModelError("TRUE_SOTA_API_KEY is not configured.")
+        try:
+            return await self._complete_over_http(
+                model, prompt, schema_name=schema_name, schema=schema
+            )
+        except ModelError as exc:
+            if _structured_output_unsupported(exc):
+                raise StructuredOutputUnsupported(str(exc)) from exc
+            raise
+
+    async def _complete_over_http(
+        self, model: str, prompt: str, *, schema_name: str | None = None,
+        schema: dict[str, object] | None = None,
+    ) -> tuple[str, TokenUsage]:
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url, timeout=self.timeout, transport=self.transport,
+            ) as client:
+                response = await client.post(
+                    "/v1/responses",
+                    headers={"authorization": f"Bearer {self.api_key}"},
+                    json=_gpt_payload(
+                        "/v1/responses", model, _CODEX_PREAMBLE + prompt,
+                        schema_name=schema_name, schema=schema,
+                    ),
+                )
+        except httpx.HTTPError as exc:
+            raise ModelError(f"True SOTA request failed: {type(exc).__name__}.") from exc
+        if response.status_code >= 400:
+            raise ModelError(
+                f"True SOTA request failed: HTTP {response.status_code} "
+                f"{_gpt_error(response)}"
+            )
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise ModelError("True SOTA returned malformed JSON.") from exc
+        content = _gpt_text(body)
+        if not content:
+            raise ModelError("True SOTA returned no text output.")
+        usage = body.get("usage") if isinstance(body, dict) else None
+        return content, _token_usage(usage)
+
+
 class RoutingSQLModel:
     def __init__(
         self,
@@ -1141,6 +1209,7 @@ class RoutingSQLModel:
         groq: GroqSQLModel,
         justdowork: JustDoWorkSQLModel,
         codecraft: CodeCraftSQLModel,
+        true_sota: TrueSotaSQLModel | None = None,
     ) -> None:
         self.providers: dict[str, SQLModel] = {
             "agentrouter": agentrouter,
@@ -1148,6 +1217,8 @@ class RoutingSQLModel:
             "justdowork": justdowork,
             "codecraft": codecraft,
         }
+        if true_sota is not None:
+            self.providers["true_sota"] = true_sota
 
     async def generate(
         self,

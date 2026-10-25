@@ -11,7 +11,7 @@ from semantic_text2sql.sql_formatting import format_sql_for_display
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 GROQ_QWEN_MODEL = "qwen/qwen3.8-27b"
-ModelProvider = Literal["agentrouter", "groq", "justdowork", "codecraft"]
+ModelProvider = Literal["agentrouter", "groq", "justdowork", "codecraft", "true_sota"]
 
 
 class StrictModel(BaseModel):

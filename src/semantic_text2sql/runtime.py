@@ -42,6 +42,8 @@ class RequestBudget:
             raise RequestBudgetExceeded("The request deadline was exhausted.")
         try:
             return await asyncio.wait_for(operation, timeout=remaining)
+        except RequestBudgetExceeded:
+            raise
         except TimeoutError as exc:
             raise RequestBudgetExceeded("The request deadline was exhausted.") from exc
 

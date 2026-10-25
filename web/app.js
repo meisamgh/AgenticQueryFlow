@@ -2384,6 +2384,24 @@ function renderPipelineDetails(fragment, timings, body, generation) {
   headlineValue.textContent = knownTotal == null ? "Not reported" : `${(knownTotal / 1000).toFixed(1)} s`;
   headline.append(headlineLabel, headlineValue);
   container.append(headline);
+  const config = state.modelConfig || {};
+  const configuredModels = [
+    ["Assistant", config.assistant_provider, config.assistant_model],
+    ["Context", config.context_mode === "model1" ? config.context_provider : "retrieval", config.context_mode === "model1" ? config.context_model : null],
+    ["SQL", config.sql_provider, config.sql_model],
+    ["Plotting", config.plotting_provider, config.plotting_model],
+  ];
+  for (const [role, provider, model] of configuredModels) {
+    if (!provider) continue;
+    const row = document.createElement("div");
+    row.className = "pipeline-run unmeasured";
+    const label = document.createElement("span");
+    label.textContent = `${role} model`;
+    const value = document.createElement("b");
+    value.textContent = model ? `${provider} · ${model}` : provider;
+    row.append(label, value);
+    container.append(row);
+  }
   const stages = [
     ["Conversation interpretation", timings.conversation_interpretation],
     ["Analytics planning", timings.analytics_planning],

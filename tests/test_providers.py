@@ -17,6 +17,7 @@ from semantic_text2sql.llm import (
     ModelError,
     ProviderRequestError,
     RoutingSQLModel,
+    TrueSotaSQLModel,
     _prompt,
 )
 from semantic_text2sql.models import (
@@ -26,6 +27,53 @@ from semantic_text2sql.models import (
     TableInfo,
     TokenUsage,
 )
+from semantic_text2sql.runtime import RequestBudget, use_request_budget
+
+
+def test_true_sota_uses_responses_without_codex_cli_or_key_leak() -> None:
+    requests: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/responses"
+        assert request.headers["authorization"] == "Bearer test-key"
+        payload: dict[str, Any] = json.loads(request.content)
+        requests.append(payload)
+        return httpx.Response(200, json={
+            "output": [{"type": "message", "content": [
+                {"type": "output_text", "text": "SELECT 1"},
+            ]}],
+            "usage": {"input_tokens": 3, "output_tokens": 2},
+        })
+
+    model = TrueSotaSQLModel(
+        "test-key", "https://sota.test", transport=httpx.MockTransport(handler)
+    )
+    text, usage = asyncio.run(model.complete_detailed("gpt-6-sol", "Return SQL"))
+    assert text == "SELECT 1"
+    assert usage.total_tokens == 5
+    assert requests[0]["model"] == "gpt-6-sol"
+    assert requests[0]["store"] is False
+
+
+def test_groq_rate_limit_retry_claims_shared_model_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(429, json={"error": {"code": "rate_limit_exceeded"}})
+
+    monkeypatch.setattr("semantic_text2sql.llm._groq_retry_delay", lambda response: 0)
+    model = GroqSQLModel("test-key", transport=httpx.MockTransport(handler))
+    budget = RequestBudget(timeout_seconds=5, max_model_calls=1)
+    with use_request_budget(budget), pytest.raises(TimeoutError, match="model-call budget"):
+        asyncio.run(budget.wait(
+            model.complete_detailed("qwen/qwen3.8-27b", "Hello"), kind="model"
+        ))
+    assert calls == 1
+    assert budget.model_calls == 1
 
 
 def _call(model: AgentRouterClaudeModel) -> tuple[str, int, TokenUsage]:

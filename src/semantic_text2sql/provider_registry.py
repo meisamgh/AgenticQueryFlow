@@ -39,6 +39,7 @@ class ProviderModelSpec:
 
 
 MODEL_CATALOG = (
+    ProviderModelSpec("true_sota", "gpt-6-sol", "TRUE_SOTA_API_KEY"),
     ProviderModelSpec("agentrouter", "gpt-5.6-sol", "AGENTROUTER_API_KEY"),
     ProviderModelSpec("agentrouter", "glm-5.3", "AGENTROUTER_API_KEY"),
     ProviderModelSpec("agentrouter", "deepseek-v4-flash", "AGENTROUTER_API_KEY"),
