@@ -24,6 +24,7 @@ from semantic_text2sql.models import (
 from semantic_text2sql.models import (
     ChartSpec,
     ChartType,
+    RequestedChange,
     StrictModel,
     TokenUsage,
 )
@@ -530,7 +531,18 @@ class LLMChartProposals(StrictModel):
     alternative_charts: list[LLMChartProposal] = Field(default_factory=list, max_length=3)
 
 
-_VIZ_PROMPT = """Propose faithful charts for one executed analytical result.
+_VIZ_PROMPT = """You are a business-analytics chart planner, not an SQL or conversation agent.
+Propose faithful charts for one already executed and accepted analytical result.
+Understand chart-only follow-ups using the current user request and prior ChartSpec.
+Choose useful trend, comparison, distribution, relationship, ranking or composition views.
+Preserve the prior x, y, y_measures, x_components and series unless the user
+explicitly requests a compatible presentation-only change to one of them.
+For a chart-type-only change, preserve ALL prior chart encodings exactly.
+Changing metrics, periods, filters, grouping/grain, or comparison data belongs to
+the Top-layer LLM and governed SQL pipeline, NEVER to this chart model.
+A missing column or finer grain is not permission to infer, aggregate or invent data.
+Chart labels, sorting and formatting not present in the proposal schema must not
+be invented as new JSON properties. Prefer readable charts and compatible units.
 Return ONLY one JSON object with exactly these keys:
 {{"primary_chart": {{"chart_type": str, "x": str|null, "x_components": [str], "y": str,
 "y_measures": [str], "series": str|null, "reason": str}},
@@ -546,7 +558,10 @@ Rules:
 - Prefer multiple measures only when their units are comparable (see "Units").
 - Explain the business reason in one short sentence ("reason").
 - No JavaScript, no ECharts options, no SQL.
-Question: {question}
+Current user chart request: {question}
+Previous validated ChartSpec (presentation context only): {previous_chart}
+Top-layer typed requested changes (informational, not SQL authority): {chart_changes}
+Preserve prior chart encodings for this type-only follow-up: {preserve_previous_encodings}
 Required chart type (if specified by the user): {required_chart_type}
 Columns (name: role, unit, distinct values): {profile}
 Row count: {rows_count}
@@ -590,11 +605,25 @@ def _validated_rank_chart(
     truncated: bool,
     score: float,
     required_chart_type: ChartType | None = None,
+    previous_chart: ChartSpec | None = None,
+    preserve_previous_encodings: bool = False,
 ) -> RecommendedChart | None:
     """Validate one LLM proposal through the deterministic chart pipeline."""
     named_columns = set(columns)
     if required_chart_type is not None and proposal.chart_type != required_chart_type:
         return None
+    if preserve_previous_encodings and previous_chart is not None:
+        # A simple chart-type change must not silently change the analysis being shown.
+        proposed_measures = proposal.y_measures or ([proposal.y] if proposal.y else [])
+        existing_measures = previous_chart.y_measures or [previous_chart.y]
+        if (
+            proposal.x != previous_chart.x
+            or proposal.x_components != previous_chart.x_components
+            or proposal.y != previous_chart.y
+            or proposed_measures != existing_measures
+            or proposal.series != previous_chart.series
+        ):
+            return None
     requested_columns = requested_plot_columns(question, columns)
     components = proposal.x_components
     if components and (len(components) != 2 or proposal.x != "Year-Month"):
@@ -654,6 +683,9 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     timeout_seconds: float = 12.0,
     budget: RequestBudget | None = None,
     required_chart_type: ChartType | None = None,
+    previous_chart: ChartSpec | None = None,
+    chart_changes: list[RequestedChange] | None = None,
+    preserve_previous_encodings: bool = False,
 ) -> tuple[ChartRecommendations | None, TokenUsage, int]:
     """One bounded model call proposing charts for an executed result.
 
@@ -666,10 +698,30 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     if truncated or not rows or len(columns) < 2:
         return None, usage, 0
     profile, sample = _result_profile(columns, rows)
+    prior_context = (
+        json.dumps(
+            {
+                "chart_type": previous_chart.chart_type,
+                "x": previous_chart.x,
+                "x_components": previous_chart.x_components,
+                "y": previous_chart.y,
+                "y_measures": previous_chart.y_measures,
+                "series": previous_chart.series,
+            },
+            separators=(",", ":"),
+        ) if previous_chart is not None else "None"
+    )
+    requested_changes = json.dumps(
+        [change.model_dump(mode="json", exclude_none=True) for change in (chart_changes or [])],
+        separators=(",", ":"),
+    )
     prompt = _VIZ_PROMPT.format(
         chart_types=", ".join(sorted(_TYPE_BASE)),
         question=question,
         required_chart_type=required_chart_type or "model may choose",
+        previous_chart=prior_context,
+        chart_changes=requested_changes,
+        preserve_previous_encodings=preserve_previous_encodings,
         profile=profile,
         rows_count=len(rows),
         sample=sample,
@@ -705,6 +757,8 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
         truncated=truncated,
         score=1.0,
         required_chart_type=required_chart_type,
+        previous_chart=previous_chart,
+        preserve_previous_encodings=preserve_previous_encodings,
     )
     if primary is None:
         return None, usage, round((perf_counter() - started) * 1000)
@@ -729,6 +783,8 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
             truncated=truncated,
             score=llm_score,
             required_chart_type=required_chart_type,
+            previous_chart=previous_chart,
+            preserve_previous_encodings=preserve_previous_encodings,
         )
         if validated is None:
             continue
