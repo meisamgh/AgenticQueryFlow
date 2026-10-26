@@ -176,7 +176,7 @@ _FILTER_TARGET = re.compile(
 )
 _METRIC = re.compile(
     r"\b(?:total|average|avg|mean|sum|count|number of)\s+([a-z][a-z0-9_ -]{0,40}?)"
-    r"(?=\s*(?:\bby\b|\bin\b|\bper\b|\bfrom\b|\bto\b|,|\.|;|!|\?|$))",
+    r"(?=\s*(?:\bby\b|\bin\b|\bper\b|\bfrom\b|\bto\b|\bover\b|\bacross\b|,|\.|;|!|\?|$))",
     re.I,
 )
 _KPI_WORDS = re.compile(
