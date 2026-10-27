@@ -192,7 +192,7 @@ multi-user authorization boundary.
 ### Client workspace
 
 - Inspect selected tables and columns in the Query Inspector after asking a question.
-- Record a voice question with configured Qwen audio or the Groq Whisper fallback, review its transcript, and send it as text.
+- Record a voice question when speech transcription is configured, review its transcript, and send it as text.
 - Choose the database in the top bar and see connection status and session ID there. SQL and context
   model routing is configured in `.env`; the question composer has no model selectors.
 - Open the drawer-style inspector for context, schema, recovery evidence and execution details.
@@ -337,22 +337,13 @@ SQLite uses query-only connections. PostgreSQL uses read-only transactions, serv
 allowlists and bounded timeouts. A query that executes is reported as executable—not automatically
 business-correct. Returning rows is never treated as proof of correctness.
 
-## Models
+## Model configuration
 
-The API supports four project-scoped provider transports:
-
-- AgentRouter: `gpt-5.6-sol`, `glm-5.3`, `deepseek-v4-flash`, `claude-opus-5`,
-  `claude-opus-4-8`
-- Groq: `qwen/qwen3.6-27b`
-- JustDoWork: `gpt-5.6-sol`, `claude-opus-4-8`
-- CodeCraft API: `claude-opus-5`; set `CODECRAFT_API_KEY` in `.env`. The default
-  endpoint is `https://codecraftapi.com/v1`. CodeCraft charges by token usage; check
-  your account's available credits before querying.
-
-Only configured models are available in the interface. Credentials remain server-side and are
-never returned to the browser. JustDoWork has no hard-coded endpoint: set both
-`JUSTDOWORK_API_KEY` and `JUSTDOWORK_BASE_URL=https://api.justwoker.icu`.
-The Anthropic-compatible client sends requests to `/v1/messages`.
+The public [.env.example](.env.example) shows one provider/model pair. Copy it to an ignored
+`.env`, add your own key, and choose a model your account can access. The conversation and
+plotting roles inherit the SQL provider/model unless explicitly overridden. The server keeps
+credentials private; the browser receives configuration status, not API keys. Additional
+transports remain available through the existing adapters without being prescribed here.
 
 ## Quick start
 
@@ -386,26 +377,14 @@ Click the microphone beside the question box, speak, then click stop. The config
 the recording into editable text. Review the transcript and press Send to ask the database.
 Existing text is preserved; recording never submits a query automatically.
 
-The app uses Qwen audio when configured. Otherwise it uses the existing `GROQ_API_KEY`
-with Groq's `whisper-large-v3-turbo` transcription endpoint. To choose Qwen instead,
-configure its audio workspace separately in `.env`:
-
-```dotenv
-QWEN_AUDIO_API_KEY=your-audio-api-key
-QWEN_AUDIO_BASE_URL=https://YOUR_WORKSPACE_ID.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1
-QWEN_AUDIO_MODEL=qwen3.8-omni-flash
-```
-
-Use your workspace's actual Chat Completions URL and a key from the same region;
-see the [Qwen-Omni setup guide](https://www.alibabacloud.com/help/en/model-studio/qwen-omni).
-`DASHSCOPE_API_KEY` and `DASHSCOPE_BASE_URL` also work. The SQL provider is selected separately.
+Voice input is optional and uses a separately configured speech endpoint when available.
 Recordings are limited to 60 seconds and converted to mono 16-kHz WAV in the browser.
 Audio is sent through the server to the selected provider for transcription, without being saved by this app.
 The browser needs microphone permission and localhost or HTTPS. Discard cancels recording
 or transcription. When the provider supplies token usage, it is reported separately below the
 composer and by `POST /api/voice/transcribe`; `GET /api/voice` reports configuration availability.
-If Qwen audio is not configured, `GROQ_API_KEY` enables the
-[Groq Whisper transcription endpoint](https://console.groq.com/docs/speech-to-text) automatically.
+If no compatible speech service is configured, the microphone remains unavailable; typed
+questions continue to work.
 
 ## Database configuration
 
@@ -437,7 +416,7 @@ Important settings:
 | Variable | Purpose | Default |
 |---|---|---|
 | `TEXT2SQL_DATABASE_ROOT` | SQLite database root | `data` |
-| `TEXT2SQL_DEFAULT_DB_ID` | Database used by the web app | `debit_card_specializing` |
+| `TEXT2SQL_DEFAULT_DB_ID` | Database used by the web app | `books` in `.env.example` |
 | `TEXT2SQL_POSTGRES_DATABASES` | PostgreSQL database allowlist | unset |
 | `TEXT2SQL_PROFILE_ROOT` | Offline profile root | `profiles` |
 | `TEXT2SQL_GLOSSARY_ROOT` | Approved glossary root | `data/business_glossaries` |
@@ -446,8 +425,8 @@ Important settings:
 | `TEXT2SQL_RETRIEVAL_COLUMNS` | Approximate columns per table | `5` |
 | `TEXT2SQL_SCHEMA_RERANKER_ENABLED` | Enable LightGBM column reranking | `true` |
 | `TEXT2SQL_HISTORY_ENABLED` | Enable strongly matched historical examples | `false` |
-| `TEXT2SQL_SQL_PROVIDER` | SQL provider used by default for chat requests | `groq` in `.env.example` |
-| `TEXT2SQL_SQL_MODEL` | SQL model used by default for chat requests | `qwen/qwen3.8-27b` in `.env.example` |
+| `TEXT2SQL_SQL_PROVIDER` | Provider selected for chat requests | configured in `.env` |
+| `TEXT2SQL_SQL_MODEL` | Model selected for chat requests | configured in `.env` |
 | `TEXT2SQL_CONTEXT_MODE` | `model1` or `retrieval` for chat requests | `retrieval` |
 | `TEXT2SQL_CONTEXT_PROVIDER` | Provider for Model 1 when enabled | selected SQL provider unless overridden |
 | `TEXT2SQL_CONTEXT_MODEL` | Model for Model 1 when enabled | selected SQL model unless overridden |
@@ -459,7 +438,7 @@ Important settings:
 | `TEXT2SQL_JOB_TTL_SECONDS` | Completed asynchronous-job lifetime | `3600` |
 | `TEXT2SQL_MAX_JOBS` | Maximum retained asynchronous jobs | `500` |
 
-See [.env.example](.env.example) for provider-specific settings. Never commit `.env`.
+See [.env.example](.env.example) for one minimal setup. Never commit `.env`.
 
 ## API
 
@@ -485,8 +464,6 @@ curl -X POST http://127.0.0.1:8000/api/chat \
     "session_id": "demo-1",
     "db_id": "books",
     "message": "Count the books by category.",
-    "provider": "agentrouter",
-    "model": "gpt-5.6-sol",
     "context_mode": "retrieval"
   }'
 ```
@@ -563,7 +540,7 @@ src/semantic_text2sql/
   run_history.py       durable, scoped conversation turns and bounded result snapshots
   sql_diffs.py         SQL version comparisons and observed filter changes
   recovery_events.py   typed presentation events from actual recovery observations
-  voice.py             bounded Qwen/Groq speech transcription
+  voice.py             bounded speech transcription
   hybrid_retrieval.py  BM25, embeddings, values, RRF and ML reranking
   context.py           deterministic grounding and context assembly
   llm.py               provider adapters and generation prompts
