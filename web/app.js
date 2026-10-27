@@ -2386,19 +2386,19 @@ function renderPipelineDetails(fragment, timings, body, generation) {
   container.append(headline);
   const config = state.modelConfig || {};
   const configuredModels = [
-    ["Assistant", config.assistant_provider, config.assistant_model],
-    ["Context", config.context_mode === "model1" ? config.context_provider : "retrieval", config.context_mode === "model1" ? config.context_model : null],
-    ["SQL", config.sql_provider, config.sql_model],
-    ["Plotting", config.plotting_provider, config.plotting_model],
+    ["Assistant model", config.assistant_model],
+    ["Context", config.context_mode === "model1" ? config.context_model : "Retrieval"],
+    ["SQL model", config.sql_model],
+    ["Plotting model", config.plotting_model],
   ];
-  for (const [role, provider, model] of configuredModels) {
-    if (!provider) continue;
+  for (const [role, model] of configuredModels) {
+    if (!model) continue;
     const row = document.createElement("div");
     row.className = "pipeline-run unmeasured";
     const label = document.createElement("span");
-    label.textContent = `${role} model`;
+    label.textContent = role;
     const value = document.createElement("b");
-    value.textContent = model ? `${provider} · ${model}` : provider;
+    value.textContent = model;
     row.append(label, value);
     container.append(row);
   }

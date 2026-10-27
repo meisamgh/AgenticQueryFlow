@@ -233,7 +233,10 @@ test('pipeline bars represent measured stage time and leave missing stages unmea
   pipeline(fragment, {total: 2000, routing: 500}, {}, {});
   assert.equal(container.children[0].children[1].textContent, '2.0 s');
   const assistant = container.children.find(row => row.children[0]?.textContent === 'Assistant model');
-  assert.equal(assistant.children[1].textContent, 'groq · qwen/qwen3.8-27b');
+  assert.equal(assistant.children[1].textContent, 'qwen/qwen3.8-27b');
+  const context = container.children.find(row => row.children[0]?.textContent === 'Context');
+  assert.equal(context.children[1].textContent, 'Retrieval');
+  assert.ok(container.children.every(row => !row.children[1]?.textContent?.includes('groq ·')));
   const routing = container.children.find(row => row.children[0]?.textContent === 'Routing');
   assert.equal(routing.children[2].children[0].style.width, '25%');
   const unknown = container.children.find(row => row.children[0]?.textContent === 'Context planning');
