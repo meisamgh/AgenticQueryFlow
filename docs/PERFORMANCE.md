@@ -1,5 +1,9 @@
 # Local performance measurements
 
+For the V6.4 metadata-tool and prompt comparison, see
+[UNIFIED_TOOLS.md](UNIFIED_TOOLS.md). Its scripted workload is separate from
+the SQLGlot benchmark below.
+
 These are **synthetic local measurements**, not production latency or SQL accuracy.
 They use a fixed SQL model, one SQLite database, and BM25 fallback; network-model
 latency, FastEmbed download time, and concurrent production traffic are excluded.

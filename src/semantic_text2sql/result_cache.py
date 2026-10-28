@@ -11,6 +11,7 @@ from semantic_text2sql.models import (
     GenerateResponse,
     ModelProvider,
     ResultPresentation,
+    SemanticContract,
     StrategyHints,
 )
 
@@ -35,6 +36,7 @@ class RecentResult:
     summary: str
     provenance: list[str]
     verified_context: dict[str, Any]
+    semantic_contract: SemanticContract | None
 
     @property
     def message(self) -> str:
@@ -79,6 +81,7 @@ class RecentResult:
                     "historical_examples",
                 }
             },
+            semantic_contract=generation.semantic_contract,
         )
 
     @property
@@ -100,6 +103,7 @@ class RecentResult:
             truncated=self.truncated,
             termination_reason="accepted",
             model_context=self.verified_context or None,
+            semantic_contract=self.semantic_contract,
         )
 
     @property

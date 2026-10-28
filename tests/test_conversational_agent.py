@@ -16,6 +16,7 @@ from semantic_text2sql.conversational_agent import (
 )
 from semantic_text2sql.conversational_bridge import (
     ConversationalAnalyticsBridge,
+    MetadataToolInput,
     _route,
 )
 from semantic_text2sql.data_requirement_validator import _stored_grain_capability
@@ -33,7 +34,7 @@ from semantic_text2sql.models import (
     StrategyHints,
     TokenUsage,
 )
-from semantic_text2sql.profiling import ProfileStore
+from semantic_text2sql.profiling import ProfileStore, profile_database
 from semantic_text2sql.result_cache import RecentResult
 from semantic_text2sql.run_history import RunHistoryStore
 from semantic_text2sql.runtime import RequestBudget, active_request_budget, use_request_budget
@@ -340,6 +341,137 @@ def test_metadata_capabilities_are_distinct(registry: Any, tmp_path: Any) -> Non
     assert any("customer_id" in fact for fact in detail.facts)
     assert all("→" in fact for fact in relationships.facts) or not relationships.found
     assert tables.evidence_id != detail.evidence_id
+
+
+def test_metadata_tools_share_one_verified_snapshot_per_turn(
+    registry: Any, tmp_path: Any, monkeypatch: Any,
+) -> None:
+    original_inspect = registry.inspect
+    inspections: list[str] = []
+
+    def counted_inspect(db_id: str) -> Any:
+        inspections.append(db_id)
+        return original_inspect(db_id)
+
+    monkeypatch.setattr(registry, "inspect", counted_inspect)
+    decisions = [
+        {"action": "CALL_TOOL", "intent": "EXPLORE_SCHEMA", "tool": "list_tables",
+         "instruction": "List tables", "answer": None},
+        {"action": "CALL_TOOL", "intent": "EXPLORE_SCHEMA", "tool": "search_schema",
+         "instruction": "Which columns are in customers?", "answer": None},
+        {"action": "ANSWER", "intent": "EXPLORE_SCHEMA", "tool": None,
+         "instruction": None, "answer": "I found the customer table and its columns."},
+    ]
+    agent = _agent(registry, tmp_path, Completer(decisions), [])
+
+    response = asyncio.run(agent.run(
+        ChatRequest(session_id="metadata", db_id="shop", message="Explore customer data")
+    ))
+
+    assert "customer table" in response.message
+    assert inspections == ["shop"]
+    assert sum(item.kind == "DATABASE" for item in response.call_ledger) == 1
+    assert sum(item.component.startswith("assistant_tool:") for item in response.call_ledger) == 2
+
+
+def test_snapshot_reuse_preserves_schema_search_facts(registry: Any, tmp_path: Any) -> None:
+    agent = _agent(registry, tmp_path, Completer([]), [])
+
+    async def compare() -> tuple[list[str], list[str]]:
+        snapshot = await agent.bridge.load_metadata_snapshot("shop")
+        ordinary = await agent.bridge.inspect_metadata(
+            "shop", "search_schema", "Which columns are in customers?"
+        )
+        reused = await agent.bridge.inspect_metadata(
+            "shop", "search_schema", "Which columns are in customers?", snapshot=snapshot
+        )
+        return ordinary.facts, reused.facts
+
+    ordinary_facts, reused_facts = asyncio.run(compare())
+    assert ordinary_facts == reused_facts
+
+    snapshot = asyncio.run(agent.bridge.load_metadata_snapshot("shop"))
+    with pytest.raises(ValueError, match="another database"):
+        asyncio.run(agent.bridge.inspect_metadata(
+            "other", "list_tables", snapshot=snapshot
+        ))
+
+
+def test_business_search_reports_profile_values_as_candidates_without_live_scan(
+    registry: Any, tmp_path: Any, monkeypatch: Any,
+) -> None:
+    agent = _agent(registry, tmp_path, Completer([]), [])
+    agent.bridge.profiles.save(profile_database(registry, "shop", "sqlite"))
+
+    def unexpected_execute(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("Business-context search must not scan the live database")
+
+    monkeypatch.setattr(registry, "execute", unexpected_execute)
+    exact = agent.bridge.search_business_context(MetadataToolInput(
+        db_id="shop", question="Customers in Germany"
+    ))
+    fuzzy = agent.bridge.search_business_context(MetadataToolInput(
+        db_id="shop", question="Customers in Germnay"
+    ))
+
+    assert any(item.value == "Germany" and item.match == "EXACT"
+               for item in exact.value_candidates)
+    assert any(item.value == "Germany" and item.match == "FUZZY" and item.ambiguous
+               for item in fuzzy.value_candidates)
+    assert "not live existence proof" in exact.facts[-1]
+
+
+def test_inspect_result_uses_exact_accepted_identity_without_sql(
+    registry: Any, tmp_path: Any,
+) -> None:
+    accepted = _accepted_result()
+    accepted = RecentResult.from_response(ChatResponse(
+        session_id="analysis", result_id="result-42", operation="NEW_QUERY",
+        resolved_question=accepted.question, message=accepted.message,
+        generation=accepted.generation,
+    ))
+    completer = Completer([
+        {"action": "CALL_TOOL", "intent": "EXPLAIN", "tool": "inspect_result",
+         "tool_arguments": {"objective": "Inspect accepted revenue", "result_id": "result-42",
+                            "offset": 1, "limit": 1}, "answer": None},
+        {"action": "ANSWER", "intent": "EXPLAIN", "tool": None,
+         "answer": "The accepted result contains two monthly rows."},
+    ])
+    calls: list[str] = []
+    agent = _agent(registry, tmp_path, completer, calls)
+    agent.get_last_response = lambda session_id, db_id: accepted
+
+    response = asyncio.run(agent.run(ChatRequest(
+        session_id="analysis", db_id="shop", message="Inspect that result"
+    )))
+
+    assert calls == []
+    assert "two monthly rows" in response.message
+    assert '"result_id": "result-42"' in completer.prompts[1]
+    assert '"rows": [["2025-02", 15]]' in completer.prompts[1]
+    assert '"summary_statistics"' in completer.prompts[1]
+
+
+def test_inspect_result_rejects_stale_result_identity(
+    registry: Any, tmp_path: Any,
+) -> None:
+    accepted = _accepted_result()
+    completer = Completer([
+        {"action": "CALL_TOOL", "intent": "EXPLAIN", "tool": "inspect_result",
+         "tool_arguments": {"objective": "Inspect an old result", "result_id": "old-result"},
+         "answer": None},
+        {"action": "ANSWER", "intent": "EXPLAIN", "tool": None,
+         "answer": "The requested result is not available."},
+    ])
+    agent = _agent(registry, tmp_path, completer, [])
+    agent.get_last_response = lambda session_id, db_id: accepted
+
+    response = asyncio.run(agent.run(ChatRequest(
+        session_id="analysis", db_id="shop", message="Inspect an old result"
+    )))
+
+    assert "currently accepted result" in response.message
+    assert "currently accepted result" in completer.prompts[1]
 
 
 def test_false_decline_premise_can_stop_without_sql(registry: Any, tmp_path: Any) -> None:
@@ -810,14 +942,16 @@ def test_structured_schema_enumerates_every_allowed_value() -> None:
     for expected in (
         "list_tables", "search_schema", "describe_table", "get_relationships",
         "get_column_profile", "get_available_metrics", "get_business_context",
-        "ask_data", "analyze_result", "check_sql_correctness", "change_visualization",
+        "search_business_context",
+        "ask_data", "inspect_result", "analyze_result", "check_sql_correctness",
+        "change_visualization",
         "present_result", "explain_existing_result", "reset_context",
     ):
         assert expected in tool_enum
     assert "run_arbitrary_sql" not in tool_enum
 
     assert arguments_spec["anyOf"][0]["required"] == [  # type: ignore[index]
-        "objective", "operation", "changes"
+        "objective", "operation", "changes", "result_id", "offset", "limit"
     ]
     assert AGENT_DECISION_SCHEMA["required"] == [
         "action", "intent", "tool", "tool_arguments", "instruction", "answer"

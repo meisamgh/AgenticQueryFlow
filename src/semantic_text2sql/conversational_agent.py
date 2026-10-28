@@ -42,6 +42,7 @@ from semantic_text2sql.models import (
     StrictModel,
     TokenUsage,
     TurnContext,
+    VerifiedSchemaSnapshot,
 )
 from semantic_text2sql.plotting_service import design_chart
 from semantic_text2sql.result_cache import RecentResult
@@ -56,7 +57,9 @@ ToolName = Literal[
     "get_column_profile",
     "get_available_metrics",
     "get_business_context",
+    "search_business_context",
     "ask_data",
+    "inspect_result",
     "analyze_result",
     "check_sql_correctness",
     "change_visualization",
@@ -72,6 +75,9 @@ class ToolInput(StrictModel):
     objective: str = Field(min_length=1, max_length=4_000)
     operation: Literal["NEW_QUERY", "REFINE", "CORRECTION", "COMPARE", "OPTIMIZE"] | None = None
     changes: list[RequestedChange] = Field(default_factory=list, max_length=10)
+    result_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    offset: int = Field(default=0, ge=0)
+    limit: int = Field(default=10, ge=1, le=20)
 
 
 class AgentDecision(StrictModel):
@@ -110,6 +116,9 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
             "objective": "Show total consumption by month",
             "operation": "NEW_QUERY",
             "changes": [],
+            "result_id": None,
+            "offset": 0,
+            "limit": 10,
         },
         "instruction": None,
         "answer": None,
@@ -122,6 +131,9 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
             "objective": "Plot the accepted monthly result",
             "operation": None,
             "changes": [],
+            "result_id": None,
+            "offset": 0,
+            "limit": 10,
         },
         "instruction": None,
         "answer": None,
@@ -140,7 +152,7 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
 _TOOL_INPUT_SCHEMA: dict[str, object] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["objective", "operation", "changes"],
+    "required": ["objective", "operation", "changes", "result_id", "offset", "limit"],
     "properties": {
         "objective": {"type": "string", "minLength": 1, "maxLength": 4_000},
         "operation": {
@@ -176,6 +188,13 @@ _TOOL_INPUT_SCHEMA: dict[str, object] = {
                 },
             },
         },
+        "result_id": {
+            "type": ["string", "null"],
+            "maxLength": 100,
+            "pattern": "^[A-Za-z0-9_-]+$",
+        },
+        "offset": {"type": "integer", "minimum": 0},
+        "limit": {"type": "integer", "minimum": 1, "maximum": 20},
     },
 }
 
@@ -216,6 +235,7 @@ _DECISION_INSTRUCTIONS = (
     + ", ".join(_TOOL_VALUES)
     + " or null. "
     'For CALL_TOOL, tool_arguments contains objective, operation and typed changes; '
+    'for inspect_result, use the accepted result_id and bounded offset/limit; '
     'use operation NEW_QUERY only for independent questions, REFINE for follow-ups, '
     'and null for non-SQL tools. Each change names an operation and target. '
     'Preserve the previous accepted metric and filters unless a change explicitly '
@@ -280,9 +300,11 @@ def _consistency_issue_lines(decision: AgentDecision) -> list[str]:
         "MODIFY_QUERY": {"ask_data"},
         "VISUALIZE": {"change_visualization", "present_result"},
         "EXPLORE_SCHEMA": {"list_tables", "search_schema", "get_column_profile"},
-        "BUSINESS_CONTEXT": {"get_available_metrics", "get_business_context"},
-        "EXPLAIN": {"explain_existing_result", "present_result"},
-        "INVESTIGATE": {"analyze_result", "ask_data"},
+        "BUSINESS_CONTEXT": {
+            "get_available_metrics", "get_business_context", "search_business_context"
+        },
+        "EXPLAIN": {"explain_existing_result", "present_result", "inspect_result"},
+        "INVESTIGATE": {"analyze_result", "inspect_result", "ask_data"},
         "CORRECT": {"check_sql_correctness", "ask_data"},
         "REVIEW_SQL": {"check_sql_correctness"},
         "OPTIMIZE": {"ask_data"},
@@ -334,7 +356,9 @@ class _DecisionCompletion:
     message: str | None = None
 
 
-CACHED_RESULT_TOOLS: frozenset[ToolName] = frozenset({"analyze_result", "present_result"})
+CACHED_RESULT_TOOLS: frozenset[ToolName] = frozenset(
+    {"analyze_result", "present_result", "inspect_result"}
+)
 PRIOR_SQL_TOOLS: frozenset[ToolName] = frozenset(
     {"change_visualization", "check_sql_correctness"}
 )
@@ -371,6 +395,7 @@ class ConversationalAnalyticsAgent:
         self._request: ChatRequest | None = None
         self._budget: RequestBudget | None = None
         self._investigation_id: str | None = None
+        self._metadata_snapshot: VerifiedSchemaSnapshot | None = None
 
     async def run(self, request: ChatRequest) -> ChatResponse:
         # The compiled graph is immutable, but request-local data must not be
@@ -453,15 +478,6 @@ class ConversationalAnalyticsAgent:
             cause = "The model provider rejected or failed the decision request."
         return cause + " No query was run; please retry or select another configured model."
 
-    @staticmethod
-    def _capabilities() -> list[str]:
-        return [
-            "answer analytical questions through the governed Text-to-SQL pipeline",
-            "explain accepted results and SQL",
-            "inspect schema and approved business definitions",
-            "make validated charts from complete accepted results",
-        ]
-
     def _failure(self, message: str) -> ChatResponse:
         return self._plain(message, provenance=["assistant_service_failure"])
 
@@ -469,6 +485,7 @@ class ConversationalAnalyticsAgent:
         runner = object.__new__(ConversationalAnalyticsAgent)
         runner.__dict__ = self.__dict__.copy()
         runner._request = request
+        runner._metadata_snapshot = None
         runner._investigation_id = uuid4().hex
         runner._budget = RequestBudget(
             timeout_seconds=float(os.environ.get("TEXT2SQL_ASSISTANT_TIMEOUT_SECONDS", "180")),
@@ -710,12 +727,12 @@ class ConversationalAnalyticsAgent:
         )
         compact = {
             "question": self._request.message,
-            "capabilities": self._capabilities(),
             "previous_question": previous.resolved_question if previous else None,
             "accepted_sql_available": bool(previous and previous.last_sql),
             "accepted_result_available": bool(
                 last and last.generation and last.generation.accepted
             ),
+            "accepted_result_id": last.result_id if last else None,
             "result_columns": previous.last_columns if previous else [],
             "accepted_analytical_contract": (
                 previous.semantic_contract.model_dump(
@@ -740,51 +757,30 @@ class ConversationalAnalyticsAgent:
         }
         prompt = (
             "You are the single client-facing AI Business Analytics Assistant. "
-            "For every user message, use the current conversation context and accepted "
-            "analytical state to understand the client's objective. Decide whether to "
-            "answer directly or invoke one or more tools. Conversation context "
-            "may include previous questions, accepted SQL, verified results, business metric "
-            "definitions, active filters, dimensions, date ranges, visualization state, "
-            "corrections, and prior tool observations. Prefer the simplest action that "
-            "completely satisfies the request. Never execute SQL when verified existing "
-            "data is sufficient. Tools provide structured evidence; their outputs are "
-            "observations, not final conversational messages. After each tool result, "
-            "evaluate whether more action is needed or sufficient evidence exists. "
-            "When further analysis is required, issue distinct, scoped analytical objectives "
-            "rather than repeating the original question. Preserve approved business "
-            "definitions and unaffected constraints. For successful responses, write the "
-            "final natural-language answer yourself, using actual evidence. Never invent "
-            "database facts or numbers, or claim a visualization exists before observing a "
-            "successful validated chart result. Be concise, helpful and professional for "
-            "nontechnical business stakeholders; explain conclusions rather than technical "
-            "execution details unless asked. If evidence is insufficient, explain the "
-            "limitation without inventing an answer. For an analytical request, call "
-            "ask_data even if the client omitted time periods, filters or table names; "
-            "the governed data layer resolves definitions and defaults to all available "
-            "data when no period or filter was requested. Do not ask the client to name "
-            "a table, metric definition, or date range before trying the tool. "
-            "Never fabricate success. "
+            "Use the current question, accepted contract, SQL/result, chart, corrections "
+            "and observations. Choose the simplest complete action. Never execute SQL when "
+            "verified existing data is sufficient. Treat tools as evidence, not answers; "
+            "inspect each outcome before continuing. Preserve approved definitions and "
+            "unaffected constraints. For multi-step investigation, use distinct objectives. "
+            "Write the final concise stakeholder answer from observed evidence only; "
+            "never invent facts, causal claims, or chart success. If evidence is insufficient, "
+            "state the limitation. For analytical requests, call ask_data even without a "
+            "period, filter, or table; the governed layer handles unspecified scope. "
+            "Do not ask the client to name a table, metric definition, or date range before "
+            "trying the tool. "
             + _DECISION_INSTRUCTIONS
             + "\nTools: list_tables/search_schema/describe_table/get_relationships/"
-            "get_column_profile inspect allowlisted metadata; get_available_metrics/"
-            "get_business_context return approved definitions; ask_data delegates new or "
-            "modified analytical questions to governed Text-to-SQL; analyze_result/"
-            "present_result inspect bounded accepted result rows; check_sql_correctness "
-            "reviews accepted SQL; change_visualization reuses or requeries as the "
-            "existing gate decides; explain_existing_result inspects accepted SQL, "
-            "its referenced tables/columns and result evidence; reset_context "
-            "delegates an explicit reset request to the existing conversation service. "
-            "For database facts, use a grounding tool before answering; for a plot of an "
-            "existing result use change_visualization, and for a new plot requiring data "
-            "use ask_data. Do not claim a chart exists before observing a chart result. "
-            "Use ask_data for new, corrected or optimized analytical questions; "
-            "If one request needs both new data and a chart, call ask_data first, then "
-            "change_visualization on the accepted result, then answer. "
-            "use check_sql_correctness only when the client requests a correctness review. "
-            "Only ask_data may delegate governed SQL generation. Never ask tools to "
-            "execute arbitrary SQL. "
-            "After sufficient observations, answer with only supported facts; do not infer "
-            "causality from descriptive data.\nContext: " + json.dumps(compact, default=str)
+            "get_column_profile inspect allowlisted schema; get_available_metrics/"
+            "get_business_context return approved definitions; search_business_context "
+            "adds advisory profiled value candidates, not live proof; ask_data alone runs "
+            "governed SQL; inspect_result reads the accepted result_id without SQL; "
+            "analyze_result/present_result inspect saved rows; explain_existing_result "
+            "inspects accepted SQL; check_sql_correctness reviews it only on request; "
+            "change_visualization edits a chart from sufficient accepted data; "
+            "reset_context handles explicit reset. For a new plot needing data, ask_data "
+            "then change_visualization; for chart-only edits, reuse accepted data. "
+            "Never ask tools to execute arbitrary SQL.\nContext: "
+            + json.dumps(compact, default=str)
         )
         provider = os.environ.get("TEXT2SQL_ASSISTANT_PROVIDER") or self._request.provider
         model = os.environ.get("TEXT2SQL_ASSISTANT_MODEL") or self._request.model
@@ -897,6 +893,15 @@ class ConversationalAnalyticsAgent:
                 # chart exists. Keep the governed SQL result, if any, intact.
                 answer = str(plot_issue.get("reason") or plot_issue.get("error")
                              or "The requested chart is unavailable.")
+            inspection_issue = next(
+                (
+                    item for item in reversed(state.observations)
+                    if item.get("tool") == "inspect_result" and item.get("error")
+                ),
+                None,
+            )
+            if inspection_issue is not None:
+                answer = str(inspection_issue["error"])
             evidence_runs = [
                 str(item.get("run_id") or item["evidence_id"])
                 for item in state.observations
@@ -1097,17 +1102,28 @@ class ConversationalAnalyticsAgent:
                 base = response.model_copy(
                     update={"token_usage": TokenUsage(), "call_ledger": []}
                 )
-        elif tool in {"get_business_context", "get_available_metrics"}:
-            output = self.bridge.get_business_context(
+        elif tool in {
+            "get_business_context", "get_available_metrics", "search_business_context"
+        }:
+            lookup = (
+                self.bridge.search_business_context
+                if tool == "search_business_context"
+                else self.bridge.get_business_context
+            )
+            output = lookup(
                 MetadataToolInput(
                     db_id=self._request.db_id,
                     question=question
-                    if tool == "get_business_context"
+                    if tool in {"get_business_context", "search_business_context"}
                     else "What metrics are available?",
                 )
             )
             facts = ToolObservation(
-                tool=tool, facts={"definitions": output.facts, "found": output.found},
+                tool=tool, facts={
+                    "definitions": output.facts,
+                    "found": output.found,
+                    "value_candidates": [item.model_dump() for item in output.value_candidates],
+                },
                 evidence_id=output.evidence_id,
             ).model_dump()
         elif tool in {
@@ -1117,7 +1133,18 @@ class ConversationalAnalyticsAgent:
             "get_relationships",
             "get_column_profile",
         }:
-            self._budget.claim("database")
+            if self._metadata_snapshot is None:
+                self._budget.claim("database")
+                inspection_started = perf_counter()
+                self._metadata_snapshot = await self.bridge.load_metadata_snapshot(
+                    self._request.db_id
+                )
+                downstream_ledger.append(CallLedgerEntry(
+                    component="assistant_schema_inspection",
+                    kind="DATABASE",
+                    status="SUCCEEDED",
+                    latency_ms=round((perf_counter() - inspection_started) * 1000),
+                ))
             output = await self.bridge.inspect_metadata(
                 self._request.db_id,
                 cast(
@@ -1131,11 +1158,52 @@ class ConversationalAnalyticsAgent:
                     tool,
                 ),
                 question,
+                snapshot=self._metadata_snapshot,
             )
             facts = ToolObservation(
                 tool=tool, facts={"metadata": output.facts, "found": output.found},
                 evidence_id=output.evidence_id,
             ).model_dump()
+        elif tool == "inspect_result":
+            if last is None or last.generation is None or not last.generation.accepted:
+                facts = {"tool": tool, "error": "No accepted result is available."}
+            elif tool_input.result_id and tool_input.result_id != last.result_id:
+                facts = {
+                    "tool": tool,
+                    "error": "The requested result is not the currently accepted result.",
+                }
+            else:
+                generation = last.generation
+                complete = (
+                    not generation.truncated
+                    and generation.row_count == len(generation.rows)
+                )
+                facts = {
+                    "tool": tool,
+                    "result_id": last.result_id,
+                    "run_id": last.run_id,
+                    "chart_id": last.chart_id,
+                    "columns": generation.columns,
+                    "row_count": generation.row_count,
+                    "truncated": generation.truncated,
+                    "complete": complete,
+                    "offset": tool_input.offset,
+                    "rows": generation.rows[
+                        tool_input.offset:tool_input.offset + tool_input.limit
+                    ],
+                    "cached_rows_available": len(generation.rows),
+                    "has_more_cached_rows": (
+                        tool_input.offset + tool_input.limit < len(generation.rows)
+                    ),
+                    "sql": generation.sql,
+                    "semantic_contract": (
+                        generation.semantic_contract.model_dump(
+                            mode="json", exclude_none=True, exclude_defaults=True
+                        ) if generation.semantic_contract else None
+                    ),
+                    "summary_statistics": self._analyze_result(last) if complete else None,
+                    "provenance": last.provenance,
+                }
         elif tool == "analyze_result":
             last = self.get_last_response(self._request.session_id, self._request.db_id)
             if last is None:

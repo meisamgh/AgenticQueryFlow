@@ -1,5 +1,24 @@
 # V6.4 progress checkpoint
 
+October 28 unified-tool/performance checkpoint:
+
+- The Top-layer remains the sole conversational decision-maker. Existing governed
+  SQL, plotting, explanation and recovery interfaces were retained. Added
+  `search_business_context` for approved definitions plus advisory profiled value
+  candidates, and `inspect_result` for bounded inspection of the active accepted
+  result by exact result ID. Neither tool executes arbitrary SQL.
+- Metadata tools now reuse one request-local verified schema/profile snapshot.
+  A scripted two-tool turn measured one schema inspection instead of three.
+  The compacted Top-layer prompt measured 18,293 characters across three calls
+  versus 22,289 previously; live token savings are unverified.
+- Focused regressions cover snapshot reuse, exact/fuzzy profile-candidate
+  provenance, no live value scan, accepted-result pagination and stale-ID
+  rejection. Full-suite and frontend verification are recorded in
+  [UNIFIED_TOOLS.md](UNIFIED_TOOLS.md) and the implementation report.
+- This does not complete V6.4. Arbitrary historical result-ID inspection,
+  freshness-aware categorical indexes, full semantic equivalence, production
+  authorization and live-provider/PostgreSQL benchmarking remain open.
+
 October 25 provider continuation (uncommitted):
 
 - Live, credential-backed Groq probes used only a synthetic decision prompt: text, JSON-object and tiny strict schema returned HTTP 200. The full Queryflow AgentDecision instructions returned HTTP 400 `json_validate_failed` in strict-schema mode; the same full prompt succeeded in JSON-object mode and passed local Pydantic validation. This establishes a prompt/schema-size-dependent Groq/Qwen strict-decoding failure, not a missing model or invalid key.
