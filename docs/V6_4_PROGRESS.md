@@ -72,5 +72,12 @@ October 25 PR #3 chart-follow-up integration (local, uncommitted):
 
 - Reviewed the open GitHub PR `#3` and integrated its chart-follow-up behavior into the local working tree without merging the PR or overwriting the earlier uncommitted conversation fixes.
 - The plotting model receives the prior validated chart encodings and Top-layer typed changes. A chart-type-only request cannot silently switch x, y, metric, components, or series; invalid proposals fall back to deterministic chart validation preserving the prior encodings. A period change still returns `REQUERY_REQUIRED` before the plotting model is called.
+
+### Session memory continuation (local checkpoint)
+
+- The existing run-history store now exposes compact `SessionMemoryTurn` references: question, bounded assistant summary, accepted/failed status, result/chart IDs, column names, row count, and a small contract summary. SQLite reads project only those JSON fields; they do not load full saved rows or SQL into the Top-layer prompt.
+- The Top-layer reads at most three recent same-session/database turns once per request and can call `search_conversation_memory` for older references. The existing Top-layer remains the only conversational decision-maker. Historical summaries are explicitly advisory; result IDs and accepted SQL remain the evidence boundary.
+- Reset starts a durable memory epoch without deleting audit history. Explicit historical restoration can still use the chosen parent lineage. Tests verify session/database isolation, persistence across reopening, and one-call compact prompt construction.
+- This does not yet make older full results available through `inspect_result`; that tool continues to require the currently accepted result ID. Historical numerical comparisons beyond saved summaries therefore need further governed result retrieval. No before/after live-provider latency or semantic-correctness improvement is claimed.
 - Replaced the chart proposal prompt with the requested expert business-analytics visualization-planner instructions, retaining the application's JSON schema and bounded result sample.
 - Verification: focused visualization/V6.3 tests, full Python pytest (one skipped), 72 Deno frontend tests, Ruff, mypy over 55 source files, and `git diff --check` passed. No live-provider call was made; improved chart quality in live use remains unmeasured.

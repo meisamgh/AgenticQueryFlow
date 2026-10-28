@@ -510,6 +510,7 @@ def create_app(
         """Start a fresh conversation without invoking any model or deleting audit history."""
         response.headers["Cache-Control"] = "no-store"
         conversations.reset(session_id)
+        runs.mark_memory_reset(session_id)
         for key in [key for key in recent_results if key[0] == session_id]:
             recent_results.pop(key, None)
         return Response(status_code=204, headers={"Cache-Control": "no-store"})
@@ -2016,6 +2017,7 @@ def create_app(
     )
     def reset_assistant_context(session_id: str) -> None:
         conversations.reset(session_id)
+        runs.mark_memory_reset(session_id)
         for key in [key for key in recent_results if key[0] == session_id]:
             recent_results.pop(key, None)
 
@@ -2025,6 +2027,12 @@ def create_app(
         get_state=accepted_state,
         get_last_response=accepted_result,
         reset_handler=reset_assistant_context,
+        get_recent_memory=lambda session_id, db_id, parent_run_id: runs.recent_memory(
+            session_id, db_id, parent_run_id=parent_run_id
+        ),
+        search_memory=lambda session_id, db_id, question, parent_run_id: runs.search_memory(
+            session_id, db_id, question, parent_run_id=parent_run_id
+        ),
         sql_handler=assistant_sql_handler,
         investigation_handler=assistant_investigation_handler,
     )

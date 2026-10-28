@@ -6,6 +6,7 @@ permission to execute model-authored SQL. Analytical work delegates to chat.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -46,6 +47,7 @@ from semantic_text2sql.models import (
 )
 from semantic_text2sql.plotting_service import design_chart
 from semantic_text2sql.result_cache import RecentResult
+from semantic_text2sql.run_history import SessionMemoryTurn
 from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded, use_request_budget
 from semantic_text2sql.visualization import parse_intent
 
@@ -60,6 +62,7 @@ ToolName = Literal[
     "search_business_context",
     "ask_data",
     "inspect_result",
+    "search_conversation_memory",
     "analyze_result",
     "check_sql_correctness",
     "change_visualization",
@@ -296,15 +299,22 @@ def _consistency_issue_lines(decision: AgentDecision) -> list[str]:
     if decision.action == "ANSWER" and not (decision.answer or "").strip():
         issues.append(f"{decision.action} requires a nonempty answer")
     intent_tools = {
-        "NEW_QUERY": {"ask_data"},
-        "MODIFY_QUERY": {"ask_data"},
-        "VISUALIZE": {"change_visualization", "present_result"},
+        "NEW_QUERY": {"ask_data", "search_conversation_memory"},
+        "MODIFY_QUERY": {"ask_data", "search_conversation_memory"},
+        "VISUALIZE": {
+            "change_visualization", "present_result", "search_conversation_memory",
+        },
         "EXPLORE_SCHEMA": {"list_tables", "search_schema", "get_column_profile"},
         "BUSINESS_CONTEXT": {
             "get_available_metrics", "get_business_context", "search_business_context"
         },
-        "EXPLAIN": {"explain_existing_result", "present_result", "inspect_result"},
-        "INVESTIGATE": {"analyze_result", "inspect_result", "ask_data"},
+        "EXPLAIN": {
+            "explain_existing_result", "present_result", "inspect_result",
+            "search_conversation_memory",
+        },
+        "INVESTIGATE": {
+            "analyze_result", "inspect_result", "ask_data", "search_conversation_memory",
+        },
         "CORRECT": {"check_sql_correctness", "ask_data"},
         "REVIEW_SQL": {"check_sql_correctness"},
         "OPTIMIZE": {"ask_data"},
@@ -377,6 +387,8 @@ class ConversationalAnalyticsAgent:
         sql_handler: Callable[[ChatRequest], Awaitable[ChatResponse]],
         investigation_handler: Callable[[ChatRequest], Awaitable[ChatResponse]] | None = None,
         reset_handler: Callable[[str], None] | None = None,
+        get_recent_memory: Callable[[str, str, str | None], list[SessionMemoryTurn]] | None = None,
+        search_memory: Callable[[str, str, str, str | None], list[SessionMemoryTurn]] | None = None,
     ) -> None:
         self.bridge = bridge
         self.completers = completers
@@ -385,6 +397,9 @@ class ConversationalAnalyticsAgent:
         self.sql_handler = sql_handler
         self.investigation_handler = investigation_handler
         self.reset_handler = reset_handler
+        self.get_recent_memory = get_recent_memory
+        self.search_memory = search_memory
+        self._recent_memory: list[SessionMemoryTurn] | None = None
         graph = StateGraph(AgentState)
         graph.add_node("reason", self._reason)
         graph.add_node("act", self._act)
@@ -486,6 +501,7 @@ class ConversationalAnalyticsAgent:
         runner.__dict__ = self.__dict__.copy()
         runner._request = request
         runner._metadata_snapshot = None
+        runner._recent_memory = None
         runner._investigation_id = uuid4().hex
         runner._budget = RequestBudget(
             timeout_seconds=float(os.environ.get("TEXT2SQL_ASSISTANT_TIMEOUT_SECONDS", "180")),
@@ -714,6 +730,22 @@ class ConversationalAnalyticsAgent:
 
     async def _reason(self, state: AgentState) -> AgentState:
         assert self._request is not None and self._budget is not None
+        if self._recent_memory is None:
+            self._recent_memory = []
+            if self.get_recent_memory is not None:
+                started = perf_counter()
+                self._recent_memory = await asyncio.to_thread(
+                    self.get_recent_memory,
+                    self._request.session_id,
+                    self._request.db_id,
+                    self._request.parent_run_id,
+                )
+                state = state.model_copy(update={
+                    "ledger": [*state.ledger, CallLedgerEntry(
+                        component="conversation_memory", kind="TOOL", status="SUCCEEDED",
+                        latency_ms=round((perf_counter() - started) * 1000),
+                    )],
+                })
         previous = self.get_state(self._request.session_id)
         if state.base_response and state.base_response.state:
             previous = state.base_response.state
@@ -754,6 +786,10 @@ class ConversationalAnalyticsAgent:
                 else None
             ),
             "observations": state.observations[-3:],
+            "recent_conversation": [
+                item.model_dump(mode="json", exclude_none=True, exclude={"created_at"})
+                for item in self._recent_memory[:3]
+            ],
         }
         prompt = (
             "You are the single client-facing AI Business Analytics Assistant. "
@@ -768,12 +804,17 @@ class ConversationalAnalyticsAgent:
             "period, filter, or table; the governed layer handles unspecified scope. "
             "Do not ask the client to name a table, metric definition, or date range before "
             "trying the tool. "
+            "Recent conversation summaries are non-authoritative; accepted SQL and result IDs "
+            "identify evidence. For older references, call search_conversation_memory, then "
+            "inspect the referenced result before asserting values. Never treat a failed or "
+            "superseded analysis as accepted. "
             + _DECISION_INSTRUCTIONS
             + "\nTools: list_tables/search_schema/describe_table/get_relationships/"
             "get_column_profile inspect allowlisted schema; get_available_metrics/"
             "get_business_context return approved definitions; search_business_context "
             "adds advisory profiled value candidates, not live proof; ask_data alone runs "
             "governed SQL; inspect_result reads the accepted result_id without SQL; "
+            "search_conversation_memory finds older same-session/database references without SQL; "
             "analyze_result/present_result inspect saved rows; explain_existing_result "
             "inspects accepted SQL; check_sql_correctness reviews it only on request; "
             "change_visualization edits a chart from sufficient accepted data; "
@@ -1164,6 +1205,28 @@ class ConversationalAnalyticsAgent:
                 tool=tool, facts={"metadata": output.facts, "found": output.found},
                 evidence_id=output.evidence_id,
             ).model_dump()
+        elif tool == "search_conversation_memory":
+            if self.search_memory is None:
+                facts = {"tool": tool, "error": "Conversation history is unavailable."}
+            else:
+                matches = await asyncio.to_thread(
+                    self.search_memory,
+                    self._request.session_id,
+                    self._request.db_id,
+                    question,
+                    self._request.parent_run_id,
+                )
+                facts = {
+                    "tool": tool,
+                    "matches": [
+                        item.model_dump(mode="json", exclude_none=True, exclude={"created_at"})
+                        for item in matches[:3]
+                    ],
+                    "note": (
+                        "Historical summaries are not proof; inspect accepted result "
+                        "evidence before using values."
+                    ),
+                }
         elif tool == "inspect_result":
             if last is None or last.generation is None or not last.generation.accepted:
                 facts = {"tool": tool, "error": "No accepted result is available."}

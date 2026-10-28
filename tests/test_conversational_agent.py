@@ -36,7 +36,7 @@ from semantic_text2sql.models import (
 )
 from semantic_text2sql.profiling import ProfileStore, profile_database
 from semantic_text2sql.result_cache import RecentResult
-from semantic_text2sql.run_history import RunHistoryStore
+from semantic_text2sql.run_history import RunHistoryStore, SessionMemoryTurn
 from semantic_text2sql.runtime import RequestBudget, active_request_budget, use_request_budget
 
 
@@ -55,6 +55,36 @@ class Completer:
         self.calls += 1
         self.prompts.append(prompt)
         return json.dumps(next(self.decisions)), TokenUsage(input_tokens=10, output_tokens=5)
+
+
+def test_top_layer_gets_bounded_history_without_sql_or_rows(
+    registry: Any, tmp_path: Any,
+) -> None:
+    completer = Completer([{
+        "action": "ANSWER", "intent": "DIRECT_ANSWER", "tool": None,
+        "answer": "I can refer to the previous analysis.",
+    }])
+    agent = _agent(registry, tmp_path, completer, [])
+    calls: list[tuple[str, str, str | None]] = []
+
+    def recent(session_id: str, db_id: str, parent: str | None) -> list[SessionMemoryTurn]:
+        calls.append((session_id, db_id, parent))
+        return [SessionMemoryTurn(
+            run_id="run_previous", result_id="result_previous", question="Total spending",
+            assistant_summary="Spending increased", operation="NEW_QUERY", accepted=True,
+            sql_available=True, columns=["spend"], created_at=1.0,
+        )]
+
+    agent.get_recent_memory = recent
+    response = asyncio.run(agent.run(ChatRequest(
+        session_id="owner", db_id="shop", message="What was the previous answer?"
+    )))
+    assert response.message == "I can refer to the previous analysis."
+    assert calls == [("owner", "shop", None)]
+    assert completer.calls == 1
+    assert '"result_id": "result_previous"' in completer.prompts[0]
+    assert "Spending increased" in completer.prompts[0]
+    assert "SELECT" not in completer.prompts[0]
 
 
 def _agent(
@@ -943,7 +973,8 @@ def test_structured_schema_enumerates_every_allowed_value() -> None:
         "list_tables", "search_schema", "describe_table", "get_relationships",
         "get_column_profile", "get_available_metrics", "get_business_context",
         "search_business_context",
-        "ask_data", "inspect_result", "analyze_result", "check_sql_correctness",
+        "ask_data", "inspect_result", "search_conversation_memory",
+        "analyze_result", "check_sql_correctness",
         "change_visualization",
         "present_result", "explain_existing_result", "reset_context",
     ):

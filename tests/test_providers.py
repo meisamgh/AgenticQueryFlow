@@ -604,6 +604,7 @@ def test_agent_decision_schema_enumerates_every_allowed_value() -> None:
         "search_business_context",
         "ask_data",
         "inspect_result",
+        "search_conversation_memory",
         "analyze_result",
         "check_sql_correctness",
         "change_visualization",

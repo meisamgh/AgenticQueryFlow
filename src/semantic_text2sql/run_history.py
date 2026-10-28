@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -23,6 +24,27 @@ from semantic_text2sql.models import ConversationState, PresentationState, Recov
 MAX_PREVIEW_ROWS = 20
 DEFAULT_SESSION_HISTORY_LIMIT = 50
 GLOBAL_RETENTION_LIMIT = 500
+_MEMORY_WORD = re.compile(r"[a-z0-9_]+")
+
+
+class SessionMemoryTurn(BaseModel):
+    """Compact historical reference; summaries are not database authority."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    run_id: str
+    result_id: str | None = None
+    chart_id: str | None = None
+    question: str
+    assistant_summary: str
+    operation: str
+    accepted: bool
+    sql_available: bool
+    columns: list[str] = Field(default_factory=list)
+    row_count: int = 0
+    truncated: bool = False
+    contract_summary: dict[str, Any] = Field(default_factory=dict)
+    created_at: float
 
 
 class RunRecord(BaseModel):
@@ -71,6 +93,7 @@ class RunHistoryStore:
         self.path = path
         self._sessions: list[RunRecord] = []
         self._by_id: dict[str, RunRecord] = {}
+        self._memory_epochs: dict[str, float] = {}
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -88,6 +111,10 @@ class RunHistoryStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS query_runs_session_db "
                 "ON query_runs(session_id, json_extract(record_json, '$.db_id'), created_at)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS session_memory_epochs ("
+                "session_id TEXT PRIMARY KEY, reset_at REAL NOT NULL)"
             )
 
     @classmethod
@@ -237,6 +264,115 @@ class RunHistoryStore:
                 continue
         return records
 
+    def mark_memory_reset(self, session_id: str) -> None:
+        """Start a new memory epoch without deleting the audit history."""
+        reset_at = time.time()
+        with self._lock:
+            if self.path is None:
+                self._memory_epochs[session_id] = reset_at
+            else:
+                with self._connect() as connection:
+                    connection.execute(
+                        "INSERT INTO session_memory_epochs(session_id, reset_at) VALUES (?, ?) "
+                        "ON CONFLICT(session_id) DO UPDATE SET reset_at = excluded.reset_at",
+                        (session_id, reset_at),
+                    )
+
+    def recent_memory(
+        self, session_id: str, db_id: str, *, limit: int = 3,
+        parent_run_id: str | None = None,
+    ) -> list[SessionMemoryTurn]:
+        """Return small, same-session/database references, never SQL or result rows."""
+        if parent_run_id:
+            return self._lineage_memory(session_id, db_id, parent_run_id)[:limit]
+        return self._memory_candidates(session_id, db_id, limit=min(max(limit, 0), 5))
+
+    def search_memory(
+        self, session_id: str, db_id: str, question: str, *, limit: int = 3,
+        parent_run_id: str | None = None,
+    ) -> list[SessionMemoryTurn]:
+        """Search historical references only when the Top layer calls the tool."""
+        candidates = (
+            self._lineage_memory(session_id, db_id, parent_run_id)
+            if parent_run_id else self._memory_candidates(session_id, db_id, limit=100)
+        )
+        if not candidates:
+            return []
+        bounded = min(max(limit, 1), 5)
+        query = question.casefold()
+        accepted = [item for item in candidates if item.accepted and item.sql_available]
+        if "first" in query and any(word in query for word in ("query", "analysis", "result")):
+            return accepted[-1:][:bounded]
+        if "previous" in query or "last" in query:
+            return candidates[:1]
+        terms = set(_MEMORY_WORD.findall(query)) - {
+            "the", "this", "that", "with", "from", "show", "compare", "earlier", "result",
+        }
+        ranked = sorted(
+            enumerate(candidates),
+            key=lambda pair: (
+                -len(terms & set(_MEMORY_WORD.findall(pair[1].question.casefold()))),
+                pair[0],
+            ),
+        )
+        return [
+            item for _, item in ranked[:bounded]
+            if terms & set(_MEMORY_WORD.findall(item.question.casefold()))
+        ]
+
+    def _lineage_memory(
+        self, session_id: str, db_id: str, run_id: str
+    ) -> list[SessionMemoryTurn]:
+        root = self.get(run_id, session_id)
+        if root is None or root.db_id != db_id:
+            return []
+        return [
+            _memory_from_record(record)
+            for record in reversed(self.lineage(session_id, run_id))
+            if record.db_id == db_id
+        ]
+
+    def _memory_candidates(
+        self, session_id: str, db_id: str, *, limit: int
+    ) -> list[SessionMemoryTurn]:
+        if limit < 1:
+            return []
+        with self._lock:
+            if self.path is None:
+                cutoff = self._memory_epochs.get(session_id, 0.0)
+                records = [
+                    item for item in self._sessions
+                    if item.session_id == session_id and item.db_id == db_id
+                    and item.created_at > cutoff
+                ][:limit]
+                return [_memory_from_record(item) for item in records]
+            with self._connect() as connection:
+                boundary = connection.execute(
+                    "SELECT reset_at FROM session_memory_epochs WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                cutoff = float(boundary[0]) if boundary else 0.0
+                rows = connection.execute(
+                    "SELECT run_id, created_at, "
+                    "json_extract(record_json, '$.original_message'), "
+                    "json_extract(record_json, '$.response_payload.message'), "
+                    "json_extract(record_json, '$.operation'), "
+                    "json_extract(record_json, '$.accepted'), "
+                    "json_extract(record_json, '$.sql'), "
+                    "json_extract(record_json, '$.response_payload.result_id'), "
+                    "json_extract(record_json, '$.response_payload.chart_id'), "
+                    "json_extract(record_json, '$.columns'), "
+                    "json_extract(record_json, '$.row_count'), "
+                    "json_extract(record_json, '$.truncated'), "
+                    "json_extract(record_json, '$.preview_truncated'), "
+                    "json_extract(record_json, '$.state_snapshot.semantic_contract') "
+                    "FROM query_runs WHERE session_id = ? "
+                    "AND json_extract(record_json, '$.db_id') = ? AND created_at > ? "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                    (session_id, db_id, cutoff, limit),
+                ).fetchall()
+        return [_memory_from_projection(row) for row in rows]
+
     def get(self, run_id: str, session_id: str | None = None) -> RunRecord | None:
         if self.path is not None:
             with self._lock, self._connect() as connection:
@@ -286,6 +422,10 @@ class RunHistoryStore:
             if self.path is not None:
                 with self._connect() as connection:
                     connection.execute("DELETE FROM query_runs WHERE session_id = ?", (session_id,))
+                    connection.execute(
+                        "DELETE FROM session_memory_epochs WHERE session_id = ?", (session_id,)
+                    )
+            self._memory_epochs.pop(session_id, None)
             self._sessions = [item for item in self._sessions if item.session_id != session_id]
             self._by_id = {
                 key: item for key, item in self._by_id.items() if item.session_id != session_id
@@ -323,6 +463,62 @@ class RunHistoryStore:
 
 def cast_path(path: Path | None) -> str:
     return str(path) if path is not None else ":memory:"
+
+
+def _contract_summary(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except ValueError:
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: raw[key]
+        for key in ("measures", "filters", "grain", "active_period", "comparison_periods")
+        if raw.get(key)
+    }
+
+
+def _memory_from_record(record: RunRecord) -> SessionMemoryTurn:
+    payload = record.response_payload
+    return SessionMemoryTurn(
+        run_id=record.run_id,
+        result_id=payload.get("result_id"),
+        chart_id=payload.get("chart_id"),
+        question=record.original_message[:300],
+        assistant_summary=str(payload.get("message") or record.presentation_summary or "")[:400],
+        operation=record.operation,
+        accepted=record.accepted,
+        sql_available=bool(record.accepted and record.sql),
+        columns=record.columns[:12],
+        row_count=record.row_count,
+        truncated=record.truncated or record.preview_truncated,
+        contract_summary=_contract_summary(
+            record.state_snapshot.semantic_contract.model_dump(mode="json")
+            if record.state_snapshot and record.state_snapshot.semantic_contract else None
+        ),
+        created_at=record.created_at,
+    )
+
+
+def _memory_from_projection(row: tuple[Any, ...]) -> SessionMemoryTurn:
+    columns = json.loads(row[9]) if isinstance(row[9], str) else []
+    return SessionMemoryTurn(
+        run_id=str(row[0]),
+        created_at=float(row[1]),
+        question=str(row[2] or "")[:300],
+        assistant_summary=str(row[3] or "")[:400],
+        operation=str(row[4] or ""),
+        accepted=bool(row[5]),
+        sql_available=bool(row[5] and row[6]),
+        result_id=str(row[7]) if row[7] else None,
+        chart_id=str(row[8]) if row[8] else None,
+        columns=columns[:12] if isinstance(columns, list) else [],
+        row_count=int(row[10] or 0),
+        truncated=bool(row[11] or row[12]),
+        contract_summary=_contract_summary(row[13]),
+    )
 
 
 def now() -> float:
