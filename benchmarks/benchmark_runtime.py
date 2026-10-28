@@ -31,7 +31,9 @@ class FixedModel:
 
     async def generate(self, **kwargs: Any) -> tuple[str, int]:
         self.calls += 1
-        return "SELECT id, label, amount FROM orders ORDER BY id", 1
+        return os.environ.get(
+            "TEXT2SQL_BENCHMARK_SQL", "SELECT id, label, amount FROM orders ORDER BY id"
+        ), 1
 
 
 def main() -> None:
@@ -92,6 +94,11 @@ def main() -> None:
                             "db_calls": sum(
                                 item["kind"] == "DATABASE" for item in body.get("call_ledger", [])
                             ),
+                            "metered_db_calls": body.get("generation", {}).get(
+                                "telemetry", {}
+                            ).get("total_database_calls", 0),
+                            "input_tokens": body.get("token_usage", {}).get("input_tokens") or 0,
+                            "output_tokens": body.get("token_usage", {}).get("output_tokens") or 0,
                             "response_bytes": int(
                                 response.headers.get("content-length", len(response.content))
                             ),
@@ -110,6 +117,16 @@ def main() -> None:
                         ),
                         "model_calls_per_request": int(observations[-1]["model_calls"]),
                         "db_ledger_calls_per_request": int(observations[-1]["db_calls"]),
+                        "metered_db_calls_per_request": int(
+                            observations[-1]["metered_db_calls"]
+                        ),
+                        "input_tokens_per_request": int(observations[-1]["input_tokens"]),
+                        "output_tokens_per_request": int(observations[-1]["output_tokens"]),
+                        "last_stage_ms": {
+                            item["component"]: item.get("latency_ms")
+                            for item in body.get("call_ledger", [])
+                            if item.get("latency_ms") is not None
+                        },
                         "median_transfer_bytes": int(
                             statistics.median(item["response_bytes"] for item in observations)
                         ),

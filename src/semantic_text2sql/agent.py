@@ -327,6 +327,7 @@ class TextToSQLAgent:
                                     validation.explain_plan,
                                     max_rows=max(request.max_rows, 1_000),
                                     budget=budget,
+                                    already_warmed=True,
                                 )
                             ).model_copy(update={"optimizer": "sqlglot"})
                             if optimization_evidence.status == "optimized":
@@ -383,6 +384,7 @@ class TextToSQLAgent:
             fingerprint = hashlib.sha256(normalized.encode()).hexdigest()
             if progress:
                 progress("validation")
+            validation_started = perf_counter_ns()
             validation = validate_sql(
                 sql,
                 schema,
@@ -416,6 +418,8 @@ class TextToSQLAgent:
                         "semantic_findings": findings,
                     }
                 )
+            validation_ms = round((perf_counter_ns() - validation_started) / 1_000_000)
+            optimization_started = perf_counter_ns()
             if validation.valid and request.optimization_required and request.previous_sql:
                 validation = await asyncio.to_thread(
                     _validate_result_equivalence,
@@ -438,6 +442,7 @@ class TextToSQLAgent:
                     validation.explain_plan,
                     max_rows=max(request.max_rows, 1_000),
                     budget=budget,
+                    already_warmed=True,
                 )
                 optimization_evidence = measured_optimization
                 if measured_optimization.status != "optimized":
@@ -497,6 +502,7 @@ class TextToSQLAgent:
                                     candidate_validation.explain_plan,
                                     max_rows=max(request.max_rows, 1_000),
                                     budget=budget,
+                                    already_warmed=True,
                                 )
                             ).model_copy(update={"optimizer": "sqlglot"})
                             optimization_evidence = candidate_evidence
@@ -526,9 +532,12 @@ class TextToSQLAgent:
                         result_equivalent=False,
                         selected_sql="baseline",
                     )
+            optimization_ms = round((perf_counter_ns() - optimization_started) / 1_000_000)
+            execution_ms: int | None = None
             if validation.valid and request.execute:
                 if progress:
                     progress("execution")
+                execution_started = perf_counter_ns()
                 try:
                     if budget is not None:
                         budget.claim("database")
@@ -543,6 +552,7 @@ class TextToSQLAgent:
                             "message": f"Read-only execution failed: {error}",
                         }
                     )
+                execution_ms = round((perf_counter_ns() - execution_started) / 1_000_000)
             attempts.append(
                 Attempt(
                     number=number,
@@ -550,6 +560,9 @@ class TextToSQLAgent:
                     normalized_sql=normalized,
                     validation=validation,
                     latency_ms=latency,
+                    validation_ms=validation_ms,
+                    optimization_ms=optimization_ms,
+                    execution_ms=execution_ms,
                     token_usage=usage,
                 )
             )
@@ -881,14 +894,16 @@ def _benchmark_optimization(
     max_rows: int,
     repetitions: int = 1,
     budget: RequestBudget | None = None,
+    already_warmed: bool = False,
 ) -> OptimizationEvidence:
     """Benchmark equivalent queries alternately; retain baseline unless improvement is material."""
-    if budget is not None:
-        budget.claim("database")
-    database.execute(db_id, baseline_sql, max_rows=max_rows)
-    if budget is not None:
-        budget.claim("database")
-    database.execute(db_id, candidate_sql, max_rows=max_rows)
+    if not already_warmed:
+        if budget is not None:
+            budget.claim("database")
+        database.execute(db_id, baseline_sql, max_rows=max_rows)
+        if budget is not None:
+            budget.claim("database")
+        database.execute(db_id, candidate_sql, max_rows=max_rows)
     baseline_times: list[float] = []
     candidate_times: list[float] = []
 

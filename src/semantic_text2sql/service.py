@@ -118,6 +118,7 @@ class TextToSQLService:
             progress("retrieval")
         database = self._database(db_id)
         schema = await budget.wait(asyncio.to_thread(database.inspect, db_id), kind="database")
+        schema_inspection_ms = round((perf_counter() - routing_started) * 1_000)
         dialect = schema.dialect
         database_profile = await budget.wait(
             asyncio.to_thread(self.profiles.load, dialect, db_id), kind="work"
@@ -233,6 +234,7 @@ class TextToSQLService:
 
         planner_usage = TokenUsage()
         planner_call_used = False
+        planner_call_ms: int | None = None
         if context_mode == "model1" and not optimization_required:
             configured_context_provider = os.environ.get("TEXT2SQL_CONTEXT_PROVIDER")
             planner_provider = context_provider or (
@@ -242,6 +244,7 @@ class TextToSQLService:
             )
             planner_model = context_model or os.environ.get("TEXT2SQL_CONTEXT_MODEL") or model
             try:
+                planner_call_started = perf_counter()
                 selection, planner_usage = await budget.wait(
                     plan_context_detailed(
                         self.context_completers[planner_provider],
@@ -257,6 +260,7 @@ class TextToSQLService:
                 )
                 context_request = selection_to_context_request(selection)
                 planner_call_used = True
+                planner_call_ms = round((perf_counter() - planner_call_started) * 1_000)
             except (KeyError, ModelError, ValueError):
                 pass
 
@@ -449,9 +453,25 @@ class TextToSQLService:
                 component="schema_inspection",
                 kind="DATABASE",
                 status="SUCCEEDED",
-                latency_ms=routing_ms,
+                latency_ms=schema_inspection_ms,
             )
         ]
+        call_ledger.append(
+            CallLedgerEntry(
+                component="schema_retrieval",
+                kind="TOOL",
+                status="SUCCEEDED",
+                latency_ms=max(0, routing_ms - schema_inspection_ms),
+            )
+        )
+        call_ledger.append(
+            CallLedgerEntry(
+                component="context_grounding",
+                kind="TOOL",
+                status="SUCCEEDED",
+                latency_ms=max(0, planning_ms - (planner_call_ms or 0)),
+            )
+        )
         if planner_call_used:
             call_ledger.append(
                 CallLedgerEntry(
@@ -463,7 +483,7 @@ class TextToSQLService:
                     effective_model=context_model or model,
                     input_tokens=planner_usage.input_tokens,
                     output_tokens=planner_usage.output_tokens,
-                    latency_ms=planning_ms,
+                    latency_ms=planner_call_ms,
                 )
             )
         call_ledger.extend(
@@ -479,6 +499,25 @@ class TextToSQLService:
                 latency_ms=attempt.latency_ms,
             )
             for index, attempt in enumerate(generated.attempts)
+        )
+        call_ledger.extend(
+            CallLedgerEntry(
+                component=f"sql_validation_{attempt.number}",
+                kind="TOOL",
+                status="SUCCEEDED" if attempt.validation.valid else "FAILED",
+                latency_ms=attempt.validation_ms,
+            )
+            for attempt in generated.attempts
+        )
+        call_ledger.extend(
+            CallLedgerEntry(
+                component=f"sql_optimization_{attempt.number}",
+                kind="TOOL",
+                status="SUCCEEDED",
+                latency_ms=attempt.optimization_ms,
+            )
+            for attempt in generated.attempts
+            if attempt.optimization_ms is not None and attempt.optimization_ms > 0
         )
         if generated.recovery and generated.recovery.usage.llm_calls:
             call_ledger.extend(
@@ -506,6 +545,7 @@ class TextToSQLService:
                     status=(
                         "FAILED" if attempt.validation.code == "DATABASE_ERROR" else "SUCCEEDED"
                     ),
+                    latency_ms=attempt.execution_ms,
                 )
                 for attempt in generated.attempts
                 if attempt.validation.valid or attempt.validation.code == "DATABASE_ERROR"
@@ -523,7 +563,7 @@ class TextToSQLService:
             update={
                 "telemetry": generated.telemetry.model_copy(
                     update={
-                        "model1_latency_ms": planning_ms,
+                        "model1_latency_ms": planner_call_ms,
                         "ab_context_mode": context_mode,
                         "retrieval": retrieval_trace,
                         "selected_table_count": len(context_request.tables),
@@ -541,13 +581,7 @@ class TextToSQLService:
                         ],
                         "call_ledger": call_ledger,
                         "total_model_calls": sum(item.kind == "MODEL" for item in call_ledger),
-                        "total_database_calls": budget.database_calls
-                        + sum(item.component == "sql_execution" for item in call_ledger)
-                        + (
-                            generated.recovery.usage.database_probe_count
-                            if generated.recovery
-                            else 0
-                        ),
+                        "total_database_calls": budget.database_calls,
                     }
                 )
             }

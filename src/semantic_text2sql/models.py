@@ -581,6 +581,9 @@ class Attempt(StrictModel):
     normalized_sql: str
     validation: ValidationResult
     latency_ms: int = Field(ge=0)
+    validation_ms: int | None = Field(default=None, ge=0)
+    optimization_ms: int | None = Field(default=None, ge=0)
+    execution_ms: int | None = Field(default=None, ge=0)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
 
 

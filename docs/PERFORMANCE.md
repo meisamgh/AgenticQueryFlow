@@ -42,3 +42,49 @@ available. The startup cost has **not** been benchmarked with a real downloaded
 embedding model on this machine. Static schema/profile retrieval text is cached
 separately from question-matched glossary enrichment. A regression test checks
 that warm and fresh retrieval rankings are equal for different glossary queries.
+
+## SQLGlot evaluation and stage ledger (2026-10-28)
+
+The request ledger now separates schema inspection from retrieval and grounding,
+and records SQL validation, optimization evaluation, and execution durations.
+`total_database_calls` is the shared request budget's actual count; the old
+formula added execution and recovery counts a second time. These are accounting
+corrections, not latency improvements.
+
+For a fixed SQLite query, `SELECT id, label, amount FROM orders WHERE 1 = 1
+ORDER BY id`, SQLGlot proposes a simplification. The result-equivalence check
+executes both versions before the optimizer's timed comparison. That check now
+also serves as the warm-up, removing two repeated executions while retaining
+result equivalence, one timed run of each version, and final SQL execution.
+
+| Scripted SQLite path | Before | After | Notes |
+| --- | ---: | ---: | --- |
+| Warm median, 10 requests | 63.03 ms | 52.09 ms | Sequential local API requests |
+| Warm p95, 10 requests | 64.69 ms | 52.53 ms | Nearest-rank p95 |
+| Metered database calls/request | 8 | 6 | Includes schema inspection |
+| Model calls/request | 1 | 1 | Fixed mock SQL model |
+| Provider-reported tokens | 0 | 0 | Mock model reports no usage |
+| Returned rows | 500 | 500 | Same fixed query and database |
+
+On the after run, the last request ledger reported 0 ms schema inspection,
+1 ms retrieval, 0 ms grounding, 1 ms mocked SQL generation, 2 ms validation,
+22 ms optimizer evaluation, and 4 ms final execution. Remaining local latency
+includes request handling, response construction, and serialization. Stage
+times are rounded milliseconds and are not additive proof of the critical path.
+`benchmark_assistant.py` separately measured one mock Top-layer call for a
+greeting and two for a new SQL request; the latter includes a post-tool answer.
+No live-provider, recovery, plotting, PostgreSQL, concurrent-load, or
+semantic-accuracy improvement is claimed from this run.
+
+Repeat with:
+
+```sh
+TEXT2SQL_BENCHMARK_SQL='SELECT id, label, amount FROM orders WHERE 1 = 1 ORDER BY id' \
+  PYTHONPATH=src python benchmarks/benchmark_runtime.py
+PYTHONPATH=src python benchmarks/benchmark_assistant.py
+```
+
+The next benchmark should use a fixed multi-turn corpus with live configured
+providers, record model input/output and cache tokens, and score SQL result
+equality plus semantic correctness. Do not remove the Top-layer final answer
+or optional context planning on the strength of these mocked timings alone.
