@@ -135,8 +135,8 @@ class TextToSQLService:
                 mode="CORRECTNESS",
                 progress=progress,
                 completer=self.agent.model,
-                provider=provider,
-                model=model,
+                provider=os.environ.get("TEXT2SQL_RECOVERY_PROVIDER") or provider,
+                model=os.environ.get("TEXT2SQL_RECOVERY_MODEL") or model,
                 budget=budget,
             )
             evidence = "\n\n".join(
@@ -374,8 +374,8 @@ class TextToSQLService:
                 mode=review_mode,
                 progress=progress,
                 completer=self.agent.model,
-                provider=provider,
-                model=generation_request.model,
+                provider=os.environ.get("TEXT2SQL_RECOVERY_PROVIDER") or provider,
+                model=os.environ.get("TEXT2SQL_RECOVERY_MODEL") or generation_request.model,
                 budget=budget,
             )
             generated = generated.model_copy(update={"recovery": review_trace})
@@ -464,6 +464,7 @@ class TextToSQLService:
                     input_tokens=planner_usage.input_tokens,
                     output_tokens=planner_usage.output_tokens,
                     latency_ms=planning_ms,
+                    retry_count=planner_usage.provider_retries,
                 )
             )
         call_ledger.extend(
@@ -477,8 +478,19 @@ class TextToSQLService:
                 input_tokens=attempt.token_usage.input_tokens,
                 output_tokens=attempt.token_usage.output_tokens,
                 latency_ms=attempt.latency_ms,
+                retry_count=attempt.token_usage.provider_retries,
             )
             for index, attempt in enumerate(generated.attempts)
+        )
+        call_ledger.extend(
+            CallLedgerEntry(
+                component="sql_validation",
+                kind="TOOL",
+                status="SUCCEEDED",
+                latency_ms=attempt.validation_latency_ms,
+            )
+            for attempt in generated.attempts
+            if attempt.validation_latency_ms is not None
         )
         if generated.recovery and generated.recovery.usage.llm_calls:
             call_ledger.extend(
@@ -506,9 +518,10 @@ class TextToSQLService:
                     status=(
                         "FAILED" if attempt.validation.code == "DATABASE_ERROR" else "SUCCEEDED"
                     ),
+                    latency_ms=attempt.execution_latency_ms,
                 )
                 for attempt in generated.attempts
-                if attempt.validation.valid or attempt.validation.code == "DATABASE_ERROR"
+                if attempt.execution_latency_ms is not None
             )
         if generated.recovery and generated.recovery.usage.database_probe_count:
             call_ledger.extend(

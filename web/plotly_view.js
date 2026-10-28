@@ -7,6 +7,11 @@ window.QueryflowPlotly = (function () {
     "scatter", "bubble", "histogram", "pie", "donut",
   ]);
   const COLORS = ["#6e60e6", "#4f74d4", "#20946c", "#c1803a", "#d45d65", "#998df6", "#2e9bb5", "#b0568d"];
+  const DISPLAY_PALETTES = {
+    ocean: ["#2676c7", "#16a5a9", "#76b9e6", "#347aa1", "#5b9dd6"],
+    forest: ["#27845c", "#71a854", "#3a9f8b", "#9eb86a", "#4f7660"],
+    sunset: ["#dc7048", "#d99a32", "#c45b74", "#a875c2", "#e6b26a"],
+  };
   const LINE = new Set(["line", "multi_line", "step_line", "area", "stacked_area"]);
   const STACK = new Set(["stacked_area", "stacked_bar", "percent_stacked_bar"]);
   const GROUPED = new Set(["multi_line", "stacked_area", "grouped_bar", "stacked_bar", "percent_stacked_bar"]);
@@ -39,7 +44,9 @@ window.QueryflowPlotly = (function () {
     if (time) rawCategories.sort((a, b) => temporalValue(a).localeCompare(temporalValue(b)));
     const shownX = value => time ? temporalValue(value) : String(value ?? "");
     const text = css("--text", "#20212b"), muted = css("--text-muted", "#5c6170");
-    const colors = COLORS.map((fallback, index) => css(`--chart-${index + 1}`, fallback));
+    const colors = Object.hasOwn(DISPLAY_PALETTES, spec.display_palette)
+      ? DISPLAY_PALETTES[spec.display_palette]
+      : COLORS.map((fallback, index) => css(`--chart-${index + 1}`, fallback));
     const horizontal = type === "horizontal_bar";
     const makeTrace = (name, rows, mode, color, extra = {}) => {
       const xs = rows.map(row => shownX(row[x]));

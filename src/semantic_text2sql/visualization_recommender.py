@@ -562,7 +562,9 @@ Use only explicitly requested plot columns when the request names two or more.
 For separate Year and Month columns, you may set x="Year-Month" and
 x_components=["Year", "Month"] for a monthly time axis. Otherwise x_components=[].
 The y and y_measures fields must reference numeric result columns. Prefer multiple
-measures only when their units are compatible. Keep reason to one short sentence.
+measures only when their units are compatible. Use reason only to explain why
+the chart design is appropriate; do not explain the analytical result or infer
+business conclusions. Keep reason to one short sentence.
 
 Context:
 - Current user chart request: {question}

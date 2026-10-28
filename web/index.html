@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=qf4-12" />
+    <link rel="stylesheet" href="/static/styles.css?v=qf4-20" />
     <script>
       // Apply the stored theme before first paint to avoid a flash.
       try {
@@ -90,7 +90,6 @@
               <div class="welcome-mark" data-icon="sparkles"></div>
               <div class="intro-eyebrow">WELCOME TO QUERYFLOW</div>
               <h2>What would you like to know?</h2>
-              <p>Ask in plain language. Queryflow will show the SQL and results, or a chart when you request one.</p>
             </section>
 
             <section id="messages" class="messages"></section>
@@ -170,18 +169,11 @@
               <span class="status-pill"><span data-icon="check"></span> <span class="status-pill-label">Ready</span></span>
             </header>
             <div class="query-semantic-strip" hidden aria-label="Interpreted query constraints"></div>
-            <nav class="response-tabs" role="tablist" aria-label="Response views" hidden>
-              <button type="button" role="tab" data-response-tab="answer" aria-selected="true">Answer</button>
-              <button type="button" role="tab" data-response-tab="data" aria-selected="false">Data</button>
-              <button type="button" role="tab" data-response-tab="sql" aria-selected="false">SQL</button>
-            </nav>
-            <div class="answer-tab-panel" role="tabpanel">
+            <div class="answer-tab-panel">
               <p class="response-note"></p>
-              <p class="presentation-note" hidden></p>
               <div class="chart-section" hidden>
               <header class="chart-head">
                 <div class="chart-head-left">
-                  <div class="chart-kicker">REQUESTED VISUALIZATION</div>
                   <div class="chart-heading">
                     <strong class="chart-title">Chart</strong>
                     <small class="chart-sub"></small>
@@ -200,7 +192,7 @@
                   </div>
                 </div>
               </header>
-              <div class="recommended-plots"><span>Recommended plots</span><div class="chart-kinds" hidden></div></div>
+              <div class="recommended-plots"><span>Recommended plots</span><div class="chart-kinds" hidden></div><div class="chart-colors"><label>Color <select class="chart-palette" aria-label="Chart color palette"><option value="violet">Violet</option><option value="ocean">Ocean</option><option value="forest">Forest</option><option value="sunset">Sunset</option></select></label></div></div>
               <div class="chart-slot"></div>
               <div class="chart-zoom-guide" hidden>Time navigator · drag to zoom, pinch on touch, or use the range slider below the plot.</div>
               <div class="chart-zoom-actions" hidden><button type="button" class="chart-reset-zoom">Reset zoom</button></div>
@@ -209,6 +201,12 @@
               <div class="callout error" hidden><span class="callout-icon" data-icon="alert"></span><div class="callout-text"></div></div>
               <div class="answer-preview" hidden></div>
             </div>
+
+            <nav class="response-tabs" role="tablist" aria-label="Technical views" hidden>
+              <button type="button" role="tab" data-response-tab="data" aria-selected="true">Data</button>
+              <button type="button" role="tab" data-response-tab="sql" aria-selected="false">SQL</button>
+              <button type="button" role="tab" data-response-tab="map" aria-selected="false" hidden>Map</button>
+            </nav>
 
             <div class="sql-result-split" hidden>
               <section class="panel-card sql-panel-pane" role="tabpanel" hidden>
@@ -227,11 +225,15 @@
                   <span data-icon="table"></span><strong>Data</strong><small class="row-count"></small>
                   <div class="panel-actions">
                     <button class="icon-button csv-button" type="button" title="Download CSV" data-icon="download"></button>
+                    <button class="icon-button table-expand" type="button" title="Expand table" aria-label="Expand table" data-icon="maximize"></button>
                   </div>
                 </header>
-                <nav class="data-view-tabs" role="tablist" aria-label="Data scope"><button type="button" class="data-source-tab" aria-selected="true">Source result</button><button type="button" class="data-visible-tab" aria-selected="false">Visible chart data</button></nav>
-                <p class="data-scope-note"></p>
                 <div class="table-wrap"></div>
+                <div class="table-controls"></div>
+              </section>
+              <section class="panel-card map-panel-pane" role="tabpanel" hidden>
+                <header><span data-icon="map"></span><strong>Map</strong></header>
+                <div class="map-slot"></div>
               </section>
             </div>
 
@@ -285,9 +287,9 @@
     <script src="https://cdn.plot.ly/plotly-4.1.1.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
     <script src="/static/icons.js?v=3"></script>
-    <script src="/static/echarts_view.js?v=12"></script>
-    <script src="/static/plotly_view.js?v=1"></script>
-    <script src="/static/chart_explorer.js?v=2"></script>
-    <script src="/static/app.js?v=qf4-20"></script>
+    <script src="/static/echarts_view.js?v=13"></script>
+    <script src="/static/plotly_view.js?v=2"></script>
+    <script src="/static/chart_explorer.js?v=5"></script>
+    <script src="/static/app.js?v=qf4-32"></script>
   </body>
 </html>

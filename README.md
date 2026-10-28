@@ -74,9 +74,14 @@ Selected SQL model -> SQLGlot safety -> EXPLAIN -> read-only execution
 The default context method is retrieval-only. Users may select optional Model 1 context selection
 and choose the SQL model separately. Model 1 selects context; it does not write SQL. Historical SQL
 examples are disabled by default and, when enabled, are admitted only after compatibility checks.
-The legacy path can still use the selected SQL model for chart choice and result explanation.
+The legacy path retains deterministic result presentation and chart planning.
 In assistant mode the top-layer model explains the validated result. Plot requests can invoke
 the independent plotting model; a repeated validated chart does not require another model call.
+The understanding/Top-layer role can run locally through Ollama by setting
+`TEXT2SQL_ASSISTANT_PROVIDER=ollama` and `TEXT2SQL_ASSISTANT_MODEL=gemma4:12b`.
+`OLLAMA_BASE_URL` defaults to `http://127.0.0.1:11434`. This role uses existing task budgets
+and decision validation; unsupported schema grammars fall back to validated JSON output.
+SQL and plotting retain their separately configured providers.
 A chart is never evidence that SQL is business-correct.
 Clicking a chart already recommended for the accepted result is a display-only switch: it
 changes the current plot in place and does not create a new question or execute SQL. Requests
@@ -99,17 +104,19 @@ unresolved rather than being presented as verified business correctness.
 
 ### Stakeholder answers and charts
 
-In the legacy presentation path, the selected model may propose `bar`, `line`, `scatter`, or
-`none` from the question, accepted SQL and up to 40 returned rows. Code verifies the proposed
-columns, numeric values, date axis and row grain; invalid choices become `none`, not another
-guessed chart. A second model call then explains the result using that validated choice. The UI
-renders only actual returned rows and never runs model-generated chart code. SQL and the exact
-result table remain available in the SQL and Data tabs.
+The Top-layer assistant explains accepted results. Requested charts use the plotting specialist,
+with deterministic validation of columns, numeric values, dates and row grain. Single-row results
+can display up to eight numeric measures as compact KPI cards, retaining dimension and currency
+context. Values are displayed exactly as returned; no targets or performance status are invented.
+SQL and the exact result table remain available in the SQL and Data tabs.
 
 Interactive charts use Plotly.js for supported chart types, with ECharts retained as a fallback.
 Time-series plots include drag/wheel zoom, a touch pinch gesture, and a range-slider navigator
 when there are enough points. Chart export uses the active renderer. The plot receives the
 validated result rows without browser-side aggregation or dropping missing values.
+Compatible local choices include step lines, grouped time-series bars, heatmaps and treemaps,
+alongside existing line, area, bar and composition views. Choices are available only when the
+current result can support them; missing measures are never converted to zero for a heatmap.
 
 Each chat can contain multiple independent analytical questions. Follow-ups, corrections,
 explanations, filters, and plots use the latest accepted query when relevant; a new question starts
@@ -460,6 +467,24 @@ Important settings:
 | `TEXT2SQL_MAX_JOBS` | Maximum retained asynchronous jobs | `500` |
 
 See [.env.example](.env.example) for provider-specific settings. Never commit `.env`.
+
+To opt into OpenRouter's Nemotron 3 Ultra free model for SQL generation, set
+`OPENROUTER_API_KEY`, `TEXT2SQL_SQL_PROVIDER=openrouter`, and
+`TEXT2SQL_SQL_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free` in your local `.env`.
+To use it for understanding while keeping a different SQL generator, set
+`TEXT2SQL_ASSISTANT_PROVIDER=openrouter` and
+`TEXT2SQL_ASSISTANT_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free` for the
+conversational assistant. For the optional context selector, also set
+`TEXT2SQL_CONTEXT_MODE=model1`, `TEXT2SQL_CONTEXT_PROVIDER=openrouter`, and
+`TEXT2SQL_CONTEXT_MODEL=nvidia/nemotron-3-ultra-550b-a55b:free`.
+These roles can be split: keep `TEXT2SQL_CONTEXT_MODE=retrieval`, set the SQL
+provider/model to OpenRouter Nemotron, and set `TEXT2SQL_ASSISTANT_*`,
+`TEXT2SQL_PLOTTING_*`, and `TEXT2SQL_RECOVERY_*` to a Groq Qwen model. Recovery
+reasoning then uses Qwen while SQL rewrites remain with the SQL provider.
+The endpoint does not enforce JSON-schema output, so structured decisions are
+validated locally. The [free model's data policy](https://openrouter.ai/nvidia/nemotron-3-ultra-550b-a55b%3Afree)
+says not to upload confidential or personal data; use it only with databases
+whose schema, examples, and question text are safe to send to that endpoint.
 
 ## API
 

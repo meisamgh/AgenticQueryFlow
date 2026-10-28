@@ -7,6 +7,11 @@ window.QueryflowECharts = (function () {
   const FALLBACK_PALETTE = [
     "#6e60e6", "#4f74d4", "#20946c", "#c1803a", "#d45d65", "#998df6", "#2e9bb5", "#b0568d",
   ];
+  const DISPLAY_PALETTES = {
+    ocean: ["#2676c7", "#16a5a9", "#76b9e6", "#347aa1", "#5b9dd6"],
+    forest: ["#27845c", "#71a854", "#3a9f8b", "#9eb86a", "#4f7660"],
+    sunset: ["#dc7048", "#d99a32", "#c45b74", "#a875c2", "#e6b26a"],
+  };
   const TYPES = new Set([
     "line", "multi_line", "step_line", "area", "stacked_area", "bar",
     "horizontal_bar", "grouped_bar", "stacked_bar", "scatter", "bubble",
@@ -18,7 +23,8 @@ window.QueryflowECharts = (function () {
     if (typeof getComputedStyle !== "function") return fallback;
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
   }
-  function palette() {
+  function palette(name) {
+    if (Object.hasOwn(DISPLAY_PALETTES, name)) return DISPLAY_PALETTES[name];
     const steps = FALLBACK_PALETTE.map((_, index) => cssVar(`--chart-${index + 1}`, ""));
     const resolved = steps.filter(Boolean);
     return resolved.length ? resolved : FALLBACK_PALETTE;
@@ -75,7 +81,7 @@ window.QueryflowECharts = (function () {
     const compact = spec.number_format === "compact";
     const base = {
       animation: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-      color: palette(),
+      color: palette(spec.display_palette),
       textStyle: { color: text, fontFamily: "Inter, sans-serif" },
       tooltip: { trigger: "item", renderMode: "richText", confine: true,
         backgroundColor: cssVar("--sql-bg", "#1d2130"),
@@ -107,7 +113,7 @@ window.QueryflowECharts = (function () {
       const max = Math.max(...data.map(row => Number(row[y])));
       return { ...base, tooltip: { ...base.tooltip, formatter: item => `${item.value[0]}: ${format(item.value[1])}` },
         visualMap: { min, max, calculable: true, orient: "horizontal", left: "center", top: 10,
-          inRange: { color: [cssVar("--accent-soft", "#efedff"), cssVar("--accent", "#6e60e6")] } },
+          inRange: { color: [cssVar("--accent-soft", "#efedff"), palette(spec.display_palette)[0]] } },
         calendar: years.map((year, index) => ({ range: year, top: 65 + index * 190,
           cellSize: ["auto", 16], right: 24, left: 40,
           yearLabel: { color: muted }, monthLabel: { color: muted }, dayLabel: { color: muted } })),
@@ -124,7 +130,7 @@ window.QueryflowECharts = (function () {
         yAxis: { type: "category", data: ys, name: group, axisLabel: { color: muted } },
         visualMap: { min: Math.min(...values), max: Math.max(...values), calculable: true,
           orient: "horizontal", left: "center", bottom: 0,
-          inRange: { color: [cssVar("--accent-soft", "#efedff"), cssVar("--accent", "#6e60e6")] } },
+          inRange: { color: [cssVar("--accent-soft", "#efedff"), palette(spec.display_palette)[0]] } },
         series: [{ type: "heatmap", data: data.map(row => [xs.indexOf(label(row[x])),
           ys.indexOf(label(row[group])), row[y]]) }] };
     }

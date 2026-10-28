@@ -15,6 +15,8 @@ from uuid import uuid4
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import Field
+from sqlglot import parse_one
 from starlette.middleware.gzip import GZipMiddleware
 
 from semantic_text2sql.agent import TextToSQLAgent
@@ -68,6 +70,8 @@ from semantic_text2sql.llm import (
     GroqSQLModel,
     JustDoWorkSQLModel,
     ModelError,
+    OllamaCompleter,
+    OpenRouterSQLModel,
     RoutingSQLModel,
     TrueSotaSQLModel,
 )
@@ -88,6 +92,7 @@ from semantic_text2sql.models import (
     ModelProvider,
     PresentationState,
     ResultPresentation,
+    StrictModel,
     TokenUsage,
     TurnInterpretation,
     ValidationResult,
@@ -141,6 +146,14 @@ from semantic_text2sql.voice import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+class ResultPageRequest(StrictModel):
+    session_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    result_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    offset: int = Field(ge=0, le=9_900)
+    page_size: int = Field(default=20, ge=1, le=100)
 
 
 def _planner_now() -> str:
@@ -213,9 +226,14 @@ def create_app(
         os.environ.get("TRUE_SOTA_BASE_URL", "https://true-sota.com"),
         float(os.environ.get("TRUE_SOTA_TIMEOUT_SECONDS", "180")),
     )
+    openrouter = OpenRouterSQLModel(
+        os.environ.get("OPENROUTER_API_KEY"),
+        os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        float(os.environ.get("OPENROUTER_TIMEOUT_SECONDS", "180")),
+    )
     active_agent = agent or TextToSQLAgent(
         sqlite,
-        RoutingSQLModel(agentrouter, groq, justdowork, codecraft, true_sota),
+        RoutingSQLModel(agentrouter, groq, justdowork, codecraft, true_sota, openrouter),
         postgres,
         profiles,
     )
@@ -225,6 +243,11 @@ def create_app(
         "justdowork": justdowork,
         "codecraft": codecraft,
         "true_sota": true_sota,
+        "openrouter": openrouter,
+        "ollama": OllamaCompleter(
+            os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+            float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "180")),
+        ),
     }
     def conversational_agent_enabled() -> bool:
         return (
@@ -299,8 +322,14 @@ def create_app(
     branch_context: ContextVar[
         tuple[str, ConversationState, RecentResult | None, int | None] | None
     ] = ContextVar("queryflow_branch_context", default=None)
+    provisional_context: ContextVar[tuple[str, ConversationState] | None] = ContextVar(
+        "queryflow_provisional_context", default=None
+    )
 
     def accepted_state(session_id: str) -> ConversationState | None:
+        provisional = provisional_context.get()
+        if provisional and provisional[0] == session_id:
+            return provisional[1]
         branch = branch_context.get()
         return branch[1] if branch and branch[0] == session_id else conversations.get(session_id)
 
@@ -308,7 +337,92 @@ def create_app(
         branch = branch_context.get()
         if branch and branch[0] == session_id:
             return branch[2] if branch[1].db_id == db_id else None
-        return recent_results.get((session_id, db_id))
+        key = (session_id, db_id)
+        cached = recent_results.get(key)
+        if cached is not None:
+            return cached
+        # The bounded in-process cache is lost on restart. Reuse history only
+        # when it contains every executed row for the currently accepted SQL;
+        # a preview or a run from another branch must never stand in for data.
+        state = accepted_state(session_id)
+        if state is None or state.db_id != db_id or not state.last_sql:
+            return None
+        for record in runs.list_sessions(session_id):
+            if record.db_id != db_id or record.sql != state.last_sql:
+                continue
+            if (
+                record.state_snapshot is None
+                or record.state_snapshot.resolved_question != state.resolved_question
+            ):
+                continue
+            restored = result_from_history(record)
+            if restored is not None:
+                recent_results[key] = restored
+                return restored
+            break
+        return None
+
+    @app.post("/api/results/page")
+    async def result_page(request: ResultPageRequest) -> dict[str, Any]:
+        """Page an accepted result without accepting SQL from the browser.
+
+        The first 500 rows come from the exact in-process accepted snapshot. A
+        later page re-executes that SQL only when it has an outer ORDER BY and
+        the saved prefix still matches, avoiding silent unstable page changes.
+        """
+        source = accepted_result(request.session_id, request.db_id)
+        if source is None or source.result_id != request.result_id:
+            raise HTTPException(404, "The accepted result is unavailable or has changed.")
+        end = request.offset + request.page_size
+        if end <= len(source.rows):
+            page_rows = source.rows[request.offset:end]
+            has_more = source.truncated or end < len(source.rows)
+        else:
+            if not source.truncated:
+                page_rows = source.rows[request.offset:end]
+                has_more = False
+            else:
+                try:
+                    statement = parse_one(source.sql, read=source.dialect)
+                except Exception as exc:
+                    raise HTTPException(409, "Saved SQL cannot be paged safely.") from exc
+                if statement is None or statement.args.get("order") is None:
+                    raise HTTPException(
+                        409, "More rows require an explicit outer ORDER BY for stable paging."
+                    )
+                if end > 10_000:
+                    raise HTTPException(422, "Paging is limited to the first 10,000 rows.")
+                database = (
+                    sqlite if source.dialect == "sqlite" and request.db_id in sqlite.list_ids()
+                    else postgres if source.dialect == "postgres" and postgres is not None
+                    and request.db_id in postgres_databases else None
+                )
+                if database is None:
+                    raise HTTPException(404, "The selected database is unavailable.")
+                try:
+                    columns, fetched, has_more = await asyncio.to_thread(
+                        database.execute, request.db_id, source.sql,
+                        max_rows=end, timeout_seconds=5.0,
+                    )
+                except DatabaseError as exc:
+                    raise HTTPException(409, "The saved result could not be paged.") from exc
+                if columns != source.columns or fetched[:len(source.rows)] != source.rows:
+                    raise HTTPException(
+                        409, "The result changed since the first page. Run the question again."
+                    )
+                page_rows = fetched[request.offset:end]
+        limit_reached = end >= 10_000 and has_more
+        return {
+            "result_id": source.result_id,
+            "columns": source.columns,
+            "rows": page_rows,
+            "offset": request.offset,
+            "displayed_count": len(page_rows),
+            "returned_count": source.row_count,
+            "total_available": None if source.truncated else source.row_count,
+            "has_more": has_more and not limit_reached,
+            "limit_reached": limit_reached,
+        }
 
     def result_from_history(record: RunRecord) -> RecentResult | None:
         if not record.accepted or record.preview_truncated or record.truncated:
@@ -1319,7 +1433,7 @@ def create_app(
                     latency_ms=conversation_ms,
                 )
             ]
-            if interpretation.source == "model"
+            if interpretation.source == "model" and not assistant_enabled
             else []
         )
         if interpretation.operation in STATE_REQUIRED_OPERATIONS and not has_matching_state:
@@ -1682,7 +1796,9 @@ def create_app(
                 model=request.model,
                 provider=request.provider,
                 budget=request_budget,
-                visualization=viz_intent,
+                # Top-layer mode owns chart creation through change_visualization.
+                # Keep deterministic chart planning only for the legacy route.
+                visualization=None if assistant_enabled else viz_intent,
             )
             presentation_ledger.extend(presentation_entries)
         chart_recommendations = None
@@ -1694,16 +1810,17 @@ def create_app(
             and operation not in {"CHECK_CORRECTNESS", "OPTIMIZE"}
             and not human_review
         ):
-            try:
-                chart_recommendations = recommend_charts(
-                    pending.resolved_question,
-                    generated.columns,
-                    generated.rows,
-                    truncated=False,
-                )
-            except Exception:
-                logger.warning("Chart recommendation failed", exc_info=True)
-                chart_recommendations = None
+            if not assistant_enabled:
+                try:
+                    chart_recommendations = recommend_charts(
+                        pending.resolved_question,
+                        generated.columns,
+                        generated.rows,
+                        truncated=False,
+                    )
+                except Exception:
+                    logger.warning("Chart recommendation failed", exc_info=True)
+                    chart_recommendations = None
             if (
                 viz_intent.requested
                 and len(generated.columns) > 2
@@ -1749,7 +1866,8 @@ def create_app(
                 except Exception:
                     logger.warning("LLM chart recommendation failed", exc_info=True)
             if (
-                presentation is not None
+                not assistant_enabled
+                and presentation is not None
                 and viz_intent.requested
                 and chart_recommendations is not None
             ):
@@ -1994,7 +2112,20 @@ def create_app(
     async def assistant_sql_handler(request: ChatRequest) -> ChatResponse:
         # The top model still has to produce its final answer. Save the
         # completed turn once, after that answer has been attached.
-        return await execute_chat(request, persist=False)
+        token = (
+            provisional_context.set((request.session_id, request._turn_state))
+            if request._turn_state is not None else None
+        )
+        try:
+            response = await execute_chat(request, persist=False)
+            if response.state_commit_pending and request._turn_state is not None:
+                response = response.model_copy(update={
+                    "state_expected_version": request._turn_expected_version,
+                })
+            return response
+        finally:
+            if token is not None:
+                provisional_context.reset(token)
 
     async def assistant_investigation_handler(request: ChatRequest) -> ChatResponse:
         # Investigation state is request-local. Never save an intermediate turn

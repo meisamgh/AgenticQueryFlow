@@ -67,11 +67,43 @@ test('inspector counts model calls without counting tools as models', () => {
   assert.ok(summary.includes('entry.kind === "MODEL"'));
   assert.ok(summary.includes('usage.input_tokens == null && usage.output_tokens == null'));
 });
-test('validated recommended plots switch in place; new designs use conversation', () => {
+test('recommended and compatible chart choices switch locally without model or SQL', () => {
   const toolbar = source.slice(source.indexOf('function wireChartSection('),
     source.indexOf('function closeChartFullscreen('));
-  assert.ok(toolbar.includes('if (proposal && article._chartViewState?.tryChart(proposal)) return;'));
-  assert.ok(toolbar.includes('sendFromAnswer(runId, `Change the previous chart'));
+  assert.ok(toolbar.includes('recommended.find(item => item.chart_type === type)'));
+  assert.ok(toolbar.includes('article._chartViewState?.tryChart(proposal)'));
+  assert.ok(!toolbar.includes('sendFromAnswer('));
+  assert.ok(toolbar.includes('showError("This chart cannot display the current result'));
+});
+test('a monthly bar chart remains available after switching to a line', () => {
+  const source = {chart_type: 'bar', x: 'month', y: 'total_consumption',
+    y_measures: ['total_consumption'], time_format: 'month',
+    source_columns: ['month', 'total_consumption'],
+    data: [{month: '202401', total_consumption: 10},
+      {month: '202402', total_consumption: 20}]};
+  const line = explorer.apply(source, {chartType: 'line'});
+  assert.equal(line.chart_type, 'line');
+  assert.ok(explorer.choices(line).includes('bar'));
+  const barAgain = explorer.apply(source, {chartType: 'bar'});
+  assert.equal(barAgain.chart_type, 'bar');
+  assert.equal(JSON.stringify(barAgain.data), JSON.stringify(source.data));
+});
+test('removed chart field controls stay hidden while local view safety remains', () => {
+  assert.ok(!markup.includes('class="chart-fields"'));
+  const toolbar = source.slice(source.indexOf('function wireChartSection('),
+    source.indexOf('function closeChartFullscreen('));
+  assert.ok(!toolbar.includes('function renderFields('));
+  assert.ok(!toolbar.includes('sendFromAnswer('));
+  const spec = {chart_type: 'grouped_bar', x: 'Month', y: 'Revenue', series: 'Country',
+    source_columns: ['Month', 'Country', 'Revenue', 'Cost'], data: [
+      {Month: 'Jan', Country: 'DE', Revenue: 10, Cost: 4},
+      {Month: 'Jan', Country: 'FR', Revenue: 20, Cost: 6},
+    ]};
+  const changed = explorer.apply(spec, {metric: 'Cost', metrics: ['Cost'], palette: 'ocean'});
+  assert.equal(changed.y, 'Cost');
+  assert.equal(changed.display_palette, 'ocean');
+  assert.equal(changed.data.length, 2);
+  assert.equal(explorer.apply(spec, {series: ''}), null);
 });
 test('query filter utilities remain available without a visible filter bar', () => {
   const body = {
@@ -106,6 +138,10 @@ test('success badge is hidden and plot choices are centered inside the answer', 
   assert.ok(source.includes('if (accepted && status !== "CHART UNAVAILABLE") { pill.hidden = true;'));
   const section = markup.split('<div class="chart-section"')[1].split('<div class="chart-slot"')[0];
   assert.ok(section.includes('class="recommended-plots"'));
+  assert.ok(section.includes('class="chart-palette"'));
+  assert.ok(section.indexOf('class="chart-colors"') > section.indexOf('class="recommended-plots"'));
+  assert.ok(section.indexOf('class="chart-colors"') > section.indexOf('class="chart-kinds"'));
+  assert.ok(markup.indexOf('class="chart-colors"') < markup.indexOf('class="chart-slot"'));
   assert.ok(section.indexOf('class="recommended-plots"') > section.indexOf('</header>'));
   assert.ok(styles.includes('.recommended-plots { display: flex; align-items: center; justify-content: center;'));
   assert.ok(source.includes('body.chart_recommendations'));
@@ -149,7 +185,7 @@ test('empty success responses clear history and Clear resets the visible convers
 });
 test('display row filters share chart state and zero matches stay empty', () => {
   assert.ok(source.includes('article._setChartViewRowFilters = filters => article._chartViewState.setRowFilters(filters)'));
-  assert.ok(source.includes('return filtered;'));
+  assert.ok(source.includes('article._setClientFilters = filters => article._setChartViewRowFilters?.(filters)'));
   assert.ok(!source.includes('return filtered.length ? filtered : rows;'));
   assert.ok(!source.includes('renderBackendSuggestions('));
 });
@@ -178,6 +214,16 @@ test('semantic chips edit through the live query path without a branch action', 
   assert.ok(!source.includes('branch_from_parent:'));
   assert.ok(!markup.includes('Schema explorer'));
 });
+test('ordinary plot follow-ups do not branch through a bounded history preview', () => {
+  const sendPath = source.slice(source.indexOf('async function send('),
+    source.indexOf('async function sendFromAnswer('));
+  assert.ok(sendPath.includes('parent_run_id: state.branchFromRunId'));
+  assert.ok(!sendPath.includes('parent_run_id: state.activeRunId'));
+  assert.ok(sendPath.includes('state.branchFromRunId = null;'));
+  const historyPath = source.slice(source.indexOf('async function continueRun('),
+    source.indexOf('async function rerunSaved('));
+  assert.ok(historyPath.includes('state.branchFromRunId = runId;'));
+});
 test('correctness and optimization actions live in the SQL panel only', () => {
   const sqlPane = markup.split('<section class="panel-card sql-panel-pane"')[1].split('</section>')[0];
   assert.ok(sqlPane.includes('class="sql-actions"'));
@@ -202,8 +248,39 @@ test('single-value answer uses a readable label and exact grouped number', () =>
   assert.equal(display.formatKpiValue('001234'), '001234');
   assert.equal(display.formatKpiValue(null), 'NULL');
   const preview = source.slice(source.indexOf('function renderAnswerPreview('), source.indexOf('async function appendAssistant('));
-  assert.ok(preview.includes('readableResultLabel(columns[0])'));
-  assert.ok(preview.includes('formatKpiValue(rows[0][0])'));
+  assert.ok(preview.includes('readableResultLabel(column)'));
+  assert.ok(preview.includes('formatKpiValue(rows[0][columns.indexOf(column)])'));
+});
+test('multi-metric KPI cards preserve exact values and retain currency context', () => {
+  const node = () => ({children: [], classList: {add() {}}, append(...items) {
+    this.children.push(...items);
+  }});
+  const render = vm.runInNewContext(`${source.slice(source.indexOf('function readableResultLabel('),
+    source.indexOf('function chartMatchesResultIdentity('))}; renderAnswerPreview`,
+  {document: {createElement: node}});
+  const preview = node();
+  render({querySelector: () => preview}, {generation: {accepted: true, truncated: false,
+    columns: ['CustomerID', 'total_spending', 'average_price', 'Currency'],
+    rows: [[123, 1234567.89, null, 'EUR']]}}, 'sql');
+  assert.equal(preview.children.length, 2);
+  assert.equal(preview.children[0].children[1].textContent, '1,234,567.89');
+  assert.equal(preview.children[1].children[1].textContent, 'NULL');
+  assert.ok(preview.children[0].children[2].textContent.includes('Currency: EUR'));
+  const partial = node();
+  render({querySelector: () => partial}, {generation: {accepted: true, truncated: true,
+    columns: ['total'], rows: [[1]]}}, 'sql');
+  assert.equal(partial.children.length, 0);
+});
+test('series chart choices expose heatmaps and treemaps only with usable measures', () => {
+  const spec = {chart_type: 'multi_line', x: 'Month', y: 'Revenue', series: 'Country',
+    time_format: 'month', data: [{Month: '202601', Country: 'DE', Revenue: 2},
+      {Month: '202601', Country: 'FR', Revenue: 3}]};
+  assert.ok(explorer.choices(spec).includes('heatmap'));
+  assert.ok(explorer.choices(spec).includes('treemap'));
+  assert.ok(explorer.choices(spec).includes('grouped_bar'));
+  const missing = {...spec, data: [{Month: '202601', Country: 'DE', Revenue: null}]};
+  assert.ok(!explorer.choices(missing).includes('heatmap'));
+  assert.ok(!explorer.choices(missing).includes('treemap'));
 });
 test('inspector has separate context, schema, recovery, pipeline and tokens tabs', () => {
   for (const tab of ['understanding', 'schema', 'recovery', 'pipeline', 'tokens']) {
@@ -232,13 +309,28 @@ test('pipeline bars represent measured stage time and leave missing stages unmea
   });
   pipeline(fragment, {total: 2000, routing: 500}, {}, {});
   assert.equal(container.children[0].children[1].textContent, '2.0 s');
-  const assistant = container.children.find(row => row.children[0]?.textContent === 'Assistant model');
+  const assistant = container.children.find(row => row.children[0]?.textContent === 'Assistant configured');
   assert.equal(assistant.children[1].textContent, 'groq · qwen/qwen3.8-27b');
   const routing = container.children.find(row => row.children[0]?.textContent === 'Routing');
   assert.equal(routing.children[2].children[0].style.width, '25%');
   const unknown = container.children.find(row => row.children[0]?.textContent === 'Context planning');
   assert.equal(unknown.children[1].textContent, 'Not reported');
   assert.equal(unknown.children[2].children[0].style.width, '0%');
+  pipeline(fragment, {total: 1000, top_decisions: 200, result_explanation: 30}, {
+    call_ledger: [{kind: 'MODEL', component: 'conversational_agent', task: 'decision',
+      provider: 'groq', effective_model: 'qwen', input_tokens: 10, output_tokens: 5,
+      latency_ms: 200, retry_count: 1, status: 'SUCCEEDED'}],
+  }, {});
+  assert.equal(container.children.some(row => row.children[0]?.textContent === 'SQL generation and repair'), false);
+  assert.equal(container.children.find(row => row.children[0]?.textContent === 'Top-layer decisions')
+    .children[1].textContent, '200 ms');
+  const call = container.children.find(row => row.children[0]?.textContent === 'conversational_agent · decision');
+  assert.ok(call.children[1].textContent.includes('15 tokens'));
+  assert.ok(call.children[1].textContent.includes('retry 1'));
+  const labels = container.children.map(row => row.textContent || row.children[0]?.textContent);
+  assert.ok(labels.indexOf('Stage timing') < labels.indexOf('Model calls'));
+  assert.ok(labels.indexOf('Model calls') < labels.indexOf('Configured models'));
+  assert.equal(call.className, 'pipeline-run pipeline-model-call');
 });
 test('context inspector follows the flat prototype layout using live response facts', () => {
   assert.ok(markup.includes('<span>Context inspector</span>'));
@@ -264,10 +356,11 @@ test('inspector context cards are built from response rows, not prototype values
   assert.ok(styles.includes('.inspect-tile-value'));
   assert.ok(!source.includes('Example reference · Check actual schema'));
 });
-test('successful response template orders Answer, Data and SQL', () => {
+test('successful response keeps the answer visible and tabs only technical views', () => {
   const template = markup.split('<template id="assistantTemplate">')[1].split('</template>')[0];
-  for (const tab of ['answer', 'sql', 'data']) assert.ok(template.includes(`data-response-tab="${tab}"`));
-  assert.ok(template.indexOf('data-response-tab="answer"') < template.indexOf('data-response-tab="data"'));
+  for (const tab of ['sql', 'data']) assert.ok(template.includes(`data-response-tab="${tab}"`));
+  assert.ok(!template.includes('data-response-tab="answer"'));
+  assert.ok(template.indexOf('class="answer-tab-panel"') < template.indexOf('class="response-tabs"'));
   assert.ok(template.indexOf('data-response-tab="data"') < template.indexOf('data-response-tab="sql"'));
   assert.ok(template.includes('class="answer-tab-panel"'));
   assert.ok(template.includes('class="sql-result-split" hidden'));
@@ -275,7 +368,7 @@ test('successful response template orders Answer, Data and SQL', () => {
   assert.ok(template.includes('class="panel-card result-panel-pane" role="tabpanel" hidden'));
   assert.ok(template.indexOf('class="chart-section"') > template.indexOf('class="answer-tab-panel"'));
   const answerRenderer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function actionButton('));
-  assert.ok(answerRenderer.includes('wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length)})'));
+  assert.ok(answerRenderer.includes('wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length),'));
   assert.ok(!answerRenderer.includes('options.restored ? "sql"'));
 });
 test('a chart is not rendered against a different SQL result identity', () => {
@@ -290,6 +383,22 @@ test('a chart is not rendered against a different SQL result identity', () => {
   assert.ok(source.includes('const chartDataComplete = chartMatchesResultIdentity(body)'));
   assert.ok(source.includes('article.dataset.resultId = body.result_id || ""'));
 });
+test('plot-only follow-ups hide Data and SQL without hiding same-turn SQL plus plot', () => {
+  const helper = source.slice(source.indexOf('function isPlotOnlyTurn('),
+    source.indexOf('async function appendAssistant('));
+  const plotContext = vm.createContext({});
+  vm.runInContext(helper, plotContext);
+  assert.equal(plotContext.isPlotOnlyTurn({operation: 'VISUALIZE', call_ledger: [
+    {component: 'result_cache_reuse'}]}), true);
+  assert.equal(plotContext.isPlotOnlyTurn({operation: 'VISUALIZE', call_ledger: [
+    {component: 'sql_generation'}, {component: 'sql_execution'}]}), false);
+  assert.equal(plotContext.isPlotOnlyTurn({operation: 'NEW_QUERY', call_ledger: []}), false);
+  const renderer = source.slice(source.indexOf('async function appendAssistant('),
+    source.indexOf('function actionButton('));
+  assert.ok(renderer.includes('if (!plotOnly) wireResponseTabs(article'));
+  assert.ok(renderer.includes('sqlNotAvailable || plotOnly'));
+  assert.ok(renderer.includes('sqlNotAvailable || explanatory || plotOnly'));
+});
 const tabsContext = vm.createContext({window: {requestAnimationFrame: callback => callback()}});
 vm.runInContext(source.slice(source.indexOf('/* Response views are local'), source.indexOf('function wireChartSection(')), tabsContext);
 test('response tabs are independent, keep the chart and never execute a query', () => {
@@ -297,7 +406,7 @@ test('response tabs are independent, keep the chart and never execute a query', 
   tabsContext.api = () => { throw Error('tab switching called the API'); };
   tabsContext.send = () => { throw Error('tab switching sent a question'); };
   const makeArticle = () => {
-    const buttons = Object.fromEntries(['answer', 'sql', 'data'].map(view => [view, {
+    const buttons = Object.fromEntries(['sql', 'data'].map(view => [view, {
       dataset: {responseTab: view}, disabled: false, attributes: {},
       setAttribute(name, value) { this.attributes[name] = value; },
       addEventListener(name, callback) { this.listeners ||= {}; this.listeners[name] = callback; },
@@ -323,22 +432,21 @@ test('response tabs are independent, keep the chart and never execute a query', 
   const first = makeArticle(), second = makeArticle();
   tabsContext.wireResponseTabs(first.article);
   tabsContext.wireResponseTabs(second.article);
-  assert.equal(first.article.dataset.activeResponseTab, 'answer');
+  assert.equal(first.article.dataset.activeResponseTab, 'data');
   first.buttons.sql.listeners.click();
   assert.equal(first.article.dataset.activeResponseTab, 'sql');
-  assert.equal(first.answer.hidden, true);
+  assert.equal(first.answer.hidden, false);
   assert.equal(first.split.hidden, false);
   assert.equal(first.sql.hidden, false);
   assert.equal(first.data.hidden, true);
   assert.equal(first.versions.hidden, false);
-  assert.equal(second.article.dataset.activeResponseTab, 'answer');
+  assert.equal(second.article.dataset.activeResponseTab, 'data');
   first.buttons.data.listeners.click();
   assert.equal(first.data.hidden, false);
   assert.equal(first.sql.hidden, true);
-  first.buttons.answer.listeners.click();
   assert.equal(first.answer.hidden, false);
-  assert.equal(first.split.hidden, true);
-  assert.ok(resized >= 3);
+  assert.equal(first.split.hidden, false);
+  assert.ok(resized >= 2);
 });
 test('a running question does not auto-scroll progress or the final answer', () => {
   const progress = source.slice(source.indexOf('function appendProgress('), source.indexOf('function wait('));
@@ -356,13 +464,14 @@ test('Queryflow colors follow the supplied light and dark reference palettes', (
   ]) assert.ok(styles.includes(color), `Missing reference token ${color}`);
 });
 class Element {
-  constructor() { this.children = []; }
+  constructor() { this.children = []; this.style = {}; this.dataset = {}; }
   append(...children) { this.children.push(...children); }
+  replaceChildren(...children) { this.children = [...children]; }
   createTHead() { const child = new Element(); this.append(child); return child; }
   createTBody() { return this.createTHead(); }
   insertRow() { return this.createTHead(); }
   insertCell() { return this.createTHead(); }
-  classList = { add() {} };
+  classList = { add() {}, toggle() {} };
   setAttribute(name, value) { this[name] = value; }
   addEventListener(name, callback) { this.listeners ||= {}; this.listeners[name] = callback; }
 }
@@ -379,6 +488,18 @@ test('ECharts adapter reads the validated data and preserves negative values', (
   assert.equal(option.series[0].data[0], -2);
   assert.equal(option.series[0].data[1], 4);
   assert.equal(option.xAxis.data[0], 'A');
+});
+test('approved display colors change palette without changing chart data', () => {
+  const spec = {chart_type: 'bar', x: 'Category', y: 'Value',
+    data: [{Category: 'A', Value: 2}, {Category: 'B', Value: 4}]};
+  const violet = context.window.QueryflowECharts.buildOption({...spec, display_palette: 'violet'});
+  const ocean = context.window.QueryflowECharts.buildOption({...spec, display_palette: 'ocean'});
+  assert.notEqual(violet.color[0], ocean.color[0]);
+  assert.equal(JSON.stringify(violet.series[0].data), JSON.stringify(ocean.series[0].data));
+  const plotlyContext = vm.createContext({window: {}});
+  vm.runInContext(fs.readFileSync(`${__dirname}/../web/plotly_view.js`, 'utf8'), plotlyContext);
+  const figure = plotlyContext.window.QueryflowPlotly.buildFigure({...spec, display_palette: 'forest'});
+  assert.equal(figure.data[0].marker.color, '#27845c');
 });
 test('ECharts adapter renders separate named series without inventing zeros', () => {
   const spec = {chart_type: 'stacked_bar', x: 'Month', y: 'Revenue', series: 'Country',
@@ -628,10 +749,110 @@ test('result table renders headers, rows and NULL explicitly', () => {
   const container = new Element();
   context.renderTable(container, ['customer', 'amount'], [['Alice', null]]);
   const table = container.children[0];
-  assert.equal(table.children[0].children[0].children[0].textContent, 'customer');
-  const cells = table.children[1].children[0].children;
+  assert.equal(table.children[1].children[0].children[0].textContent, 'customer');
+  const cells = table.children[2].children[0].children;
   assert.equal(cells[0].textContent, 'Alice');
   assert.equal(cells[1].children[0].textContent, 'NULL');
+});
+
+test('result table pages 20, 50 and 100 rows without changing source data', async () => {
+  const container = new Element();
+  const controls = new Element();
+  container.parentElement = {querySelector: () => controls};
+  const rows = Array.from({length: 120}, (_, index) => [index, `Customer ${index}`]);
+  const grid = context.renderTable(container, ['ID', 'Customer'], rows);
+  const table = container.children[0], body = table.children[2];
+  assert.equal(body.children.length, 20);
+  assert.equal(rows.length, 120);
+  await grid.goToPage(1);
+  assert.equal(body.children.length, 20);
+  assert.equal(body.children[0].children[0].textContent, '20');
+  const size = controls.children.find(child => child.className === 'table-page-size');
+  size.value = '50';
+  size.listeners.change();
+  assert.equal(body.children.length, 50);
+  size.value = '100';
+  size.listeners.change();
+  assert.ok(body.children.length <= 38, '100-row pages use a virtual window');
+  container.scrollTop = 900;
+  container.listeners.scroll();
+  assert.ok(body.children.length <= 38);
+  assert.equal(rows[119][0], 119);
+});
+
+test('table widths follow measured content, sample late rows, and stay scrollable', () => {
+  const container = new Element();
+  const pane = {style: {}, classList: {contains: name => name === 'result-panel-pane'}, querySelector: () => null};
+  container.parentElement = pane;
+  const columns = ['ID', 'Description', ...Array.from({length: 6}, (_, index) => `C${index}`)];
+  const rows = Array.from({length: 200}, (_, index) =>
+    [index, index === 199 ? 'a'.repeat(90) : 'short', ...Array(6).fill(3)]);
+  context.renderTable(container, columns, rows);
+  const table = container.children[0];
+  const columnWidths = table.children[0].children.map(col => Number.parseInt(col.style.width));
+  assert.ok(columnWidths[1] > columnWidths[0]);
+  assert.equal(columnWidths[1], 420, 'very long values are capped');
+  assert.equal(Number.parseInt(table.style.width), columnWidths.reduce((a, b) => a + b, 0));
+  assert.equal(pane.style.width, `min(100%, ${Number.parseInt(table.style.width)}px)`);
+  assert.ok(!table.style.minWidth, 'table is not forced to fill its parent');
+  assert.ok(styles.includes('max-height: min(58vh, 640px)'));
+  assert.ok(styles.includes('width: max-content; table-layout: fixed'));
+  assert.ok(styles.includes('.result-panel-pane.table-fullscreen'));
+  assert.ok(styles.includes('position: sticky; top: 0'));
+  assert.ok(styles.includes('.result-grid td.numeric'));
+});
+
+test('small result card follows data width rather than filling the chat', () => {
+  const container = new Element();
+  const pane = {style: {}, classList: {contains: name => name === 'result-panel-pane'}, querySelector: () => null};
+  container.parentElement = pane;
+  context.renderTable(container, ['ID'], [[1], [2]]);
+  assert.equal(container.children[0].style.width, '72px');
+  assert.equal(pane.style.width, 'min(100%, 280px)');
+  assert.ok(styles.includes('.sql-result-split .result-panel-pane { justify-self: start; max-width: 100%; }'));
+  assert.ok(styles.includes('width: auto !important; z-index: 90'));
+});
+
+test('Canvas measurement distinguishes glyph widths and manual resize is retained', () => {
+  const createElement = context.document.createElement;
+  context.document.createElement = tag => tag === 'canvas'
+    ? {getContext: () => ({font: '', measureText: value => ({width: [...value].reduce(
+      (sum, character) => sum + (character === 'W' ? 14 : 4), 0)})})}
+    : new Element();
+  try {
+    const container = new Element();
+    const grid = context.renderTable(container, ['first', 'second'], [['iiiiiiii', 'WWWWWWWW']]);
+    const table = container.children[0];
+    const cols = table.children[0].children;
+    assert.ok(Number.parseInt(cols[1].style.width) > Number.parseInt(cols[0].style.width));
+    const handle = table.children[1].children[0].children[0].children[0];
+    handle.listeners.pointerdown({preventDefault() {}, clientX: 0, pointerId: 1});
+    handle.listeners.pointermove({clientX: 90});
+    const resizedWidth = cols[0].style.width;
+    return grid.goToPage(0).then(() => assert.equal(cols[0].style.width, resizedWidth));
+  } finally {
+    context.document.createElement = createElement;
+  }
+});
+
+test('answer hides redundant verification and chart-type labels', () => {
+  assert.ok(!markup.includes('REQUESTED VISUALIZATION'));
+  assert.ok(!markup.includes('class="presentation-note"'));
+  assert.ok(!source.includes('body.presentation?.note'));
+  assert.ok(!source.includes('next.chart_type.replaceAll("_", " ")'));
+});
+
+test('Map tab requires a map request and complete valid coordinates', () => {
+  const mapContext = vm.createContext({});
+  vm.runInContext(source.slice(source.indexOf('function mapCoordinates('),
+    source.indexOf('function wireChartSection(')), mapContext);
+  const coordinates = mapContext.mapCoordinates;
+  assert.equal(coordinates(['Latitude', 'Longitude'], [[52.5, 13.4]], false, false), null);
+  assert.equal(coordinates(['Latitude', 'Longitude'], [[52.5, 13.4]], true, true), null);
+  assert.equal(coordinates(['Latitude', 'Longitude'], [[152.5, 13.4]], true, false), null);
+  assert.equal(JSON.stringify(coordinates(['Latitude', 'Longitude'], [[52.5, 13.4]], true, false)),
+    JSON.stringify({lat: [52.5], lon: [13.4]}));
+  assert.ok(markup.includes('data-response-tab="map" aria-selected="false" hidden'));
 });
 
 vm.runInContext(source.slice(source.indexOf('function visiblePipelineStage('), source.indexOf('async function send(')), context);
@@ -822,12 +1043,12 @@ test('grouped chart click keeps the raw date and series after display filtering'
   mounted.dispose();
 });
 test('data scope and tab switching do not expose query parameters', () => {
-  assert.ok(markup.includes('class="data-source-tab"'));
-  assert.ok(markup.includes('class="data-visible-tab"'));
+  assert.ok(!markup.includes('class="data-visible-tab"'));
+  assert.ok(markup.includes('class="table-controls"'));
   assert.ok(!markup.includes('class="chart-apply-query"'));
   const scope = source.slice(source.indexOf('function wireDataScope('), source.indexOf('function wireChartSection('));
   assert.ok(!scope.includes('sendFromAnswer('));
-  assert.ok(!scope.includes('api('));
+  assert.ok(scope.includes('"/api/results/page"'));
   const chart = source.slice(source.indexOf('function wireChartSection('), source.indexOf('function toast('));
   assert.ok(!chart.includes('await sendFromAnswer(runId,'));
 });

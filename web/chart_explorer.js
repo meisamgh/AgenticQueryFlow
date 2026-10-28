@@ -55,8 +55,9 @@ window.QueryflowChartExplorer = (function () {
     const options = [spec.chart_type];
     const time = isTime(spec), nonnegativeValues = nonnegative(spec);
     if (time) {
-      if (!spec.series || distinct(spec.data, spec.series).length === 1) options.push("line", "area");
-      if (spec.series) options.push("multi_line");
+      if (!spec.series || distinct(spec.data, spec.series).length === 1)
+        options.push("line", "step_line", "area", "bar");
+      if (spec.series) options.push("multi_line", "grouped_bar");
       if (spec.series && completeGrid(spec) && nonnegativeValues && additive(spec))
         options.push("stacked_area", "stacked_bar", "percent_stacked_bar");
     } else if (spec.chart_type !== "histogram" && spec.chart_type !== "box"
@@ -68,6 +69,10 @@ window.QueryflowChartExplorer = (function () {
       if (!spec.series && distinct(spec.data, spec.x).length <= 12 && nonnegativeValues
         && spec.data.some(row => Number(row[spec.y]) > 0)) options.push("donut", "pie");
     }
+    if (spec.series && spec.data.every(row => row[spec.y] != null && row[spec.y] !== ""
+      && Number.isFinite(Number(row[spec.y])))) options.push("heatmap");
+    if (spec.series && nonnegativeValues && spec.data.some(row => Number(row[spec.y]) > 0))
+      options.push("treemap");
     return [...new Set(options)];
   }
   function filters(spec) {
@@ -112,10 +117,13 @@ window.QueryflowChartExplorer = (function () {
       }
     }
     if (isTime(spec)) rows = [...rows].sort((a, b) => chronological(a[spec.x]) - chronological(b[spec.x]));
+    const displayPalette = ["violet", "ocean", "forest", "sunset"].includes(settings.palette)
+      ? settings.palette : "violet";
     const output = { ...spec, x: selectedX, x_label: selectedX.replaceAll("_", " "),
       series: measures.length > 1 ? null : selectedSeries, y: measures[0], y_measures: measures,
       y_label: measures.length === 1 ? measures[0].replaceAll("_", " ") : unitFor(measures[0], spec),
-      time_format: selectedX === spec.x ? spec.time_format : "raw", data: rows };
+      time_format: selectedX === spec.x ? spec.time_format : "raw", data: rows,
+      display_palette: displayPalette };
     // Never collapse multiple source rows onto one plotted position when a
     // display-only axis/series switch changes the grain. That needs new SQL.
     if ((!output.transformation || output.transformation === "none")

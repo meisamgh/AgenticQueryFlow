@@ -5,13 +5,15 @@ from __future__ import annotations
 import os
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, computed_field, model_validator
 
 from semantic_text2sql.sql_formatting import format_sql_for_display
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 GROQ_QWEN_MODEL = "qwen/qwen3.8-27b"
-ModelProvider = Literal["agentrouter", "groq", "justdowork", "codecraft", "true_sota"]
+ModelProvider = Literal[
+    "agentrouter", "groq", "justdowork", "codecraft", "true_sota", "openrouter"
+]
 
 
 class StrictModel(BaseModel):
@@ -175,6 +177,7 @@ class TokenUsage(StrictModel):
     output_tokens: int | None = Field(default=None, ge=0)
     cache_read_tokens: int | None = Field(default=None, ge=0)
     cache_creation_tokens: int | None = Field(default=None, ge=0)
+    provider_retries: int = Field(default=0, ge=0)
 
     @property
     def total_tokens(self) -> int | None:
@@ -483,6 +486,8 @@ class CallLedgerEntry(StrictModel):
     component: str
     kind: Literal["MODEL", "DATABASE", "TOOL"]
     status: Literal["SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]
+    task: str | None = None
+    retry_count: int | None = Field(default=None, ge=0)
     provider: str | None = None
     requested_model: str | None = None
     effective_model: str | None = None
@@ -581,6 +586,8 @@ class Attempt(StrictModel):
     normalized_sql: str
     validation: ValidationResult
     latency_ms: int = Field(ge=0)
+    validation_latency_ms: int | None = Field(default=None, ge=0)
+    execution_latency_ms: int | None = Field(default=None, ge=0)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
 
 
@@ -773,6 +780,9 @@ class ChatRequest(StrictModel):
     ] | None = None
     assistant_changes: list[RequestedChange] = Field(default_factory=list, max_length=10)
     assistant_original_question: str | None = Field(default=None, max_length=4_000)
+    # Request-local Top-layer handoff; not accepted from or serialized to API JSON.
+    _turn_state: ConversationState | None = PrivateAttr(default=None)
+    _turn_expected_version: int | None = PrivateAttr(default=None)
 
 
 class ConversationState(StrictModel):

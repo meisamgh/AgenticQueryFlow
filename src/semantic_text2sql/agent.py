@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from collections import Counter
 from collections.abc import Callable, Iterable
 from statistics import median
@@ -383,6 +384,7 @@ class TextToSQLAgent:
             fingerprint = hashlib.sha256(normalized.encode()).hexdigest()
             if progress:
                 progress("validation")
+            validation_started = perf_counter_ns()
             validation = validate_sql(
                 sql,
                 schema,
@@ -416,6 +418,8 @@ class TextToSQLAgent:
                         "semantic_findings": findings,
                     }
                 )
+            validation_latency_ms = round((perf_counter_ns() - validation_started) / 1_000_000)
+            execution_latency_ms: int | None = None
             if validation.valid and request.optimization_required and request.previous_sql:
                 validation = await asyncio.to_thread(
                     _validate_result_equivalence,
@@ -529,6 +533,7 @@ class TextToSQLAgent:
             if validation.valid and request.execute:
                 if progress:
                     progress("execution")
+                execution_started = perf_counter_ns()
                 try:
                     if budget is not None:
                         budget.claim("database")
@@ -543,6 +548,10 @@ class TextToSQLAgent:
                             "message": f"Read-only execution failed: {error}",
                         }
                     )
+                finally:
+                    execution_latency_ms = round(
+                        (perf_counter_ns() - execution_started) / 1_000_000
+                    )
             attempts.append(
                 Attempt(
                     number=number,
@@ -550,6 +559,8 @@ class TextToSQLAgent:
                     normalized_sql=normalized,
                     validation=validation,
                     latency_ms=latency,
+                    validation_latency_ms=validation_latency_ms,
+                    execution_latency_ms=execution_latency_ms,
                     token_usage=usage,
                 )
             )
@@ -576,8 +587,8 @@ class TextToSQLAgent:
                     progress=progress,
                     allowed_tables=[table.name for table in retrieved_schema.tables],
                     completer=self.model,
-                    provider=request.provider,
-                    model=request.model,
+                    provider=os.environ.get("TEXT2SQL_RECOVERY_PROVIDER") or request.provider,
+                    model=os.environ.get("TEXT2SQL_RECOVERY_MODEL") or request.model,
                     budget=budget,
                 )
                 if recovery_trace.agent_action in {"INFORM", "ESCALATE"}:

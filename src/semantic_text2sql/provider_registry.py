@@ -47,6 +47,9 @@ MODEL_CATALOG = (
     ProviderModelSpec("agentrouter", "claude-opus-4-8", "AGENTROUTER_API_KEY"),
     ProviderModelSpec("groq", GROQ_QWEN_MODEL, "GROQ_API_KEY"),
     ProviderModelSpec(
+        "openrouter", "nvidia/nemotron-3-ultra-550b-a55b:free", "OPENROUTER_API_KEY"
+    ),
+    ProviderModelSpec(
         "justdowork", "gpt-5.6-sol", "JUSTDOWORK_API_KEY", "JUSTDOWORK_BASE_URL"
     ),
     ProviderModelSpec(

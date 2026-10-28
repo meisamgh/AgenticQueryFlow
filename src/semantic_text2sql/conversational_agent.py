@@ -94,6 +94,7 @@ class AgentDecision(StrictModel):
     tool_arguments: ToolInput | None = None
     instruction: str | None = Field(default=None, max_length=4_000)
     answer: str | None = Field(default=None, max_length=2_000)
+    finish_after_tool: bool = False
 
 
 _ACTION_VALUES: tuple[str, ...] = tuple(get_args(AgentDecision.model_fields["action"].annotation))
@@ -113,6 +114,7 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
         },
         "instruction": None,
         "answer": None,
+        "finish_after_tool": True,
     },
     {
         "action": "CALL_TOOL",
@@ -125,6 +127,7 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
         },
         "instruction": None,
         "answer": None,
+        "finish_after_tool": True,
     },
     {
         "action": "ANSWER",
@@ -133,6 +136,7 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
         "tool_arguments": None,
         "instruction": None,
         "answer": "Hello. I can help analyze your database.",
+        "finish_after_tool": False,
     },
 )
 
@@ -183,7 +187,10 @@ _TOOL_INPUT_SCHEMA: dict[str, object] = {
 AGENT_DECISION_SCHEMA: dict[str, object] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["action", "intent", "tool", "tool_arguments", "instruction", "answer"],
+    "required": [
+        "action", "intent", "tool", "tool_arguments", "instruction", "answer",
+        "finish_after_tool",
+    ],
     "properties": {
         "action": {"type": "string", "enum": list(_ACTION_VALUES)},
         "intent": {"type": "string", "enum": list(_INTENT_VALUES)},
@@ -196,6 +203,7 @@ AGENT_DECISION_SCHEMA: dict[str, object] = {
         "tool_arguments": {"anyOf": [_TOOL_INPUT_SCHEMA, {"type": "null"}]},
         "instruction": {"type": ["string", "null"], "maxLength": 4_000},
         "answer": {"type": ["string", "null"], "maxLength": 2_000},
+        "finish_after_tool": {"type": "boolean"},
     },
 }
 
@@ -206,7 +214,8 @@ def _decision_json_line(example: dict[str, Any]) -> str:
 
 _DECISION_INSTRUCTIONS = (
     "Decision schema rules: Return ONLY one structured AgentDecision JSON object with keys "
-    "action, intent, tool, tool_arguments, answer; no prose, markdown, or code fences. "
+    "action, intent, tool, tool_arguments, answer, finish_after_tool; "
+    "no prose, markdown, or code fences. "
     "action must be exactly one of: "
     + ", ".join(_ACTION_VALUES)
     + ". intent must be exactly one of: "
@@ -220,6 +229,10 @@ _DECISION_INSTRUCTIONS = (
     'and null for non-SQL tools. Each change names an operation and target. '
     'Preserve the previous accepted metric and filters unless a change explicitly '
     'replaces them. Otherwise use null. The legacy instruction key is accepted '
+    'Set finish_after_tool=true when one governed SQL result completes the '
+    'analysis, or when SQL plus the requested chart will complete it. The '
+    'controller will finish only after a verified chart exists. Set false for '
+    'refinement, investigation, or another analytical tool step. '
     "for compatibility, but prefer tool_arguments. Complete JSON schema:\n"
     + json.dumps(AGENT_DECISION_SCHEMA, separators=(",", ":"))
     + "\nExamples:\n"
@@ -312,6 +325,7 @@ class AgentState(StrictModel):
     response: ChatResponse | None = None
     base_response: ChatResponse | None = None
     steps: int = 0
+    finish_after_tool: bool = False
     usage: TokenUsage = Field(default_factory=TokenUsage)
     ledger: list[CallLedgerEntry] = Field(default_factory=list)
 
@@ -338,6 +352,47 @@ CACHED_RESULT_TOOLS: frozenset[ToolName] = frozenset({"analyze_result", "present
 PRIOR_SQL_TOOLS: frozenset[ToolName] = frozenset(
     {"change_visualization", "check_sql_correctness"}
 )
+ANALYTICAL_CHANGE_OPERATIONS = frozenset({
+    "ADD_DIMENSION", "REMOVE_DIMENSION", "ADD_FILTER", "REMOVE_FILTER",
+    "REPLACE_FILTER", "CHANGE_METRIC", "CHANGE_AGGREGATION", "CHANGE_GRAIN",
+    "CHANGE_PERIOD", "CHANGE_RANKING", "COMPARE",
+})
+CHART_FOLLOWUPS = frozenset({"plot it", "chart it", "graph it"})
+
+
+def _chart_followup(message: str) -> bool:
+    return message.strip().casefold().rstrip(".!?") in CHART_FOLLOWUPS
+
+
+def _result_presentation_request(message: str) -> bool:
+    return bool(re.fullmatch(
+        r"(?:show|summarize|describe|explain)\s+(?:(?:the|those|these|my)\s+)?"
+        r"(?:results?|answer|data)(?:\s+again)?[.!?]?",
+        message.strip(), re.I,
+    ))
+
+
+def _database_question(message: str) -> bool:
+    """Conservative guard against unsupported model-only database answers."""
+    return bool(re.search(
+        r"\b(?:how many|how much|total|sum|average|count|top|highest|lowest|"
+        r"most|least|revenue|sales|spending|consumption|customers?|orders?|"
+        r"transactions?|profit|metric|kpi)\b",
+        message, re.I,
+    ))
+
+
+def _route_content_terms(value: str) -> set[str]:
+    """Reject model-proposed requery objectives with new business concepts."""
+    ignored = {"a", "an", "and", "as", "by", "for", "in", "is", "of", "the",
+               "to", "what", "which", "show", "calculate", "give", "me"}
+    terms = set()
+    for raw in re.findall(r"[a-z]+", value.casefold()):
+        term = {"monthly": "month", "months": "month", "yearly": "year",
+                "years": "year", "daily": "day", "days": "day"}.get(raw, raw)
+        if term not in ignored:
+            terms.add(term)
+    return terms
 
 
 class ConversationalAnalyticsAgent:
@@ -381,6 +436,7 @@ class ConversationalAnalyticsAgent:
             return await runner._run_request(request)
 
     async def _run_request(self, request: ChatRequest) -> ChatResponse:
+        started = perf_counter()
         try:
             result = await self.graph.ainvoke(AgentState(turn_context=TurnContext(
                 request_id=uuid4().hex,
@@ -390,7 +446,39 @@ class ConversationalAnalyticsAgent:
             )))
             state = AgentState.model_validate(result)
             if state.response is not None:
-                return state.response
+                response = state.response
+                timings: dict[str, int] = {
+                    "total": round((perf_counter() - started) * 1000)
+                }
+                stages: dict[str, Callable[[CallLedgerEntry], bool]] = {
+                    "top_decisions": lambda item: item.component == "conversational_agent"
+                    and item.task != "final_answer",
+                    "top_final_answer": lambda item: item.component == "conversational_agent"
+                    and item.task == "final_answer",
+                    "context_planning": lambda item: item.component == "context_planner",
+                    "analytics_planning": lambda item: item.component == "analytics_planner",
+                    "sql_generation": lambda item: item.component in {
+                        "sql_generation", "sql_repair"
+                    },
+                    "sql_validation": lambda item: item.component == "sql_validation",
+                    "sql_execution": lambda item: item.component == "sql_execution",
+                    "result_analysis": lambda item: item.component == (
+                        "assistant_tool:analyze_result"
+                    ),
+                    "result_explanation": lambda item: item.component in {
+                        "assistant_tool:explain_existing_result", "assistant_tool:present_result",
+                        "result_interpretation", "explanation",
+                    },
+                    "charting_model": lambda item: item.component == "plotting_model",
+                }
+                for name, selected in stages.items():
+                    durations = [
+                        item.latency_ms for item in response.call_ledger
+                        if item.latency_ms is not None and selected(item)
+                    ]
+                    if durations:
+                        timings[name] = sum(durations)
+                return response.model_copy(update={"timings_ms": timings})
             return self._failure("Investigation limit reached without enough evidence.")
         except ModelError as exc:
             return self._failure(self._provider_failure_message(exc))
@@ -505,9 +593,196 @@ class ConversationalAnalyticsAgent:
             + (right.cache_creation_tokens or 0),
         )
 
+    def _reconcile_route(
+        self,
+        decision: AgentDecision,
+        state: AgentState,
+        previous: ConversationState | None,
+        last: RecentResult | ChatResponse | None,
+    ) -> AgentDecision:
+        """Check model routing against accepted evidence without interpreting SQL."""
+        assert self._request is not None
+        message = self._request.message
+        has_result = bool(last and last.generation and last.generation.accepted)
+        prior_chart = (
+            last.presentation.chart_spec
+            if last and last.presentation else None
+        )
+        contract = previous.semantic_contract if previous else None
+        changes = decision.tool_arguments.changes if decision.tool_arguments else []
+        analytical_change = any(
+            item.operation in ANALYTICAL_CHANGE_OPERATIONS for item in changes
+        )
+        chart_requested = parse_intent(message, has_previous=has_result).requested
+        chart_observations = [
+            (index, item) for index, item in enumerate(state.observations)
+            if item.get("tool") == "change_visualization"
+        ]
+        latest_chart = chart_observations[-1] if chart_observations else None
+
+        if latest_chart and latest_chart[1].get("status") == "REQUERY_REQUIRED":
+            chart_index, issue = latest_chart
+            if not has_result or any(
+                item.get("tool") == "ask_data"
+                for item in state.observations[:chart_index]
+            ):
+                return AgentDecision(
+                    action="ANSWER", intent="VISUALIZE",
+                    answer=str(issue.get("reason") or issue.get("error")
+                               or "The current result cannot support that chart."),
+                )
+            later_sql = next((
+                item for item in state.observations[chart_index + 1:]
+                if item.get("tool") == "ask_data"
+            ), None)
+            if later_sql is not None:
+                if later_sql.get("status") == "executed" and (
+                    state.base_response and state.base_response.generation
+                    and state.base_response.generation.accepted
+                ):
+                    return AgentDecision(
+                        action="CALL_TOOL", intent="VISUALIZE", tool="change_visualization",
+                        tool_arguments=ToolInput(objective=message),
+                    )
+                return AgentDecision(
+                    action="ANSWER", intent="VISUALIZE",
+                    answer="I couldn't obtain the data needed for that chart. "
+                    "Your previous accepted result was not changed.",
+                )
+            reason = str(issue.get("reason") or issue.get("error") or "")
+            if "truncated" in reason.casefold() or "incomplete" in reason.casefold():
+                return AgentDecision(action="ANSWER", intent="VISUALIZE", answer=reason)
+            accepted_question = (
+                (contract.resolved_question or contract.original_question) if contract else None
+            ) or (previous.resolved_question if previous else None)
+            if not accepted_question or state.steps >= 4:
+                return AgentDecision(action="ANSWER", intent="VISUALIZE", answer=reason)
+            # The accepted question carries unaffected metric/filter/period constraints;
+            # the follow-up adds only the requested change. The SQL resolver still
+            # validates the resulting contract before execution.
+            proposed_objective = (
+                (decision.tool_arguments.objective if decision.tool_arguments
+                 else decision.instruction)
+                if decision.action == "CALL_TOOL" and decision.tool == "ask_data"
+                else None
+            )
+            if proposed_objective and not _route_content_terms(proposed_objective) <= (
+                _route_content_terms(accepted_question) | _route_content_terms(message)
+            ):
+                proposed_objective = None
+            chart_objective = proposed_objective or str(issue.get("objective") or message)
+            objective = f"{accepted_question}. {chart_objective}"
+            requested_changes = [
+                RequestedChange.model_validate(item)
+                for item in issue.get("requested_changes", [])
+            ]
+            return AgentDecision(
+                action="CALL_TOOL", intent="MODIFY_QUERY", tool="ask_data",
+                tool_arguments=ToolInput(
+                    objective=objective, operation="REFINE",
+                    changes=requested_changes,
+                ),
+            )
+
+        if (
+            state.observations and chart_requested and not chart_observations
+            and state.base_response and state.base_response.generation
+            and state.base_response.generation.accepted
+            and any(item.get("tool") == "ask_data" and item.get("status") == "executed"
+                    for item in state.observations)
+        ):
+            return AgentDecision(
+                action="CALL_TOOL", intent="VISUALIZE", tool="change_visualization",
+                tool_arguments=ToolInput(
+                    objective=(decision.tool_arguments.objective
+                               if decision.tool == "change_visualization"
+                               and decision.tool_arguments
+                               else decision.instruction
+                               if decision.tool == "change_visualization"
+                               and decision.instruction else message),
+                ),
+            )
+
+        if not state.observations and analytical_change and has_result:
+            return AgentDecision(
+                action="CALL_TOOL", intent="MODIFY_QUERY", tool="ask_data",
+                tool_arguments=ToolInput(
+                    objective=(decision.tool_arguments.objective
+                               if decision.tool_arguments else message),
+                    operation="REFINE", changes=changes,
+                ),
+            )
+        if not state.observations and chart_requested and not has_result:
+            accepted_question = (
+                (contract.resolved_question or contract.original_question) if contract else None
+            ) or (previous.resolved_question if previous else None)
+            if previous and previous.last_sql and accepted_question:
+                # A restart or bounded-cache eviction may leave the accepted
+                # contract without complete rows. Regenerate through governed
+                # SQL before charting; never fabricate data from a preview.
+                bare_plot = message.strip().casefold().rstrip(".") in {
+                    "plot", "plot it", "chart", "chart it", "graph", "show the chart",
+                }
+                return AgentDecision(
+                    action="CALL_TOOL",
+                    intent="NEW_QUERY" if bare_plot else "MODIFY_QUERY",
+                    tool="ask_data",
+                    tool_arguments=ToolInput(
+                        objective=(accepted_question if bare_plot
+                                   else f"{accepted_question}. {message}"),
+                        operation="NEW_QUERY" if bare_plot else "REFINE",
+                        changes=[] if bare_plot else changes,
+                    ),
+                )
+            if _chart_followup(message) or message.strip().casefold().rstrip(".") in {
+                "plot", "plot it", "chart", "chart it", "graph", "show the chart",
+            }:
+                return AgentDecision(
+                    action="ANSWER", intent="DIRECT_ANSWER",
+                    answer="I don't have an accepted result to plot. "
+                    "Please ask the original data question again.",
+                )
+        if not state.observations and has_result and chart_requested and (
+            decision.tool == "change_visualization"
+            or _chart_followup(message)
+            or (parse_intent(message, has_previous=True).followup
+                and (prior_chart is not None or decision.tool == "ask_data"))
+        ):
+            return AgentDecision(
+                action="CALL_TOOL", intent="VISUALIZE", tool="change_visualization",
+                tool_arguments=ToolInput(
+                    objective=message, changes=changes,
+                ),
+            )
+        if not state.observations and has_result and _result_presentation_request(message):
+            return AgentDecision(
+                action="CALL_TOOL", intent="EXPLAIN", tool="present_result",
+                tool_arguments=ToolInput(objective=message),
+            )
+        if (
+            not state.observations and decision.action == "ANSWER"
+            and decision.intent == "DIRECT_ANSWER" and _database_question(message)
+            and not chart_requested
+        ):
+            return AgentDecision(
+                action="CALL_TOOL", intent="NEW_QUERY", tool="ask_data",
+                tool_arguments=ToolInput(objective=message, operation="NEW_QUERY"),
+            )
+        if (
+            not state.observations and not has_result and chart_requested
+            and decision.tool == "change_visualization" and _database_question(message)
+        ):
+            return AgentDecision(
+                action="CALL_TOOL", intent="NEW_QUERY", tool="ask_data",
+                tool_arguments=ToolInput(objective=message, operation="NEW_QUERY"),
+            )
+        return decision
+
     @staticmethod
     def _model_entry(
-        provider: str, model: str, usage: TokenUsage, *, succeeded: bool
+        provider: str, model: str, usage: TokenUsage, *, succeeded: bool,
+        latency_ms: int | None = None, task: str | None = None,
+        retry_count: int | None = None,
     ) -> CallLedgerEntry:
         """Ledger entry for one top-layer model call, valid output or not."""
         return CallLedgerEntry(
@@ -516,8 +791,12 @@ class ConversationalAnalyticsAgent:
             status="SUCCEEDED" if succeeded else "FAILED",
             provider=provider,
             requested_model=model,
+            effective_model=model,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
+            latency_ms=latency_ms,
+            task=task,
+            retry_count=(retry_count or 0) + usage.provider_retries,
         )
 
     async def _complete_decision(
@@ -537,16 +816,18 @@ class ConversationalAnalyticsAgent:
         """
         assert self._budget is not None
         structured = getattr(completer, "complete_structured", None)
+        structured_task = getattr(completer, "complete_structured_task", None)
         usage_total = TokenUsage()
         ledger: list[CallLedgerEntry] = []
         issues: list[str] = []
         native_capability = getattr(completer, "native_schema_supported", None)
-        native_supported = callable(structured) and (
+        native_supported = (callable(structured_task) or callable(structured)) and (
             not callable(native_capability)
             or bool(native_capability(model, "AgentDecision"))
         )
         task_completion = getattr(completer, "complete_task", None)
         for attempt in range(2):
+            call_started = perf_counter()
             request_prompt = (
                 prompt if attempt == 0 or not issues else prompt + self._repair_tail(issues)
             )
@@ -555,11 +836,14 @@ class ConversationalAnalyticsAgent:
                 else "decision"
             )
             if native_supported:
-                call = cast(
-                    Any,
-                    cast(Any, structured)(
+                call = (
+                    cast(Any, structured_task)(
+                        model, request_prompt, "AgentDecision", AGENT_DECISION_SCHEMA, task
+                    )
+                    if callable(structured_task)
+                    else cast(Any, structured)(
                         model, request_prompt, "AgentDecision", AGENT_DECISION_SCHEMA
-                    ),
+                    )
                 )
             elif callable(task_completion):
                 call = task_completion(model, request_prompt, task, json_mode=True)
@@ -567,9 +851,14 @@ class ConversationalAnalyticsAgent:
                 call = completer.complete_detailed(model, request_prompt)
             try:
                 raw, usage = await self._budget.wait(call, kind="model")
-            except StructuredOutputFallbackRequired:
-                ledger.append(self._model_entry(provider, model, TokenUsage(), succeeded=False))
+            except (StructuredOutputFallbackRequired, StructuredOutputUnsupported):
+                ledger.append(self._model_entry(
+                    provider, model, TokenUsage(), succeeded=False,
+                    latency_ms=round((perf_counter() - call_started) * 1000),
+                    task=task, retry_count=attempt,
+                ))
                 native_supported = False
+                call_started = perf_counter()
                 try:
                     fallback_call = (
                         task_completion(model, request_prompt, task, json_mode=True)
@@ -583,7 +872,9 @@ class ConversationalAnalyticsAgent:
                     failed_usage = getattr(exc, "usage", TokenUsage())
                     usage_total = self._sum_usage(usage_total, failed_usage)
                     ledger.append(self._model_entry(
-                        provider, model, failed_usage, succeeded=False
+                        provider, model, failed_usage, succeeded=False,
+                        latency_ms=round((perf_counter() - call_started) * 1000),
+                        task=task, retry_count=attempt + 1,
                     ))
                     return _DecisionCompletion(
                         None,
@@ -593,7 +884,11 @@ class ConversationalAnalyticsAgent:
                         message=self._provider_failure_message(exc),
                     )
             except RequestBudgetExceeded:
-                ledger.append(self._model_entry(provider, model, TokenUsage(), succeeded=False))
+                ledger.append(self._model_entry(
+                    provider, model, TokenUsage(), succeeded=False,
+                    latency_ms=round((perf_counter() - call_started) * 1000),
+                    task=task, retry_count=attempt,
+                ))
                 return _DecisionCompletion(
                     None,
                     usage_total,
@@ -607,7 +902,11 @@ class ConversationalAnalyticsAgent:
             except Exception as exc:
                 failed_usage = getattr(exc, "usage", TokenUsage())
                 usage_total = self._sum_usage(usage_total, failed_usage)
-                ledger.append(self._model_entry(provider, model, failed_usage, succeeded=False))
+                ledger.append(self._model_entry(
+                    provider, model, failed_usage, succeeded=False,
+                    latency_ms=round((perf_counter() - call_started) * 1000),
+                    task=task, retry_count=attempt,
+                ))
                 transport_message = self._provider_failure_message(exc)
                 issues = [
                     *issues,
@@ -627,13 +926,25 @@ class ConversationalAnalyticsAgent:
                 )
             except ValidationError as exc:
                 issues = _validation_issue_lines(exc)
-                ledger.append(self._model_entry(provider, model, usage, succeeded=False))
+                ledger.append(self._model_entry(
+                    provider, model, usage, succeeded=False,
+                    latency_ms=round((perf_counter() - call_started) * 1000),
+                    task=task, retry_count=attempt,
+                ))
                 continue
             issues = _consistency_issue_lines(decision)
             if issues:
-                ledger.append(self._model_entry(provider, model, usage, succeeded=False))
+                ledger.append(self._model_entry(
+                    provider, model, usage, succeeded=False,
+                    latency_ms=round((perf_counter() - call_started) * 1000),
+                    task=task, retry_count=attempt,
+                ))
                 continue
-            ledger.append(self._model_entry(provider, model, usage, succeeded=True))
+            ledger.append(self._model_entry(
+                provider, model, usage, succeeded=True,
+                latency_ms=round((perf_counter() - call_started) * 1000),
+                task=task, retry_count=attempt,
+            ))
             return _DecisionCompletion(decision, usage_total, ledger, [])
         return _DecisionCompletion(None, usage_total, ledger, issues)
 
@@ -708,6 +1019,77 @@ class ConversationalAnalyticsAgent:
             and state.base_response.generation.accepted
             else self.get_last_response(self._request.session_id, self._request.db_id)
         )
+        chart_issues = [
+            item for item in state.observations
+            if item.get("tool") == "change_visualization"
+            and item.get("status") == "REQUERY_REQUIRED"
+        ]
+        if len(chart_issues) >= 2 and state.base_response is not None:
+            reason = str(chart_issues[-1].get("reason") or "The result cannot support that chart.")
+            return state.model_copy(update={
+                "response": state.base_response.model_copy(update={
+                    "message": reason,
+                    "plot_status": "REQUERY_REQUIRED",
+                    "token_usage": self._sum_usage(state.base_response.token_usage, state.usage),
+                    "call_ledger": [*state.base_response.call_ledger, *state.ledger],
+                }),
+            })
+        if (
+            chart_issues and state.observations
+            and state.observations[-1].get("tool") == "ask_data"
+            and state.observations[-1].get("status") == "executed"
+            and state.base_response and state.base_response.generation
+            and state.base_response.generation.accepted
+        ):
+            return state.model_copy(update={"decision": AgentDecision(
+                action="CALL_TOOL", intent="VISUALIZE", tool="change_visualization",
+                tool_arguments=ToolInput(objective=self._request.message),
+            )})
+        # A successful governed result already supplies the client-facing message.
+        # Do not make another model call merely to paraphrase it. A combined
+        # SQL-and-chart request still needs the plotting tool before completion.
+        if state.finish_after_tool and state.observations and state.base_response is not None:
+            latest = state.observations[-1]
+            wants_chart = parse_intent(self._request.message).requested
+            chart_ready = any(
+                item.get("tool") == "change_visualization"
+                and item.get("status") == "CHART_READY"
+                for item in state.observations
+            )
+            if (
+                latest.get("tool") == "ask_data"
+                and latest.get("status") == "executed"
+                and wants_chart and not chart_ready and not chart_issues
+            ):
+                return state.model_copy(update={"decision": AgentDecision(
+                    action="CALL_TOOL", intent="VISUALIZE",
+                    tool="change_visualization",
+                    tool_arguments=ToolInput(objective=self._request.message),
+                )})
+            if (
+                state.base_response.generation is not None
+                and state.base_response.generation.accepted
+                and (
+                    latest.get("tool") == "ask_data" and not wants_chart
+                    or latest.get("tool") == "change_visualization" and chart_ready
+                )
+            ):
+                base = state.base_response
+                message = (
+                    "The chart is ready from the validated query result."
+                    if chart_ready else base.message
+                )
+                presentation = base.presentation
+                if presentation is not None:
+                    presentation = presentation.model_copy(update={"summary": message})
+                return state.model_copy(update={
+                    "response": base.model_copy(update={
+                        "message": message,
+                        "presentation": presentation,
+                        "token_usage": self._sum_usage(base.token_usage, state.usage),
+                        "call_ledger": [*base.call_ledger, *state.ledger],
+                    }),
+                })
         compact = {
             "question": self._request.message,
             "capabilities": self._capabilities(),
@@ -739,31 +1121,42 @@ class ConversationalAnalyticsAgent:
             "observations": state.observations[-3:],
         }
         prompt = (
-            "You are the single client-facing AI Business Analytics Assistant. "
-            "For every user message, use the current conversation context and accepted "
-            "analytical state to understand the client's objective. Decide whether to "
-            "answer directly or invoke one or more tools. Conversation context "
-            "may include previous questions, accepted SQL, verified results, business metric "
-            "definitions, active filters, dimensions, date ranges, visualization state, "
-            "corrections, and prior tool observations. Prefer the simplest action that "
-            "completely satisfies the request. Never execute SQL when verified existing "
-            "data is sufficient. Tools provide structured evidence; their outputs are "
-            "observations, not final conversational messages. After each tool result, "
-            "evaluate whether more action is needed or sufficient evidence exists. "
-            "When further analysis is required, issue distinct, scoped analytical objectives "
-            "rather than repeating the original question. Preserve approved business "
-            "definitions and unaffected constraints. For successful responses, write the "
-            "final natural-language answer yourself, using actual evidence. Never invent "
-            "database facts or numbers, or claim a visualization exists before observing a "
-            "successful validated chart result. Be concise, helpful and professional for "
-            "nontechnical business stakeholders; explain conclusions rather than technical "
-            "execution details unless asked. If evidence is insufficient, explain the "
-            "limitation without inventing an answer. For an analytical request, call "
-            "ask_data even if the client omitted time periods, filters or table names; "
-            "the governed data layer resolves definitions and defaults to all available "
-            "data when no period or filter was requested. Do not ask the client to name "
-            "a table, metric definition, or date range before trying the tool. "
-            "Never fabricate success. "
+            "You are the single client-facing AI Business Analytics Assistant and the "
+            "primary decision-maker for conversational analytics.\n\n"
+            "For every user message, understand the user's objective using the current "
+            "request, previous conversation, accepted SemanticContract, available SQL "
+            "results, chart state, and corrections. Select the simplest valid execution "
+            "path that fully satisfies the user's request.\n\n"
+            "Routing rules:\n"
+            "1. DIRECT_ANSWER: Answer directly only when no new database evidence or tool "
+            "action is required.\n"
+            "2. REUSE EXISTING RESULT: When accepted results already contain sufficient "
+            "verified evidence, reuse them instead of generating SQL.\n"
+            "3. CHART CREATION OR MODIFICATION: Use change_visualization when the request "
+            "concerns chart type, axes, series, or presentation and can be supported by "
+            "existing data. Preserve all unaffected chart settings.\n"
+            "4. ANALYTICAL MODIFICATION: Use ask_data when metrics, formulas, filters, "
+            "periods, dimensions, aggregations, ranking, or comparisons require changes "
+            "to the accepted analysis. Preserve unaffected SemanticContract constraints.\n"
+            "5. NEW ANALYSIS: Use ask_data for independent analytical questions.\n"
+            "6. EXPLANATION: Use the appropriate existing-result or SQL explanation tool, "
+            "obtaining additional evidence only when needed.\n"
+            "7. INVESTIGATION: Break complex analytical questions into distinct, "
+            "evidence-driven steps. Avoid unnecessary tool calls.\n"
+            "8. INSUFFICIENT DATA: If a tool returns REQUERY_REQUIRED, determine the missing "
+            "requirements, call ask_data to obtain them when feasible, then retry the "
+            "original visualization. Do not invent missing data.\n"
+            "9. AMBIGUITY: Request clarification only when materially different "
+            "interpretations cannot be resolved safely from the accepted context.\n\n"
+            "Execution principles: Distinguish presentation-only changes from changes to "
+            "analytical meaning. Do not regenerate SQL when verified existing data is "
+            "sufficient. Do not answer database-dependent questions from unsupported "
+            "assumptions. Keep the user's original goal across tool calls. Inspect every "
+            "tool result before deciding whether another step is necessary. Never silently "
+            "modify accepted metrics, formulas, filters, periods, or chart encodings. "
+            "Never claim success without supporting tool evidence. Return only a valid "
+            "AgentDecision JSON matching the existing application schema. Prioritize "
+            "correctness, continuity, efficiency, and stakeholder-friendly answers.\n"
             + _DECISION_INSTRUCTIONS
             + "\nTools: list_tables/search_schema/describe_table/get_relationships/"
             "get_column_profile inspect allowlisted metadata; get_available_metrics/"
@@ -789,7 +1182,11 @@ class ConversationalAnalyticsAgent:
         provider = os.environ.get("TEXT2SQL_ASSISTANT_PROVIDER") or self._request.provider
         model = os.environ.get("TEXT2SQL_ASSISTANT_MODEL") or self._request.model
         if provider not in self.completers:
-            raise ValueError(f"Assistant provider {provider} is not configured.")
+            available = ", ".join(sorted(self.completers)) or "none"
+            raise ValueError(
+                f"Assistant provider {provider!r} is not configured. "
+                f"Set TEXT2SQL_ASSISTANT_PROVIDER to one of: {available}."
+            )
         completer = self.completers[provider]
         completion = await self._complete_decision(prompt, state, provider, model, completer)
         if completion.decision is None:
@@ -832,7 +1229,24 @@ class ConversationalAnalyticsAgent:
                     ),
                 }
             )
-        decision = completion.decision
+        decision = self._reconcile_route(completion.decision, state, previous, last)
+        if (
+            parse_intent(self._request.message).requested
+            and any(item.get("tool") == "change_visualization"
+                    and item.get("status") == "CHART_READY" for item in state.observations)
+            and state.base_response is not None
+            and state.base_response.presentation is not None
+            and state.base_response.presentation.chart_spec is not None
+        ):
+            decision = AgentDecision(
+                action="ANSWER",
+                intent="VISUALIZE",
+                answer=(
+                    decision.answer
+                    if decision.action == "ANSWER" and decision.answer
+                    else "Here is the chart of the accepted result."
+                ),
+            )
         if not state.observations and decision.action == "ANSWER":
             required_tool: ToolName | None = {
                 "NEW_QUERY": "ask_data",
@@ -877,6 +1291,26 @@ class ConversationalAnalyticsAgent:
         if decision.action != "CALL_TOOL":
             answer = decision.answer or "I could not complete that request safely."
             base = state.base_response or self._plain(answer)
+            failed_required = None
+            completed_tools: set[str] = set()
+            for item in reversed(state.observations):
+                tool_name = str(item.get("tool") or "")
+                if tool_name not in {"ask_data", "change_visualization"}:
+                    continue
+                if tool_name in completed_tools:
+                    continue
+                completed_tools.add(tool_name)
+                if (item.get("status") in {"not_accepted", "REQUERY_REQUIRED", "UNSUPPORTED"}
+                        or item.get("error")):
+                    failed_required = item
+            if failed_required is not None and (
+                base.generation is not None and base.generation.accepted
+                or parse_intent(self._request.message).requested
+            ):
+                answer = str(
+                    failed_required.get("failure") or failed_required.get("reason")
+                    or failed_required.get("error") or "The requested action did not complete."
+                )
             recovery = base.generation.recovery if base.generation else None
             if recovery and recovery.diagnosis_code == "REQUESTED_KEY_ABSENT":
                 # A live exact primary-key probe is conclusive. Do not let a
@@ -945,9 +1379,12 @@ class ConversationalAnalyticsAgent:
                     "ledger": ledger,
                 }
             )
-        return state.model_copy(
-            update={"decision": decision, "usage": merged_usage, "ledger": ledger}
-        )
+        return state.model_copy(update={
+            "decision": decision,
+            "finish_after_tool": decision.finish_after_tool,
+            "usage": merged_usage,
+            "ledger": ledger,
+        })
 
     async def _act(self, state: AgentState) -> AgentState:
         assert self._request is not None and self._budget is not None and state.decision is not None
@@ -1077,6 +1514,10 @@ class ConversationalAnalyticsAgent:
                     ),
                 }
             )
+            if state.base_response and state.base_response.state:
+                request._turn_state = previous
+                if state.base_response.state_commit_pending:
+                    request._turn_expected_version = state.base_response.state_expected_version
             handler = (
                 (self.investigation_handler or self.sql_handler)
                 if state.decision.intent == "INVESTIGATE"
@@ -1091,7 +1532,10 @@ class ConversationalAnalyticsAgent:
                 facts["calculated_evidence"] = self._analyze_result(response)
             downstream_usage = response.token_usage
             downstream_ledger = response.call_ledger
-            if state.decision.intent != "INVESTIGATE":
+            if state.decision.intent != "INVESTIGATE" and (
+                (response.generation is not None and response.generation.accepted)
+                or base is None
+            ):
                 # Account each delegated call once, including when the model
                 # invokes more than one tool in the same conversation turn.
                 base = response.model_copy(
@@ -1137,14 +1581,11 @@ class ConversationalAnalyticsAgent:
                 evidence_id=output.evidence_id,
             ).model_dump()
         elif tool == "analyze_result":
-            last = self.get_last_response(self._request.session_id, self._request.db_id)
             if last is None:
                 facts = {"tool": tool, "error": "No accepted result is available."}
             else:
                 facts = {"tool": tool, **self._analyze_result(last)}
         elif tool == "explain_existing_result":
-            last = self.get_last_response(self._request.session_id, self._request.db_id)
-            previous = self.get_state(self._request.session_id)
             sql = last.generation.sql if last and last.generation else None
             if not sql and previous and previous.db_id == self._request.db_id:
                 sql = previous.last_sql
@@ -1165,16 +1606,19 @@ class ConversationalAnalyticsAgent:
                 else {"tool": tool, "error": "No accepted SQL or result is available."}
             )
         elif tool == "present_result":
-            last = self.get_last_response(self._request.session_id, self._request.db_id)
             facts = {"tool": tool, "result": self._cached_facts(last) if last else None}
             if last and last.generation:
                 base = ChatResponse(
                     session_id=self._request.session_id,
+                    result_id=last.result_id,
+                    chart_id=last.chart_id,
                     operation="EXPLAIN_RESULT",
                     resolved_question=last.generation.question,
                     generation=last.generation,
                     presentation=last.presentation,
                     message=last.message,
+                    state=previous,
+                    provenance=[*last.provenance, "accepted_result_reused"],
                 )
         elif tool == "change_visualization":
             # The plotting specialist receives the exact accepted rows, including
@@ -1213,7 +1657,13 @@ class ConversationalAnalyticsAgent:
                     fresh_result=source is state.base_response and source is not None,
                     changes=tool_input.changes,
                 )
-                facts = {"tool": tool, "status": outcome.status, "reason": outcome.reason}
+                facts = {
+                    "tool": tool,
+                    "status": outcome.status,
+                    "reason": outcome.reason,
+                    "objective": plot_objective,
+                    "requested_changes": [item.model_dump() for item in tool_input.changes],
+                }
                 downstream_usage = outcome.usage
                 downstream_ledger = list(outcome.ledger)
                 if outcome.spec is None or source is None or source.generation is None:
@@ -1296,7 +1746,13 @@ class ConversationalAnalyticsAgent:
                     CallLedgerEntry(
                         component=f"assistant_tool:{tool}",
                         kind="TOOL",
-                        status="SUCCEEDED" if "error" not in facts else "FAILED",
+                        status=(
+                            "FAILED" if "error" in facts
+                            or facts.get("status") in {
+                                "not_accepted", "REQUERY_REQUIRED", "UNSUPPORTED"
+                            }
+                            else "SUCCEEDED"
+                        ),
                         latency_ms=round((perf_counter() - started) * 1000),
                     ),
                 ],

@@ -1,5 +1,24 @@
 # V6.4 progress checkpoint
 
+October 26 results-table update (local, uncommitted):
+
+- Data now has responsive column widths, sticky numeric-aligned headers, drag-to-resize columns, compact small-result sizing, 20/50/100-row pages, a bounded 100-row virtual window, and a full-screen table. The source result and CSV values remain unchanged; truncated CSV export is explicitly labeled as partial.
+- The old Visible chart data subview and verbose source-row note are removed. A Map tab is offered only for an explicit map request with a complete result containing valid numeric latitude/longitude columns; it plots exact returned coordinates with Plotly.
+- A new `/api/results/page` endpoint accepts only session/database/result identity and an offset/size, never client SQL. Beyond the accepted 500-row snapshot, it re-runs only the saved read-only SQL with an outer ORDER BY, checks the saved prefix for drift, and caps access at 10,000 rows / five seconds. This is bounded offset paging, not a cross-request database snapshot; concurrent source updates can still require rerunning the question. No SQL LIMIT is added or changed.
+
+October 26 single-tool response and view update (local, uncommitted):
+
+- The initial Top-layer decision can now explicitly mark a simple governed SQL result, or SQL plus its requested validated chart, as complete. Those successful paths return the tool's grounded response without a separate final-answer model call. Multi-step refinement, investigation, explanation, and failure handling retain the existing continuation path. The optimization is conditional on the model setting `finish_after_tool`; it is not a guarantee for all provider outputs.
+- The frontend no longer has an Answer tab. The response text, KPI, and requested chart remain visible above the Data/SQL tabs; switching technical tabs does not run SQL or regenerate a chart.
+- Scripted SQLite regressions verify one Top-layer call for both simple SQL and SQL-plus-chart when marked complete. Frontend tab tests verify the persistent chart area and local switching. Live-provider latency impact is not yet measured.
+
+October 25 same-turn consistency continuation (local, uncommitted):
+
+- Delegated SQL calls now receive the most recent accepted state through a request-private, request-local handoff. The second same-turn SQL call preserves the turn's original optimistic commit version; no intermediate state or result is persisted. API JSON cannot supply this handoff.
+- Same-turn result tools (`analyze_result`, `explain_existing_result`, `present_result`) read the current graph response before the persisted cache. A failed second SQL call retains the first accepted result but cannot be reported as a successful refinement.
+- Added SQLite end-to-end regressions for NEW_QUERY → REFINE → chart, SQL → each result tool, failed second SQL, historical branch replay, cancellation, and rejection of client-supplied provisional state. Date-bound cleanup now removes only the exact old-year upper boundary, ranking extraction retains multiword metric names, and explicit `fanout_risk` produces an UNRESOLVED finding for one-to-many aggregate joins.
+- Full semantic equivalence and the remaining V6.4 scenario matrix are still incomplete; these tests do not establish business correctness for every SQL rewrite.
+
 October 25 provider continuation (uncommitted):
 
 - Live, credential-backed Groq probes used only a synthetic decision prompt: text, JSON-object and tiny strict schema returned HTTP 200. The full Queryflow AgentDecision instructions returned HTTP 400 `json_validate_failed` in strict-schema mode; the same full prompt succeeded in JSON-object mode and passed local Pydantic validation. This establishes a prompt/schema-size-dependent Groq/Qwen strict-decoding failure, not a missing model or invalid key.
@@ -55,3 +74,25 @@ October 25 PR #3 chart-follow-up integration (local, uncommitted):
 - The plotting model receives the prior validated chart encodings and Top-layer typed changes. A chart-type-only request cannot silently switch x, y, metric, components, or series; invalid proposals fall back to deterministic chart validation preserving the prior encodings. A period change still returns `REQUERY_REQUIRED` before the plotting model is called.
 - Replaced the chart proposal prompt with the requested expert business-analytics visualization-planner instructions, retaining the application's JSON schema and bounded result sample.
 - Verification: focused visualization/V6.3 tests, full Python pytest (one skipped), 72 Deno frontend tests, Ruff, mypy over 55 source files, and `git diff --check` passed. No live-provider call was made; improved chart quality in live use remains unmeasured.
+
+October 25 Top-layer routing hardening (local, uncommitted):
+
+- Clarified DIRECT_ANSWER, NEW_QUERY, MODIFY_QUERY, VISUALIZE, EXPLAIN, INVESTIGATE and result-reuse instructions in the existing Top-layer prompt. No additional routing model or graph was added.
+- Reconciled validated `AgentDecision` proposals against accepted `SemanticContract`, result/chart availability and typed changes. Presentation-only chart edits reuse accepted data; typed analytical changes delegate to governed SQL. Exact result recaps use `present_result` and preserve result identity. Unsupported direct answers to obvious database questions are grounded through `ask_data`.
+- A safe `REQUERY_REQUIRED` follow-up now preserves the accepted question and original chart goal, runs one governed refinement and retries charting without a redundant decision call. Fresh mismatched SQL results and repeated insufficient chart results terminate without inventing a chart. This does not prove general semantic equivalence or every ambiguous natural-language change.
+- Adversarial SQLite multi-turn tests cover model misroutes, chart-type edits, filter correction, same-turn SQL/chart, result reuse, failed SQL, and a premature answer after a requery signal. Full Python pytest passed with one skipped test; 72 Deno frontend tests, Ruff, mypy over 55 source files, and `git diff --check` passed. Live provider and PostgreSQL tests were NOT RUN.
+
+October 26 same-turn orchestration and performance audit (local, uncommitted):
+
+- Confirmed the request-local provisional result/contract path through SQL → refine → explain and SQL → chart. Added regressions for latest-result use and explanation-only timing isolation. Final answers now guard against unresolved required-tool failures even if a later benign tool observation intervenes.
+- The call ledger now records actual Top-layer decision/final-answer durations, task names, retry counts and provider/model; context/SQL planner entries carry provider retry counts, and SQL validation/execution are timed separately. Removed a phantom legacy-interpreter model entry in Top-layer mode. The pipeline panel uses request-local stage timings and per-call metadata, rather than inherited SQL timings on result-only turns.
+- Task-specific completion limits and schema-constrained output paths were checked and extended across configured AgentRouter, True SOTA, Groq, JustDoWork, CodeCraft and OpenRouter adapters where their HTTP interfaces support them. The CLI fallback cannot guarantee a per-call completion cap; live-provider behavior remains unverified.
+- Corrected a local `.env` typo (`groqre` → `groq`) that made the assistant unavailable. The missing-provider error now names the setting and available configured providers. Restart the API process to reload `.env`.
+- Scripted SQLite measurement for SQL → explain: graph workflow 194 ms, SQL generation 1 ms, SQL execution 1 ms; rounded decision/final-answer/validation/explanation stages reported 0 ms. These are mock-model timings, not live-provider latency; graph total includes unclassified orchestration and test-client overhead.
+- Verification: full Python pytest passed with one skipped test, 68 Deno frontend tests passed, Ruff passed, mypy passed over 55 source files, and `git diff --check` passed. Live providers and PostgreSQL were NOT RUN.
+
+October 26 local Gemma understanding integration (uncommitted):
+
+- Verified the installed Ollama model tag `gemma4:12b`; local `.env` now selects it for the Top-layer assistant. SQL and plotting configuration is unchanged.
+- Added an Ollama conversation completer with task token limits, token accounting, bounded HTTP timeout and native JSON/schema output. The installed Ollama build rejects the complete AgentDecision grammar; a specific capability fallback uses JSON mode and existing local decision validation, remembering the rejected capability per model.
+- A live local greeting produced a valid AgentDecision via fallback in 6.98 seconds, reporting 123 tokens. This verifies local completion and parsing, not analytical routing accuracy or production latency. Provider regression tests, full pytest (one skipped), Ruff and mypy passed.

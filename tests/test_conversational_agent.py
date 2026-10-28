@@ -149,7 +149,7 @@ def test_agent_policy_and_structured_tool_objective(registry: Any, tmp_path: Any
     assert response.message == "The schema search is complete."
     assert calls == []
     assert "single client-facing AI Business Analytics Assistant" in completer.prompts[0]
-    assert "Never execute SQL when verified existing data is sufficient" in completer.prompts[0]
+    assert "Do not regenerate SQL when verified existing data is sufficient" in completer.prompts[0]
     assert "tool_arguments" in completer.prompts[0]
     assert "search_schema" in completer.prompts[1]
 
@@ -820,7 +820,8 @@ def test_structured_schema_enumerates_every_allowed_value() -> None:
         "objective", "operation", "changes"
     ]
     assert AGENT_DECISION_SCHEMA["required"] == [
-        "action", "intent", "tool", "tool_arguments", "instruction", "answer"
+        "action", "intent", "tool", "tool_arguments", "instruction", "answer",
+        "finish_after_tool",
     ]
 
     from semantic_text2sql.conversational_agent import _DECISION_EXAMPLES, AgentDecision, ToolInput
@@ -850,6 +851,11 @@ def test_agent_prompt_carries_schema_rules_and_examples(
     assert '"intent":"NEW_QUERY"' in prompt  # NEW_QUERY example
     assert '"intent":"VISUALIZE"' in prompt  # VISUALIZE example
     assert '"action":"ANSWER"' in prompt  # ANSWER example
+    assert "primary decision-maker for conversational analytics" in prompt
+    assert "Preserve all unaffected chart settings" in prompt
+    assert "Preserve unaffected SemanticContract constraints" in prompt
+    assert "REQUERY_REQUIRED" in prompt
+    assert "Return only a valid AgentDecision JSON" in prompt
 
 
 def test_top_layer_receives_accepted_analytical_contract(
@@ -878,7 +884,7 @@ def test_top_layer_receives_accepted_analytical_contract(
                      '"ranked_metric": "revenue"', '"output_grain": ["country"]',
                      '"aggregation": "sum"', '"value": "paid"'):
         assert expected in prompt
-    assert "Do not ask the client to name" in prompt
+    assert "accepted SemanticContract" in prompt
 
 
 def test_prose_intent_is_repaired_not_converted_for_total_consumption(
@@ -1006,8 +1012,8 @@ def test_incompatible_intent_tool_is_repaired_before_execution(
     response = asyncio.run(_decision_agent(registry, tmp_path, completer, calls).run(
         ChatRequest(session_id="wrong-tool", db_id="shop", message="plot it")
     ))
-    assert calls == []  # no accepted result exists to visualize
-    assert len(completer.calls) == 3
+    assert calls == []  # No prior accepted question may be regenerated.
+    assert len(completer.calls) == 2  # Invalid decision plus one bounded repair.
     assert response.message
 
 
@@ -1179,9 +1185,10 @@ def test_plot_it_valid_visualize_decision_is_not_repaired(
     response = asyncio.run(
         agent.run(ChatRequest(session_id="viz", db_id="shop", message="plot it"))
     )
-    assert calls == []  # no accepted result exists; plotting never invokes SQL directly
+    assert calls == ["Show monthly consumption"]  # Missing rows trigger governed SQL.
     assert response.presentation is None
     assert response.message
+    assert "chart" not in response.message.casefold()
     assert len(completer.calls) == 2  # one decision per round; zero repair calls
 
 

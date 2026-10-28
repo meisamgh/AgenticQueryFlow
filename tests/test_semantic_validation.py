@@ -147,6 +147,20 @@ def test_direct_fact_join_aggregate_is_flagged_without_false_proof() -> None:
                for item in result)
 
 
+def test_explicit_fanout_risk_is_not_ignored_for_one_to_many_join() -> None:
+    context: dict[str, object] = {"relationships": [{
+        "left": "customers.CustomerID", "right": "transactions_1k.CustomerID",
+        "cardinality": "ONE_TO_MANY", "fanout_risk": True,
+    }]}
+    result = validate_sql_semantics(
+        "SELECT SUM(c.CreditLimit) FROM customers c "
+        "JOIN transactions_1k t ON c.CustomerID = t.CustomerID",
+        SemanticContract(), context,
+    )
+    assert any(item.code == "FACT_JOIN_FANOUT_RISK" and item.status == "UNRESOLVED"
+               for item in result)
+
+
 def test_preaggregated_fact_join_requires_review_not_false_rejection() -> None:
     result = validate_sql_semantics(
         "WITH monthly AS (SELECT CustomerID, SUM(Consumption) AS total "
