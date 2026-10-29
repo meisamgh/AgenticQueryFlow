@@ -8,18 +8,18 @@
    same constants, so the established branding is preserved exactly. */
 
 :root {
-  --bg: #fafaf8;
+  --bg: #f0fdf4;
   --surface: #ffffff;
   --surface-muted: #f6f5f3;
-  --surface-hover: #f5f3ff;
-  --text: #20212b;
-  --text-muted: #5c6170;
-  --text-faint: #898b97;
-  --border: #e9e9e8;
-  --border-strong: #dcdbe2;
-  --accent: #6e60e6;
-  --accent-strong: #5b4ccd;
-  --accent-soft: #efedff;
+  --surface-hover: #ecfdf3;
+  --text: #0f172a;
+  --text-muted: #64748b;
+  --text-faint: #94a3b8;
+  --border: #e2e8f0;
+  --border-strong: #cbd5e1;
+  --accent: #16a34a;
+  --accent-strong: #15803d;
+  --accent-soft: #dcfce7;
   --accent-contrast: #ffffff;
   /* Requested spec names -> established Queryflow values. */
   --primary: var(--accent);
@@ -43,25 +43,25 @@
   --sql-number: #f6cf88;
   --sql-function: #b6dbfd;
   --sql-comment: #8a93ab;
-  --nav: #191b27;
-  --nav-ink: #f4f4f8;
-  --nav-muted: #a2a6b7;
-  --nav-faint: #81869c;
-  --nav-hover: #262a3b;
-  --nav-line: #333648;
-  --nav-card: #222433;
-  --focus-ring: #a39afa;
+  --nav: #064e3b;
+  --nav-ink: #f0fdf4;
+  --nav-muted: #bbf7d0;
+  --nav-faint: #86efac;
+  --nav-hover: #0b6549;
+  --nav-line: #146c4d;
+  --nav-card: #07553f;
+  --focus-ring: #4ade80;
   /* ECharts categorical series palette: violet/indigo per primary, then the
      semantic trio (green/amber/red), then distinguishable extensions. Eight
      accessible steps shared by every chart type; no arbitrary rainbow hues. */
-  --chart-1: #6e60e6;
-  --chart-2: #4f74d4;
-  --chart-3: #20946c;
-  --chart-4: #c1803a;
-  --chart-5: #d45d65;
-  --chart-6: #998df6;
-  --chart-7: #2e9bb5;
-  --chart-8: #b0568d;
+  --chart-1: #15803d;
+  --chart-2: #16a34a;
+  --chart-3: #0f766e;
+  --chart-4: #d97706;
+  --chart-5: #dc2626;
+  --chart-6: #65a30d;
+  --chart-7: #0284c7;
+  --chart-8: #9333ea;
   --shadow-sm: 0 1px 2px rgba(29, 28, 49, 0.05);
   --shadow-md: 0 12px 45px rgba(29, 28, 49, 0.042);
   --shadow-panel: 0 14px 35px rgba(35, 36, 56, 0.03);
@@ -128,21 +128,21 @@ svg.lucide { stroke-width: 1.7; }
 .brand { display: flex; align-items: center; gap: 10px; padding: 0 10px 8px; }
 .brand-mark {
   display: grid; place-items: center; width: 38px; height: 38px; border-radius: 12px;
-  color: #fff; background: linear-gradient(150deg, #8a7dfa, #6657cb);
-  box-shadow: 0 8px 22px rgba(78, 67, 175, 0.31);
+  color: #fff; background: #16a34a;
+  box-shadow: 0 8px 22px rgba(22, 163, 74, 0.31);
   flex: none;
 }
 .brand-title { font-size: 18px; font-weight: 760; letter-spacing: -0.9px; line-height: 1; }
-.brand-title span { color: #ada5ff; }
-.brand-sub { margin-top: 5px; color: #84899f; font-size: 9px; letter-spacing: 1.6px; font-weight: 750; }
+.brand-title span { color: #86efac; }
+.brand-sub { margin-top: 5px; color: #86efac; font-size: 9px; letter-spacing: 1.6px; font-weight: 750; }
 
 .primary-action {
   display: flex; align-items: center; gap: 10px; width: 100%;
-  padding: 12px; border: 1px solid #45495e; border-radius: 11px;
-  background: #2a2d3f; color: #fff; font-size: 12.5px; font-weight: 650;
+  padding: 12px; border: 1px solid #22c55e; border-radius: 11px;
+  background: #16a34a; color: #fff; font-size: 12.5px; font-weight: 650;
   transition: background var(--transition), border-color var(--transition);
 }
-.primary-action:hover { background: #36394e; border-color: #56586a; }
+.primary-action:hover { background: #15803d; border-color: #4ade80; }
 .primary-action kbd {
   margin-left: auto; font-size: 10px; color: #aaaec1; border: 1px solid #56586a;
   border-radius: 4px; padding: 2px 4px; font-family: inherit;
@@ -157,7 +157,7 @@ svg.lucide { stroke-width: 1.7; }
   transition: background var(--transition), color var(--transition);
 }
 .side-nav a:hover { background: var(--nav-hover); color: #fff; }
-.side-nav a.active { background: #35344e; color: #eeeaff; }
+.side-nav a.active { background: #0b6549; color: #f0fdf4; }
 
 .side-section { min-height: 0; display: flex; flex-direction: column; }
 .section-head { display: flex; align-items: center; justify-content: space-between; padding: 0 10px 7px; }
@@ -175,8 +175,8 @@ svg.lucide { stroke-width: 1.7; }
   text-align: left; color: var(--nav-muted); font-size: 12px;
   padding: 11px 10px; transition: background var(--transition), border-color var(--transition), color var(--transition);
 }
-.run-item:hover { background: #262a3b; }
-.run-item.active { background: #34334d; border-color: #4d496b; color: #fff; }
+.run-item:hover { background: #0b6549; }
+.run-item.active { background: #0f7658; border-color: #22c55e; color: #fff; }
 .run-item .lucide { color: var(--nav-faint); margin-top: 2px; }
 .run-main { min-width: 0; flex: 1; }
 .run-title { font-size: 12px; font-weight: 650; display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -966,6 +966,36 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   color:var(--accent-strong); outline: 1px solid var(--focus-ring); outline-offset:-1px; }
 .chart-slot { cursor:crosshair; }
 .response-note { font-size:14px; }
+
+/* Queryflow green analytics workspace: keep the conversation dominant while
+   giving navigation, active context, and chart controls one visual language. */
+.topbar { background: rgba(255,255,255,.9); }
+.header-database select { border-color: #bbf7d0; background: #fff; }
+.header-database select:focus { border-color: #16a34a; }
+.headbtn:hover { border-color: #4ade80; color: #15803d; }
+.response-tabs button[aria-selected="true"],
+.inspector-tabs button[aria-selected="true"] { background: #dcfce7; color: #15803d; }
+.response-tabs button:hover:not(:disabled),
+.inspector-tabs button:hover { color: #15803d; }
+.query-semantic-chip small { color: #15803d; }
+.query-semantic-chip:hover, .query-semantic-chip:focus-visible { border-color: #16a34a; background: #f0fdf4; }
+.query-insight-primary { background: #15803d; }
+.query-insight-primary:hover { background: #166534; }
+.chart-kicker { color: #15803d; }
+.chart-slot .chart-title, .chart-heading strong { color: #14532d; }
+.composer:focus-within { border-color: #4ade80; box-shadow: 0 0 0 3px #dcfce7, 0 11px 35px rgba(22, 101, 52, .08); }
+.submit { background: #15803d; }
+.submit:hover { background: #166534; }
+.inspector-header .lucide { color: #15803d; }
+.inspect-schema-node:hover, .inspect-schema-node:focus-visible { border-color: #16a34a; background: #f0fdf4; }
+.schema-tag.pk { background: #dcfce7; color: #15803d; }
+
+@media (min-width: 1180px) {
+  .thread-body { max-width: 1000px; }
+  .response-card { background: rgba(255,255,255,.78); border: 1px solid #e2e8f0; border-radius: 16px; padding: 18px 20px; box-shadow: 0 10px 30px rgba(15, 118, 110, .05); }
+  .response-card .answer { margin-left: 0; }
+  .response-card .response-note, .response-card .presentation-note { padding-left: 0; padding-right: 0; }
+}
 @media (max-width:700px) {
  .query-semantic-strip { margin:8px 0 12px; gap:8px; }
  .query-semantic-chip { max-width:100%; }

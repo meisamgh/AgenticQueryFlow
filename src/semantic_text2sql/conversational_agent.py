@@ -389,6 +389,8 @@ class ConversationalAnalyticsAgent:
         reset_handler: Callable[[str], None] | None = None,
         get_recent_memory: Callable[[str, str, str | None], list[SessionMemoryTurn]] | None = None,
         search_memory: Callable[[str, str, str, str | None], list[SessionMemoryTurn]] | None = None,
+        get_historical_result: Callable[[str, str, str, str | None], RecentResult | None]
+        | None = None,
     ) -> None:
         self.bridge = bridge
         self.completers = completers
@@ -399,6 +401,7 @@ class ConversationalAnalyticsAgent:
         self.reset_handler = reset_handler
         self.get_recent_memory = get_recent_memory
         self.search_memory = search_memory
+        self.get_historical_result = get_historical_result
         self._recent_memory: list[SessionMemoryTurn] | None = None
         graph = StateGraph(AgentState)
         graph.add_node("reason", self._reason)
@@ -1018,7 +1021,11 @@ class ConversationalAnalyticsAgent:
         has_prior_sql = bool(
             previous and previous.db_id == self._request.db_id and previous.last_sql
         )
-        if (tool in CACHED_RESULT_TOOLS and last is None) or (
+        if (
+            tool in CACHED_RESULT_TOOLS
+            and last is None
+            and not (tool == "inspect_result" and tool_input.result_id)
+        ) or (
             tool in PRIOR_SQL_TOOLS and not has_prior_sql
             and not (last and last.generation and last.generation.accepted)
         ):
@@ -1228,24 +1235,40 @@ class ConversationalAnalyticsAgent:
                     ),
                 }
         elif tool == "inspect_result":
-            if last is None or last.generation is None or not last.generation.accepted:
+            target = last
+            historical = False
+            if (
+                tool_input.result_id
+                and (target is None or tool_input.result_id != target.result_id)
+                and self.get_historical_result is not None
+            ):
+                    target = await asyncio.to_thread(
+                        self.get_historical_result,
+                        self._request.session_id,
+                        self._request.db_id,
+                        tool_input.result_id,
+                        self._request.parent_run_id,
+                    )
+                    historical = target is not None
+            if target is None or target.generation is None or not target.generation.accepted:
                 facts = {"tool": tool, "error": "No accepted result is available."}
-            elif tool_input.result_id and tool_input.result_id != last.result_id:
+            elif tool_input.result_id and tool_input.result_id != target.result_id:
                 facts = {
                     "tool": tool,
-                    "error": "The requested result is not the currently accepted result.",
+                    "error": "The requested result is not authorized in this session and database.",
                 }
             else:
-                generation = last.generation
+                generation = target.generation
                 complete = (
                     not generation.truncated
                     and generation.row_count == len(generation.rows)
                 )
                 facts = {
                     "tool": tool,
-                    "result_id": last.result_id,
-                    "run_id": last.run_id,
-                    "chart_id": last.chart_id,
+                    "result_id": target.result_id,
+                    "run_id": target.run_id,
+                    "chart_id": target.chart_id,
+                    "historical": historical,
                     "columns": generation.columns,
                     "row_count": generation.row_count,
                     "truncated": generation.truncated,
@@ -1264,8 +1287,8 @@ class ConversationalAnalyticsAgent:
                             mode="json", exclude_none=True, exclude_defaults=True
                         ) if generation.semantic_contract else None
                     ),
-                    "summary_statistics": self._analyze_result(last) if complete else None,
-                    "provenance": last.provenance,
+                    "summary_statistics": self._analyze_result(target) if complete else None,
+                    "provenance": target.provenance,
                 }
         elif tool == "analyze_result":
             last = self.get_last_response(self._request.session_id, self._request.db_id)

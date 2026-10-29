@@ -393,6 +393,51 @@ class RunHistoryStore:
                 else None
             )
 
+    def authorized_result_record(
+        self,
+        session_id: str,
+        db_id: str,
+        result_id: str,
+        *,
+        parent_run_id: str | None = None,
+    ) -> RunRecord | None:
+        """Return an accepted, bounded historical result in this memory scope.
+
+        ``result_id`` is matched against both the response result identity and
+        the run identity.  This is a read-only history lookup; it never reruns
+        the saved SQL.  Reset epochs and explicit branch lineage are enforced
+        before the record is exposed to the conversational agent.
+        """
+        candidates = (
+            self.lineage(session_id, parent_run_id)
+            if parent_run_id
+            else self.list_sessions(session_id, GLOBAL_RETENTION_LIMIT)
+        )
+        cutoff = self._memory_reset_at(session_id)
+        for record in candidates:
+            saved_result_id = record.response_payload.get("result_id")
+            if (
+                record.db_id == db_id
+                and record.accepted
+                and record.sql
+                and not record.truncated
+                and not record.preview_truncated
+                and record.created_at > cutoff
+                and result_id in {record.run_id, saved_result_id}
+            ):
+                return record
+        return None
+
+    def _memory_reset_at(self, session_id: str) -> float:
+        if self.path is None:
+            return self._memory_epochs.get(session_id, 0.0)
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT reset_at FROM session_memory_epochs WHERE session_id = ?",
+                (session_id,),
+            ).fetchone()
+        return float(row[0]) if row else 0.0
+
     def conversation(self, session_id: str, conversation_id: str) -> list[RunRecord]:
         return list(
             reversed(

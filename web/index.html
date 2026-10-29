@@ -65,7 +65,10 @@
             <strong id="threadBreadcrumb">Live database</strong>
           </div>
           <div class="top-actions">
-            <select id="databaseSelect" hidden aria-hidden="true" tabindex="-1"></select>
+            <label class="header-database" for="databaseSelect">
+              <span>Data source</span>
+              <select id="databaseSelect" aria-label="Select data source"></select>
+            </label>
             <section class="connection-card header-connection" id="connectionCard" aria-label="Connection status">
               <div class="connection-heading">
                 <span class="health-pill" id="healthStatus"><i></i><strong>Connection</strong><span>Connecting</span></span>

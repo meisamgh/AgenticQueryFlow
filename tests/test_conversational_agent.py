@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -446,8 +447,14 @@ def test_business_search_reports_profile_values_as_candidates_without_live_scan(
 
     assert any(item.value == "Germany" and item.match == "EXACT"
                for item in exact.value_candidates)
+    germany = next(item for item in exact.value_candidates if item.value == "Germany")
+    assert germany.verified_live is False
+    assert germany.profile_freshness
+    assert germany.provenance in {"PROFILE_COMPLETE", "PROFILE_SAMPLE"}
     assert any(item.value == "Germany" and item.match == "FUZZY" and item.ambiguous
                for item in fuzzy.value_candidates)
+    fuzzy_germany = next(item for item in fuzzy.value_candidates if item.value == "Germany")
+    assert fuzzy_germany.ambiguity_reason == "Fuzzy matches require live verification."
     assert "not live existence proof" in exact.facts[-1]
 
 
@@ -500,8 +507,32 @@ def test_inspect_result_rejects_stale_result_identity(
         session_id="analysis", db_id="shop", message="Inspect an old result"
     )))
 
-    assert "currently accepted result" in response.message
-    assert "currently accepted result" in completer.prompts[1]
+    assert "authorized" in response.message
+    assert "authorized" in completer.prompts[1]
+
+
+def test_inspect_result_can_read_authorized_historical_snapshot(
+    registry: Any, tmp_path: Any,
+) -> None:
+    historical = _accepted_result()
+    historical = replace(historical, result_id="old-result")
+    completer = Completer([
+        {"action": "CALL_TOOL", "intent": "EXPLAIN", "tool": "inspect_result",
+         "tool_arguments": {"objective": "Compare with the first analysis",
+                            "result_id": "old-result"}, "answer": None},
+        {"action": "ANSWER", "intent": "EXPLAIN", "tool": None,
+         "answer": "The historical result is available for comparison."},
+    ])
+    agent = _agent(registry, tmp_path, completer, [])
+    agent.get_historical_result = lambda session, db, result_id, parent: (
+        historical if result_id == "old-result" and session == "analysis" else None
+    )
+    response = asyncio.run(agent.run(ChatRequest(
+        session_id="analysis", db_id="shop", message="Compare with the first analysis"
+    )))
+    assert "historical result" in response.message
+    assert '"historical": true' in completer.prompts[1]
+    assert '"rows": [["2025-01", 10], ["2025-02", 15]]' in completer.prompts[1]
 
 
 def test_false_decline_premise_can_stop_without_sql(registry: Any, tmp_path: Any) -> None:

@@ -117,7 +117,7 @@ test('database is configured privately and the header hides the session ID', () 
     assert.ok(header.includes(`id="${id}"`), `${id} is missing from the header`);
     assert.ok(!composer.includes(`id="${id}"`), `${id} should not remain in the composer`);
   }
-  assert.ok(header.includes('id="databaseSelect" hidden'));
+  assert.ok(header.includes('class="header-database"'));
   assert.ok(!markup.includes('id="sessionId"'));
   assert.ok(source.includes('item.db_id === uiConfig.default_db_id'));
   for (const id of ['voiceButton', 'sendButton']) {
@@ -352,8 +352,8 @@ test('a running question does not auto-scroll progress or the final answer', () 
 });
 test('Queryflow colors follow the supplied light and dark reference palettes', () => {
   for (const color of [
-    '--bg: #fafaf8', '--surface: #ffffff', '--text: #20212b',
-    '--accent: #6e60e6', '--nav: #191b27', '--sql-bg: #1d2130',
+    '--bg: #f0fdf4', '--surface: #ffffff', '--text: #0f172a',
+    '--accent: #16a34a', '--nav: #064e3b', '--sql-bg: #1d2130',
     '--success: #20946c', '--danger: #d45d65', '--warning: #c1803a',
     '--surface: #242633', '--border: #363747',
   ]) assert.ok(styles.includes(color), `Missing reference token ${color}`);

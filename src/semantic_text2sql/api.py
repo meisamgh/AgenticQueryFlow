@@ -2033,6 +2033,13 @@ def create_app(
         search_memory=lambda session_id, db_id, question, parent_run_id: runs.search_memory(
             session_id, db_id, question, parent_run_id=parent_run_id
         ),
+        get_historical_result=lambda session_id, db_id, result_id, parent_run_id: (
+            result_from_history(record)
+            if (record := runs.authorized_result_record(
+                session_id, db_id, result_id, parent_run_id=parent_run_id
+            )) is not None
+            else None
+        ),
         sql_handler=assistant_sql_handler,
         investigation_handler=assistant_investigation_handler,
     )

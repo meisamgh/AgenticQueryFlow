@@ -56,6 +56,9 @@ class BusinessValueCandidate(StrictModel):
     match: Literal["EXACT", "FUZZY", "APPROVED_ALIAS"]
     provenance: Literal["PROFILE_COMPLETE", "PROFILE_SAMPLE"]
     ambiguous: bool = False
+    verified_live: bool = False
+    profile_freshness: str | None = None
+    ambiguity_reason: str | None = None
 
 
 class MetadataToolOutput(StrictModel):
@@ -125,6 +128,7 @@ class ConversationalAnalyticsBridge:
         self.profiles = profiles
         self.glossaries = glossaries
         self.semantic_catalogs = semantic_catalogs
+        self._categorical_index: dict[tuple[str, str, str], dict[tuple[str, str], list[str]]] = {}
         self.retriever = retriever
         self.sql_handler = sql_handler
         graph = StateGraph(_GraphState)
@@ -388,15 +392,22 @@ class ConversationalAnalyticsBridge:
         question = tool_input.question.casefold()
         words = {word.casefold() for word in re.findall(r"[\w-]+", question)}
         candidates: list[BusinessValueCandidate] = []
+        index: dict[tuple[str, str], list[str]] = {}
         if profile is not None:
+            index_key = (
+                tool_input.db_id,
+                "postgres" if isinstance(registry, PostgresRegistry) else "sqlite",
+                profile.profiled_at,
+            )
+            index = self._categorical_index.setdefault(index_key, {})
             for column in profile.columns:
                 if column.semantic_type not in {"categorical", "text"}:
                     continue
-                values = (
-                    column.allowed_values
+                values = index.setdefault((column.table, column.column), list(
+                    column.allowed_values[:50]
                     if column.exact and column.allowed_values
                     else [item.value for item in column.top_values[:10]]
-                )
+                ))
                 provenance: Literal["PROFILE_COMPLETE", "PROFILE_SAMPLE"] = (
                     "PROFILE_COMPLETE"
                     if column.exact and column.allowed_values else "PROFILE_SAMPLE"
@@ -426,6 +437,11 @@ class ConversationalAnalyticsBridge:
                             match=match,
                             provenance=provenance,
                             ambiguous=match == "FUZZY",
+                            profile_freshness=profile.profiled_at,
+                            ambiguity_reason=(
+                                "Fuzzy matches require live verification."
+                                if match == "FUZZY" else None
+                            ),
                         ))
         candidates.sort(key=lambda item: (
             {"EXACT": 0, "APPROVED_ALIAS": 1, "FUZZY": 2}[item.match],
