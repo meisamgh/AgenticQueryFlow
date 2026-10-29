@@ -63,6 +63,11 @@ async function api(path, options = {}) {
 
 async function initialize() {
   hydrateIcons();
+  if (window.matchMedia("(max-width: 760px)").matches) {
+    document.body.classList.add("sidebar-collapsed");
+    $("#sidebarToggle").setAttribute("aria-expanded", "false");
+    $(".sidebar").inert = true;
+  }
   try {
     await api("/api/health");
     setHealth(true);
@@ -300,7 +305,8 @@ function appendUser(message) {
   const question = document.createElement("p");
   question.className = "question-text";
   question.textContent = message;
-  article.append(speaker, question);
+  speaker.append(question);
+  article.append(speaker);
   $("#messages").append(article);
 }
 
@@ -405,8 +411,6 @@ function updatePipeline(progress, currentStage, jobStatus, events = [], response
   events.forEach((event) => seen.add(visiblePipelineStage(event.stage)));
   if (progress.dataset.activeStage && progress.dataset.activeStage !== visibleStage) seen.add(progress.dataset.activeStage);
   seen.add(visibleStage);
-  const resultAccepted = jobStatus === "completed" && response?.generation?.accepted === true;
-  if (resultAccepted) seen.add("result_review");
   progress.dataset.activeStage = visibleStage;
   progress.dataset.seenStages = JSON.stringify([...seen]);
   progress.querySelectorAll(".pipeline-tracker span").forEach((step) => {
@@ -414,9 +418,11 @@ function updatePipeline(progress, currentStage, jobStatus, events = [], response
       && (jobStatus === "completed" || step.dataset.stage !== visibleStage);
     step.classList.toggle("complete", completed);
     step.classList.toggle("active", jobStatus !== "completed" && step.dataset.stage === visibleStage);
-    const recoverySkipped = resultAccepted && step.dataset.stage === "recovery" && !seen.has("recovery");
+    const recoverySkipped = jobStatus === "completed"
+      && ["recovery", "result_review"].includes(step.dataset.stage)
+      && !seen.has(step.dataset.stage);
     step.classList.toggle("skipped", recoverySkipped);
-    if (recoverySkipped) step.title = "Not needed — the query succeeded without recovery";
+    if (recoverySkipped) step.title = "Not called during this request";
   });
 }
 
@@ -852,6 +858,8 @@ function renderChartInto(slot, presentation, generation) {
     get renderer() { return active?.renderer; },
     onSelect(callback) { selectionCallbacks.push(callback); active?.onSelect?.(callback); },
     onZoom(callback) { zoomCallbacks.push(callback); active?.onZoom?.(callback); },
+    highlightSeries(name) { active?.highlightSeries?.(name); },
+    highlightPoint(point) { active?.highlightPoint?.(point); },
     resetZoom() { active?.resetZoom?.(); },
     resize() { active?.resize?.(); },
     getDataURL(options) { return active?.getDataURL?.(options); },
@@ -905,9 +913,13 @@ function setResponseTab(article, view) {
   if (!tabs || tabs.hidden || !answerPane || !split || !sqlPane || !dataPane) return;
   const button = tabs.querySelector(`[data-response-tab="${view}"]`);
   if (!button || button.disabled) return;
+  const oldView = article.dataset.activeResponseTab;
+  article._tabScroll ||= {};
+  if (oldView) article._tabScroll[oldView] = article.querySelector(oldView === "sql"
+    ? ".sql-editor" : oldView === "data" ? ".table-wrap" : ".answer-tab-panel")?.scrollTop || 0;
   article.dataset.activeResponseTab = view;
-  answerPane.hidden = false;
-  split.hidden = false;
+  answerPane.hidden = view !== "answer";
+  split.hidden = view === "answer";
   sqlPane.hidden = view !== "sql";
   dataPane.hidden = view !== "data";
   if (mapPane) mapPane.hidden = view !== "map";
@@ -919,21 +931,25 @@ function setResponseTab(article, view) {
     tab.tabIndex = active ? 0 : -1;
   });
   if (view === "map") article._renderMap?.();
+  const scrollPane = article.querySelector(view === "sql" ? ".sql-editor"
+    : view === "data" ? ".table-wrap" : ".answer-tab-panel");
+  if (scrollPane) scrollPane.scrollTop = article._tabScroll[view] || 0;
   window.requestAnimationFrame?.(() => article._echart?.resize?.());
 }
 
-function wireResponseTabs(article, available = {sql: true, data: true, map: false}) {
+function wireResponseTabs(article, available = {answer: true, sql: true, data: true, map: false}) {
   const tabs = article.querySelector(".response-tabs");
   if (!tabs) return;
   tabs.hidden = false;
   const group = `response-tabs-${++responseTabSequence}`;
   tabs.querySelectorAll("[data-response-tab]").forEach((tab) => {
     const view = tab.dataset.responseTab;
-    tab.hidden = view === "map" && !available.map;
+    tab.hidden = !available[view];
     tab.id = `${group}-${view}`;
     tab.disabled = !available[view];
     const panel = article.querySelector(view === "sql" ? ".sql-panel-pane"
-      : view === "map" ? ".map-panel-pane" : ".result-panel-pane");
+      : view === "map" ? ".map-panel-pane" : view === "answer"
+      ? ".answer-tab-panel" : ".result-panel-pane");
     if (panel) {
       panel.id = `${group}-${view}-panel`;
       panel.setAttribute("aria-labelledby", tab.id);
@@ -950,7 +966,7 @@ function wireResponseTabs(article, available = {sql: true, data: true, map: fals
       next.focus();
     });
   });
-  setResponseTab(article, available.data ? "data" : "sql");
+  setResponseTab(article, available.answer ? "answer" : available.data ? "data" : "sql");
 }
 
 /* The Data tab always shows exact executed rows; chart display filters never
@@ -967,7 +983,16 @@ function wireDataScope(article, generation, response) {
   article._clearClientFilter = () => article._setChartViewRowFilters?.([]);
   article._hasClientFilter = () => false;
   renderTable(wrap, generation.columns || [], sourceRows, {
-    truncated: generation.truncated,
+    units: response.presentation?.chart_spec?.measure_units || {},
+    temporal: response.presentation?.chart_spec?.time_format
+      && response.presentation.chart_spec.time_format !== "raw"
+      && response.presentation.chart_spec.x
+      ? {
+          column: response.presentation.chart_spec.x,
+          time_format: response.presentation.chart_spec.time_format,
+        }
+      : null,
+    truncated: Boolean(generation.truncated || generation.row_count > sourceRows.length),
     onPageRendered: (table, pageRows) => attachResultInvestigations(
       table, {generation, run_id: article.dataset.runId}, pageRows),
     onPageError: error => showError(error.message),
@@ -1022,7 +1047,7 @@ function wireChartSection(article, presentation, generation, runId, recommendati
   const slot = article.querySelector(".chart-slot");
   if (!section || !slot) return;
   const kinds = section.querySelector(".chart-kinds");
-  const palette = section.querySelector(".chart-palette");
+  section.querySelector(".chart-tools")?.prepend(kinds);
   const more = section.querySelector(".chart-more");
   const menu = section.querySelector(".chart-menu");
   const explorer = window.QueryflowChartExplorer;
@@ -1033,7 +1058,7 @@ function wireChartSection(article, presentation, generation, runId, recommendati
   catch { stored = null; }
   // Do not revive filters from older sessions after removing their controls.
   const settings = stored && typeof stored === "object"
-    ? {chartType: stored.chartType, zoom: stored.zoom, palette: stored.palette} : {};
+    ? {chartType: stored.chartType, zoom: stored.zoom} : {};
   const chartPres = { ...presentation, chart_spec: original };
   function saveSettings() {
     if (settingKey) {
@@ -1083,23 +1108,38 @@ function wireChartSection(article, presentation, generation, runId, recommendati
     });
     attachChartInvestigations(article, chartPres, runId);
     const zoomActions = section.querySelector(".chart-zoom-actions");
-    zoomActions.hidden = new Set(next.data.map(row => String(row[next.x]))).size <= 2;
+    zoomActions.hidden = true;
     const zoomGuide = section.querySelector(".chart-zoom-guide");
-    zoomGuide.hidden = !(article._echart?.renderer === "plotly"
-      && next.time_format && next.time_format !== "raw"
-      && ["line", "multi_line", "step_line", "area", "stacked_area"].includes(next.chart_type)
-      && new Set(next.data.map(row => String(row[next.x]))).size > 1);
+    zoomGuide.hidden = true;
     kinds.replaceChildren();
     if (explorer) {
       const recommended = [recommendations?.primary_chart, ...(recommendations?.alternative_charts || [])]
         .filter(item => item && explorer.choices(next).includes(item.chart_type));
       const recommendedTypes = [...new Set(recommended.map(item => item.chart_type))];
       const types = [...recommendedTypes, ...explorer.choices(next).filter(type => !recommendedTypes.includes(type))];
+      const picker = document.createElement("details");
+      picker.className = "chart-choice";
+      picker.addEventListener("keydown", event => {
+        if (event.key === "Escape") { picker.open = false; summary.focus(); }
+      });
+      const summary = document.createElement("summary");
+      const chartSymbol = type => ["bar", "horizontal_bar", "stacked_bar", "grouped_bar"].includes(type)
+        ? "chart-bar" : ["pie", "donut"].includes(type) ? "chart-pie" : "chart-line";
+      summary.innerHTML = icon(chartSymbol(next.chart_type), 19);
+      const selectedLabel = document.createElement("span");
+      selectedLabel.textContent = readableResultLabel(next.chart_type);
+      summary.append(selectedLabel);
+      summary.insertAdjacentHTML("beforeend", icon("chevron-down", 12));
+      summary.setAttribute("aria-label", "Choose chart type");
+      const menu = document.createElement("div"); menu.className = "chart-choice-menu";
+      picker.append(summary, menu); kinds.append(picker);
       types.forEach(type => {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "chart-kind";
-        button.textContent = type.replaceAll("_", " ");
+        button.innerHTML = icon(chartSymbol(type), 19);
+        const label = document.createElement("span"); label.textContent = readableResultLabel(type);
+        button.append(label);
         button.title = `Show ${button.textContent} using these returned rows`;
         button.classList.toggle("active", type === next.chart_type);
         button.setAttribute("aria-pressed", String(type === next.chart_type));
@@ -1111,7 +1151,7 @@ function wireChartSection(article, presentation, generation, runId, recommendati
           if (article._chartViewState?.tryChart(proposal)) return;
           showError("This chart cannot display the current result without changing its data.");
         });
-        kinds.append(button);
+        menu.append(button);
       });
     }
   }
@@ -1164,14 +1204,6 @@ function wireChartSection(article, presentation, generation, runId, recommendati
     },
   };
   article._setChartViewRowFilters = filters => article._chartViewState.setRowFilters(filters);
-  if (palette) {
-    palette.value = ["violet", "ocean", "forest", "sunset"].includes(settings.palette) ? settings.palette : "violet";
-    palette.addEventListener("change", () => {
-      settings.palette = palette.value;
-      saveSettings();
-      renderCurrent();
-    });
-  }
   section.querySelector(".chart-reset-zoom").addEventListener("click", () => {
     delete settings.zoom;
     saveSettings();
@@ -1358,8 +1390,13 @@ function readableResultLabel(column) {
   return words ? words[0].toUpperCase() + words.slice(1).replace(/\bId\b/g, "ID") : "Result";
 }
 
-function formatKpiValue(value) {
-  if (value == null) return "NULL";
+function formatKpiValue(value, unit) {
+  if (value == null) return "—";
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (typeof window !== "undefined" && window.QueryflowKpis) return window.QueryflowKpis.format(value,unit);
+    return new Intl.NumberFormat(undefined,{maximumFractionDigits:2,
+      notation:Math.abs(value)>=1000 ? "compact" : "standard"}).format(value);
+  }
   const raw = String(value);
   // Group ordinary decimal numbers without rounding or altering identifier-like strings.
   if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(raw)) return raw;
@@ -1393,6 +1430,7 @@ function renderAnswerPreview(fragment, body, mode) {
     label.textContent = readableResultLabel(column);
     const value = document.createElement("strong");
     value.textContent = formatKpiValue(rows[0][columns.indexOf(column)]);
+    value.title = String(rows[0][columns.indexOf(column)] ?? "SQL NULL");
     card.append(label, value);
     if (context) {
       const detail = document.createElement("small");
@@ -1430,7 +1468,6 @@ async function appendAssistant(body, elapsed, options = {}) {
 
   const responseMessage = body.explanation || body.presentation?.summary || body.message || "";
   fragment.querySelector(".response-note").textContent = responseMessage;
-  renderSemanticChips(fragment, body);
 
   // Distinct empty / anomaly states, grounded in the real response.
   if (accepted && generation.row_count === 0) {
@@ -1490,7 +1527,7 @@ async function appendAssistant(body, elapsed, options = {}) {
     renderHighlightedSql(fragment.querySelector(".language-sql"), displaySql);
     const validity = fragment.querySelector(".sql-validity");
     if (validity) {
-      const parts = ["Validated"];
+      const parts = [generation.dialect, generation.execution_status].filter(Boolean);
       if (body.sql_version) parts.push(`SQL v${body.sql_version}`);
       if (generation.truncated) parts.push("preview");
       validity.textContent = parts.join(" · ");
@@ -1525,6 +1562,38 @@ async function appendAssistant(body, elapsed, options = {}) {
 
   renderHumanReview(fragment, body.human_review, responseMessage);
   if (!sqlNotAvailable) {
+    const metadata = fragment.querySelector(".sql-metadata");
+    if (metadata) {
+      const status = document.createElement("div");
+      status.className = "sql-execution-summary";
+      const heading = document.createElement("strong");
+      heading.textContent = ["ACCEPTED", "EXECUTED", "SUCCEEDED"].includes(generation.execution_status)
+        ? "✓ Query executed successfully" : generation.execution_status || "Execution status unavailable";
+      const detail = document.createElement("small");
+      const duration = body.timings_ms?.sql_execution;
+      detail.textContent = [
+        `${generation.rows?.length || 0} retained rows${generation.truncated ? " · partial result" : ""}`,
+        typeof duration === "number" ? `${(duration / 1000).toFixed(2)}s execution` : null,
+      ].filter(Boolean).join(" · ");
+      status.append(heading, detail); metadata.append(status);
+    }
+    for (const [label, value] of [
+      ["Validation Details", attempts.map(attempt => attempt.validation).filter(Boolean)],
+      ["Execution Plan", attempts.map(attempt => attempt.validation?.explain_plan)
+        .filter(plan => Array.isArray(plan) && plan.length).at(-1) || "No execution plan was recorded."],
+      ["Execution Details", {status: generation.execution_status,
+        timings_ms: body.timings_ms, returned_rows: generation.row_count,
+        retained_rows: generation.rows?.length, truncated: generation.truncated}],
+      ["Query Context", {original_question: body.state?.root_question,
+        resolved_question: body.resolved_question, result_id: body.result_id,
+        contract: generation.semantic_contract || body.state?.semantic_contract}],
+    ]) {
+      if (!metadata) break;
+      const details = document.createElement("details");
+      const summary = document.createElement("summary"); summary.textContent = label;
+      const pre = document.createElement("pre"); pre.textContent = JSON.stringify(value, null, 2);
+      details.append(summary, pre); metadata.append(details);
+    }
     fragment.querySelector(".copy-button").addEventListener("click", (event) => {
       navigator.clipboard.writeText(sqlText);
       event.currentTarget.classList.add("active");
@@ -1535,10 +1604,14 @@ async function appendAssistant(body, elapsed, options = {}) {
         showError(`CSV contains only the first ${generation.rows?.length || 0} returned rows; more rows are available in Data.`);
       }
       downloadCsv(generation.columns || [], generation.rows || []);
+      appendExportBubble(generation.columns || [], generation.rows || [], {
+        truncated: generation.truncated,
+        source: "Generated SQL result · raw values",
+      });
     });
     fragment.querySelector(".row-count").textContent = generation.truncated
-      ? `${generation.rows?.length || 0} returned · more available`
-      : `${generation.row_count || 0} rows`;
+      ? `${generation.rows?.length || 0} returned · partial result`
+      : `${generation.row_count || 0} rows · ${generation.columns?.length || 0} columns`;
     wireSqlIdents(fragment, article);
     const versionPanel = fragment.querySelector(".versions-panel");
     const previous = latestAcceptedPreviousSql(body, options.restored ? options.run : null);
@@ -1560,6 +1633,20 @@ async function appendAssistant(body, elapsed, options = {}) {
     wireDataScope(article, generation, body);
   }
   if (mode === "chart") wireChartSection(article, presentation, generation, body.run_id, body.chart_recommendations);
+  const kpiContainer = article.querySelector(".chart-kpi-row");
+  if (mode === "chart" && chartDataComplete && kpiContainer && window.QueryflowKpis) {
+    // Built once from the accepted source, not during cosmetic chart rerenders.
+    const kpis = window.QueryflowKpis.build(body, presentation.chart_spec)
+      .filter(spec => spec.calculation !== "PERIOD_CHANGE")
+      .map(spec => ({...spec, sparkline:[], comparison:undefined, comparison_evidence:undefined}));
+    article._kpiSpecs = kpis;
+    const titleBadge=article.querySelector(".chart-change-badge");
+    titleBadge?.remove();
+    window.QueryflowKpis.render(kpiContainer, kpis, spec => {
+      if (spec.point && article._echart?.highlightPoint) article._echart.highlightPoint(spec.point);
+      else article._echart?.highlightSeries?.(spec.series_name);
+    });
+  }
   if (accepted && !explanatory && !body.clarification_required) {
     const mapRequested = /\bmap\b/i.test([
       options.question, body.resolved_question,
@@ -1582,7 +1669,8 @@ async function appendAssistant(body, elapsed, options = {}) {
         });
       };
     }
-    if (!plotOnly) wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length),
+    wireResponseTabs(article, {answer:mode === "chart" && chartDataComplete,
+      sql: Boolean(sqlText), data: Boolean(generation.columns?.length),
       map: Boolean(article._renderMap)});
   }
   if (!options.restored) updateInspector(body);
@@ -1887,11 +1975,6 @@ function renderInspectorRunDetails(body) {
   const generation = body.generation || {};
   const tech = document.createElement("div");
   tech.innerHTML = [
-    '<details class="attempts-panel inspector-block">',
-    '  <summary><span data-icon="shield"></span> SQL validation attempts <span class="attempts-count"></span></summary>',
-    '  <div class="attempt-summary"></div>',
-    '  <div class="attempts-list"></div>',
-    '</details>',
     '<details class="token-card inspector-block">',
     '  <summary><span data-icon="hash"></span> Token usage</summary>',
     '  <div class="token-reduction"></div>',
@@ -1901,13 +1984,10 @@ function renderInspectorRunDetails(body) {
     '<details class="pipeline-details inspector-block">',
     '  <summary><span data-icon="clock"></span> Pipeline timings</summary>',
     '  <div class="pipeline-rows"></div>',
-    '  <details class="progress-history"><summary>Request activity</summary><ul></ul></details>',
     '</details>',
   ].join("\n");
   renderTokenAccounting(tech, body, generation);
-  renderAttempts(tech, generation.attempts || []);
   const tokenCard = tech.querySelector(".token-card");
-  const attemptsCard = tech.querySelector(".attempts-panel");
   if (tokenCard) { tokenCard.open = true; target.append(tokenCard); }
   const pipelineCard = tech.querySelector(".pipeline-details");
   if (pipelineCard && pipelineTarget) {
@@ -1919,7 +1999,6 @@ function renderInspectorRunDetails(body) {
     pipelineTarget.append(pipelineCard);
     pipelineCard.open = true;
     renderPipelineDetails(pipelineTarget, body.timings_ms || {}, body, generation);
-    if (attemptsCard) pipelineTarget.append(attemptsCard);
   }
   const context = JSON.stringify(generation.model_context || {}, null, 2);
   if (context !== "{}" && schemaContent) {
@@ -2226,6 +2305,20 @@ function renderHumanReview(fragment, review, responseMessage = "") {
   });
 }
 
+function filterAndSortResultRows(rows, query, sortColumn = -1, direction = 1) {
+  const needle = query.trim().toLocaleLowerCase();
+  const filtered = rows.filter(row => !needle || row.some(value =>
+    String(value ?? "NULL").toLocaleLowerCase().includes(needle)));
+  if (sortColumn < 0) return filtered;
+  return filtered.slice().sort((a, b) => {
+    const left = a[sortColumn], right = b[sortColumn];
+    if (left == null) return right == null ? 0 : 1;
+    if (right == null) return -1;
+    return direction * (typeof left === "number" && typeof right === "number"
+      ? left - right : String(left).localeCompare(String(right), undefined, {numeric:true}));
+  });
+}
+
 function renderTable(container, columns, rows, options = {}) {
   container._tableResizeObserver?.disconnect();
   container.replaceChildren();
@@ -2241,7 +2334,9 @@ function renderTable(container, columns, rows, options = {}) {
   const canvas = document.createElement("canvas");
   const measureContext = canvas.getContext?.("2d");
   const manualWidths = new Set();
-  const widths = columns.map(() => 72);
+  const hiddenColumns = new Set();
+  const visibleColumns = columns.map(() => true);
+  const widths = columns.map(() => 84);
   let textFont = "12.3px sans-serif";
   const sampled = (data, maximum = 120) => {
     if (data.length <= maximum) return data;
@@ -2254,14 +2349,19 @@ function renderTable(container, columns, rows, options = {}) {
     return measureContext ? measureContext.measureText(label).width : label.length * 7;
   };
   const applyWidths = () => {
-    widths.forEach((width, index) => { colgroup.children[index].style.width = `${width}px`; });
-    const contentWidth = widths.reduce((sum, width) => sum + width, 0);
+    // Hidden columns leave no reserved gap inside the table's own borders.
+    widths.forEach((width, index) => {
+      colgroup.children[index].style.width = `${hiddenColumns.has(index) ? 0 : width}px`;
+    });
+    const contentWidth = widths.reduce(
+      (sum, width, index) => sum + (hiddenColumns.has(index) ? 0 : width), 0);
     table.style.width = `${contentWidth}px`;
     const pane = container.parentElement;
     if (pane?.classList?.contains?.("result-panel-pane")) {
-      // The Data card follows the measured result, not the full chat width.
-      // Larger results use the available width and scroll inside the card.
-      pane.style.width = `min(100%, ${Math.max(280, contentWidth)}px)`;
+      // The response card stays full-width and responsive; the table itself is
+      // content-sized and scrolls inside the card instead of stretching its
+      // columns, so two-column results never fill the whole chat width.
+      pane.style.width = "100%";
     }
   };
   const colgroup = document.createElement("colgroup");
@@ -2278,7 +2378,9 @@ function renderTable(container, columns, rows, options = {}) {
       if (manualWidths.has(index)) return;
       const content = examples.reduce((largest, row) =>
         Math.max(largest, measure(row[index], typeof row[index] === "number")), measure(name));
-      widths[index] = Math.round(Math.max(72, Math.min(420, content + 38)));
+      // 12px cell padding on each side plus the resize affordance; a sensible
+      // minimum keeps headers readable and a maximum reserves room for the rest.
+      widths[index] = Math.round(Math.max(84, Math.min(420, content + 40)));
     });
     applyWidths();
   };
@@ -2287,7 +2389,9 @@ function renderTable(container, columns, rows, options = {}) {
   columns.forEach((column, index) => {
     const cell = document.createElement("th");
     cell.textContent = column;
-    cell.title = column;
+    const observed = [...new Set(rows.map(row => row[index]).filter(value => value != null)
+      .map(value => typeof value))];
+    cell.title = `${column} · Observed values: ${observed.join(" / ") || "NULL only"}`;
     cell.classList.toggle("numeric", rows.some(row => typeof row[index] === "number"));
     const handle = document.createElement("span");
     handle.className = "column-resize";
@@ -2317,13 +2421,91 @@ function renderTable(container, columns, rows, options = {}) {
   container.append(table);
   const controls = container.parentElement?.querySelector(".table-controls");
   if (controls) controls.replaceChildren();
-  let pageSize = 20;
+  let pageSize = 5;
   let page = 0;
   let currentRows = rows.slice(0, pageSize);
   let hasMore = Boolean(options.truncated && options.loadPage) || rows.length > pageSize;
   let limitReached = false;
   let loading = false;
   const pages = new Map();
+  let viewRows = rows;
+  let localView = false;
+  let sortColumn = -1;
+  let sortDirection = 1;
+  /* Table tools live in the Data section header (top right); page controls
+     stay underneath the table. The search sorts over every retained row of
+     the authorized result scope, never just the visible page. */
+  const paneForTools = container.parentElement;
+  const headerEl = paneForTools && typeof paneForTools.querySelector === "function"
+    ? paneForTools.querySelector(".data-header") : null;
+  const tools = headerEl && typeof headerEl.querySelector === "function"
+    ? headerEl.querySelector(".data-header-tools") : null;
+  const applyView = () => {
+    localView = Boolean(tools?.querySelector?.(".data-search")?.value?.trim()) || sortColumn >= 0;
+    viewRows = filterAndSortResultRows(rows, tools?.querySelector?.(".data-search")?.value ?? "", sortColumn, sortDirection);
+    pages.clear(); page = 0; currentRows = viewRows.slice(0, pageSize);
+    hasMore = viewRows.length > pageSize || (!localView && Boolean(options.truncated && options.loadPage));
+    renderRows(); updateControls();
+  };
+  if (tools) {
+    tools.replaceChildren();
+    const search = document.createElement("input");
+    search.type = "search"; search.className = "data-search";
+    search.placeholder = "Search rows…";
+    search.setAttribute("aria-label", "Search retained result rows");
+    search.addEventListener("input", applyView);
+    const filters = document.createElement("details");
+    filters.className = "data-column-controls";
+    const summary = document.createElement("summary");
+    summary.textContent = "Filters";
+    filters.append(summary);
+    const hint = document.createElement("small");
+    hint.textContent = "Search filters retained rows. Choose visible columns:";
+    filters.append(hint);
+    columns.forEach((column, index) => {
+      const label = document.createElement("label");
+      const check = document.createElement("input");
+      check.type = "checkbox"; check.checked = true;
+      check.addEventListener("change", () => {
+        visibleColumns[index] = check.checked;
+        head.children[index].hidden = !check.checked;
+        colgroup.children[index].style.display = check.checked ? "" : "none";
+        [...body.children].forEach(row => { if (row.cells?.[index]) row.cells[index].hidden = !check.checked; });
+        if (!check.checked) hiddenColumns.add(index); else hiddenColumns.delete(index);
+        applyWidths();
+      });
+      label.append(check, column); filters.append(label);
+    });
+    tools.append(search, filters);
+  }
+  const exportButton = container.parentElement?.querySelector?.(".data-header .csv-button") || null;
+  if (exportButton && !exportButton._exportWired) {
+    exportButton._exportWired = true;
+    exportButton.addEventListener("click", () => {
+      // Export the current retained view: raw values, applied search/sort,
+      // and only the visible columns. Never reformatted display strings.
+      const exportColumns = columns.filter((_, index) => visibleColumns[index]);
+      const exportRows = viewRows.map(row => columns.map((_, index) => row[index])
+        .filter((_, index) => visibleColumns[index]));
+      downloadCsv(exportColumns, exportRows);
+      appendExportBubble(exportColumns, exportRows, {
+        truncated: Boolean(options.truncated && !localView),
+        source: `Data tab retained result · ${localView ? "search/sort applied · " : ""}raw values`,
+      });
+    });
+  }
+  columns.forEach((column, index) => {
+    const th = head.children[index];
+    const button = document.createElement("button"); button.type = "button";
+    button.textContent = `${column} ↕`; button.title = `Sort retained rows by ${column}`;
+    th.firstChild?.remove(); th.prepend(button);
+    button.addEventListener("click", () => {
+      sortDirection = sortColumn === index ? -sortDirection : 1; sortColumn = index;
+      [...head.children].forEach(cell => cell.removeAttribute("aria-sort"));
+      th.setAttribute("aria-sort", sortDirection > 0 ? "ascending" : "descending");
+      button.textContent = `${column} ${sortDirection > 0 ? "↑" : "↓"}`; applyView();
+    });
+  });
   const renderRows = () => {
     body.replaceChildren();
     const virtual = currentRows.length >= 80;
@@ -2339,26 +2521,44 @@ function renderTable(container, columns, rows, options = {}) {
       td.style.height = `${height}px`;
       td.className = "virtual-spacer";
     };
-    spacer(start * 38);
+    spacer(start * 46);
     visibleRows.forEach((row, index) => {
       const tr = body.insertRow();
       tr.dataset.rowIndex = String(start + index);
-      row.forEach(value => {
+      row.forEach((value, columnIndex) => {
+        const column = columns[columnIndex];
         const td = tr.insertCell();
         if (value === null) {
           const badge = document.createElement("span");
           badge.className = "null-value";
-          badge.textContent = "NULL";
+          badge.textContent = "—"; badge.title = "SQL NULL (missing value)";
           td.append(badge);
         } else {
-          td.textContent = String(value);
+          // Display formatting is metadata-aware; the exact raw value stays on
+          // hover and drives sorting, filtering, and CSV export unchanged.
+          const formatDisplay = globalThis.QueryflowFormat?.formatCellValue;
+          td.textContent = typeof formatDisplay === "function"
+            ? formatDisplay(value, {
+                unit: options.units?.[column],
+                timeFormat: options.temporal?.time_format ?? null,
+                timeColumn: options.temporal?.column ?? null,
+                column,
+              })
+            : typeof value === "number"
+            && !/(?:id|key|code)$/i.test(column) && typeof formatKpiValue === "function"
+            ? formatKpiValue(value, options.units?.[column])
+            : String(value);
           td.title = String(value);
           if (typeof value === "number") td.classList.add("numeric");
         }
       });
     });
-    spacer((currentRows.length - start - visibleRows.length) * 38);
+    spacer((currentRows.length - start - visibleRows.length) * 46);
     options.onPageRendered?.(table, currentRows);
+    columns.forEach((_, index) => {
+      if (visibleColumns[index]) return;
+      [...body.children].forEach(row => { if (row.cells?.[index]) row.cells[index].hidden = true; });
+    });
   };
   const updateControls = () => {
     if (!controls) return;
@@ -2366,29 +2566,29 @@ function renderTable(container, columns, rows, options = {}) {
     const status = document.createElement("span");
     status.className = "table-page-status";
     const offset = page * pageSize;
-    const total = options.truncated ? `at least ${rows.length}` : String(rows.length);
     status.textContent = currentRows.length
-      ? `${offset + 1}–${offset + currentRows.length} displayed · ${total} returned`
-      : `No rows on this page · ${total} returned`;
+      ? `Showing ${offset + 1}–${offset + currentRows.length} of ${localView ? viewRows.length : rows.length} rows`
+      : `No rows match · ${options.truncated ? `${rows.length} cached · partial result` : `${rows.length} rows · complete result`}`;
+    if (localView) status.textContent += ` · matching cached rows only · ${options.truncated ? "searching partial result" : "complete retained result"}`;
     if (limitReached) status.textContent += " · 10,000-row paging limit reached";
     controls.append(status);
-    if (rows.length <= 20 && !options.truncated) return;
-    const size = document.createElement("select");
-    size.className = "table-page-size";
-    size.setAttribute("aria-label", "Rows per page");
-    for (const count of [20, 50, 100]) {
-      const option = document.createElement("option");
-      option.value = String(count);
-      option.textContent = `${count} / page`;
-      size.append(option);
+    const meta = container.parentElement?.querySelector?.(".row-count");
+    if (meta) meta.textContent = currentRows.length
+      ? `Showing ${offset + 1}–${offset + currentRows.length} of ${localView ? viewRows.length : rows.length} rows · ${columns.length} columns${options.truncated ? " · partial" : ""}`
+      : `No rows match · ${columns.length} columns${options.truncated ? " · partial result" : ""}`;
+    if (viewRows.length <= 5 && !options.truncated) return;
+    const pagesHost = document.createElement("div");
+    pagesHost.className = "table-pages";
+    const count = Math.ceil(viewRows.length / pageSize);
+    for (let target = Math.max(0, page - 2); target < Math.min(count, page + 3); target++) {
+      const numbered = document.createElement("button"); numbered.type = "button";
+      numbered.textContent = String(target + 1);
+      numbered.className = target === page ? "table-page active" : "table-page";
+      numbered.setAttribute("aria-label", `Page ${target + 1}`);
+      if (target === page) numbered.setAttribute("aria-current", "page");
+      numbered.disabled = loading;
+      numbered.addEventListener("click", () => { void goToPage(target); }); pagesHost.append(numbered);
     }
-    size.value = String(pageSize);
-    size.addEventListener("change", () => {
-      pageSize = Number(size.value);
-      page = 0;
-      void goToPage(0);
-    });
-    controls.append(size);
     for (const [label, target, disabled] of [
       ["Previous", page - 1, page === 0],
       ["Next", page + 1, !hasMore],
@@ -2398,8 +2598,9 @@ function renderTable(container, columns, rows, options = {}) {
       button.textContent = label;
       button.disabled = disabled || loading;
       button.addEventListener("click", () => { void goToPage(target); });
-      controls.append(button);
+      pagesHost.append(button);
     }
+    controls.append(pagesHost);
   };
   async function goToPage(target) {
     if (target < 0 || loading) return;
@@ -2407,11 +2608,11 @@ function renderTable(container, columns, rows, options = {}) {
     const key = `${offset}:${pageSize}`;
     let next = pages.get(key);
     if (!next) {
-      if (offset < rows.length) {
+      if (offset < viewRows.length || localView) {
         next = {
-          rows: rows.slice(offset, offset + pageSize),
-          has_more: Boolean(options.truncated && options.loadPage)
-            || offset + pageSize < rows.length,
+          rows: viewRows.slice(offset, offset + pageSize),
+          has_more: (!localView && Boolean(options.truncated && options.loadPage))
+            || offset + pageSize < viewRows.length,
         };
       } else if (options.loadPage) {
         loading = true;
@@ -2448,6 +2649,26 @@ function renderTable(container, columns, rows, options = {}) {
   renderRows();
   updateControls();
   return {goToPage, get pageSize() { return pageSize; }};
+}
+
+/* Exporting data stays a client-side action: it never re-runs SQL or calls a
+   model. The bubble records what was exported (raw values) so retained-result
+   and truncated previews stay clearly distinguishable in the conversation. */
+function appendExportBubble(columns, rows, { source = null, truncated = false } = {}) {
+  const fragment = $("#exportTemplate").content.cloneNode(true);
+  const article = fragment.querySelector("article");
+  const count = rows.length;
+  fragment.querySelector(".export-note").textContent = truncated
+    ? `Exported the first ${count} retained rows as CSV — this is a partial result preview; more rows can be paged from the Data tab.`
+    : `Exported ${count} rows × ${columns.length} columns as CSV from the retained result.`;
+  fragment.querySelector(".export-meta").textContent = source
+    || `${columns.join(" · ")} · raw values, no formatting applied`;
+  const again = fragment.querySelector(".export-again");
+  again.addEventListener("click", () => downloadCsv(columns, rows));
+  hydrateIcons(article);
+  const messages = $("#messages");
+  messages.append(article);
+  article.scrollIntoView?.({ behavior: "smooth", block: "end" });
 }
 
 function downloadCsv(columns, rows) {
@@ -2631,13 +2852,6 @@ function renderPipelineDetails(fragment, timings, body, generation) {
     heading.textContent = title;
     container.append(heading);
   };
-  const config = state.modelConfig || {};
-  const configuredModels = [
-    ["Assistant", config.assistant_provider, config.assistant_model],
-    ["Context", config.context_mode === "model1" ? config.context_provider : "retrieval", config.context_mode === "model1" ? config.context_model : null],
-    ["SQL", config.sql_provider, config.sql_model],
-    ["Plotting", config.plotting_provider, config.plotting_model],
-  ];
   sectionHeading("Stage timing");
   const topLayerMeasured = Object.hasOwn(timings, "top_decisions");
   const stages = topLayerMeasured ? [
@@ -2700,18 +2914,6 @@ function renderPipelineDetails(fragment, timings, body, generation) {
     row.append(label, detail);
     container.append(row);
   }
-  if (configuredModels.some(([, provider]) => provider)) sectionHeading("Configured models");
-  for (const [role, provider, model] of configuredModels) {
-    if (!provider) continue;
-    const row = document.createElement("div");
-    row.className = "pipeline-run unmeasured pipeline-configured";
-    const label = document.createElement("span");
-    label.textContent = `${role} configured`;
-    const value = document.createElement("b");
-    value.textContent = model ? `${provider} · ${model}` : provider;
-    row.append(label, value);
-    container.append(row);
-  }
   if (body.progress_events?.length) {
     const history = container.parentElement.querySelector(".progress-history");
     const list = history ? history.querySelector("ul") : null;
@@ -2756,6 +2958,32 @@ async function refreshHistory() {
   }
 }
 
+$("#historySearch")?.addEventListener("input", () => renderHistory());
+$("#historySearchToggle")?.addEventListener("click", event => {
+  const input = $("#historySearch"); input.hidden = !input.hidden;
+  event.currentTarget.setAttribute("aria-expanded", String(!input.hidden));
+  if (!input.hidden) input.focus();
+  else { input.value = ""; renderHistory(); }
+});
+$("#sidebarToggle")?.addEventListener("click", () => {
+  const collapsed = document.body.classList.toggle("sidebar-collapsed");
+  $("#sidebarToggle").setAttribute("aria-expanded", String(!collapsed));
+  $(".sidebar").inert = collapsed;
+  window.dispatchEvent(new Event("resize"));
+});
+$("#dataNavigation")?.addEventListener("click", event => {
+  event.preventDefault();
+  $("#databaseSelect").focus();
+});
+$("#settingsNavigation")?.addEventListener("click", event => {
+  event.preventDefault();
+  $("#themeToggle").click();
+});
+$("#homeNavigation")?.addEventListener("click", event => {
+  event.preventDefault();
+  $("#messageInput").focus();
+});
+
 function renderHistory() {
   const container = $("#conversationHistory");
   container.replaceChildren();
@@ -2764,9 +2992,13 @@ function renderHistory() {
     const id = run.conversation_id || run.run_id;
     if (!groups.has(id)) groups.set(id, run);
   }
-  const visible = [...groups.values()];
+  const search = $("#historySearch")?.value?.trim().toLocaleLowerCase() || "";
+  const visible = [...groups.values()].filter(run => !search ||
+    state.history.some(turn => (turn.conversation_id || turn.run_id) ===
+      (run.conversation_id || run.run_id) &&
+      `${turn.original_message || ""} ${turn.resolved_question || ""}`.toLocaleLowerCase().includes(search)));
   if (!visible.length) {
-    container.append(emptyNote("Completed queries appear here."));
+    container.append(emptyNote(search ? "No matching conversations." : "Completed queries appear here."));
     return;
   }
   for (const run of visible) {
@@ -3007,6 +3239,7 @@ document.addEventListener("pointerdown", event => {
 });
 $("#clearHistory").addEventListener("click", async () => {
   if (state.busy) return;
+  if (!window.confirm("Clear all saved conversations in this session? This removes your conversation history.")) return;
   try {
     await api(`/api/conversations/${encodeURIComponent(sessionId)}/reset`, { method: "POST" });
     await api(`/api/history?session_id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });

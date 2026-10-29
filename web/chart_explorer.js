@@ -71,8 +71,10 @@ window.QueryflowChartExplorer = (function () {
     }
     if (spec.series && spec.data.every(row => row[spec.y] != null && row[spec.y] !== ""
       && Number.isFinite(Number(row[spec.y])))) options.push("heatmap");
-    if (spec.series && nonnegativeValues && spec.data.some(row => Number(row[spec.y]) > 0))
+    if (nonnegativeValues && additive(spec) && spec.data.some(row => Number(row[spec.y]) > 0))
       options.push("treemap");
+    if (!time && !spec.series && spec.data.every(row => typeof row[spec.x]==="number" && Number.isFinite(row[spec.x])))
+      options.push("scatter");
     return [...new Set(options)];
   }
   function filters(spec) {

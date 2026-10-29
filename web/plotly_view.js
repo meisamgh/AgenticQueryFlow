@@ -4,9 +4,9 @@ window.QueryflowPlotly = (function () {
   const TYPES = new Set([
     "line", "multi_line", "step_line", "area", "stacked_area", "bar",
     "horizontal_bar", "grouped_bar", "stacked_bar", "percent_stacked_bar",
-    "scatter", "bubble", "histogram", "pie", "donut",
+    "scatter", "bubble", "histogram", "pie", "donut", "treemap",
   ]);
-  const COLORS = ["#6e60e6", "#4f74d4", "#20946c", "#c1803a", "#d45d65", "#998df6", "#2e9bb5", "#b0568d"];
+  const COLORS = window.QueryflowChartTheme?.colors || ["#168447", "#3B82F6", "#F97316", "#8B5CF6", "#86CFA0", "#FBBF24", "#0F766E", "#DB2777"];
   const DISPLAY_PALETTES = {
     ocean: ["#2676c7", "#16a5a9", "#76b9e6", "#347aa1", "#5b9dd6"],
     forest: ["#27845c", "#71a854", "#3a9f8b", "#9eb86a", "#4f7660"],
@@ -52,22 +52,40 @@ window.QueryflowPlotly = (function () {
       const xs = rows.map(row => shownX(row[x]));
       const ys = rows.map(row => numeric(row[name]));
       const raw = rows.map(row => row[x]);
+      const unit=spec.measure_units?.[name];
+      const formatValue=value => value==null ? "—" : window.QueryflowKpis
+        ? window.QueryflowKpis.format(value,unit)
+        : new Intl.NumberFormat(undefined,{maximumFractionDigits:2,notation:Math.abs(value)>=1000 ? "compact" : "standard"}).format(value);
       return { type: LINE.has(type) || ["scatter", "bubble"].includes(type) ? "scatter" : "bar",
         mode: LINE.has(type) ? "lines+markers" : ["scatter", "bubble"].includes(type) ? "markers" : undefined,
         name: name === y && !series ? (spec.y_label || name) : name,
         x: horizontal ? ys : xs, y: horizontal ? xs : ys,
         customdata: raw,
-        marker: { color, size: type === "bubble" ? rows.map(row => Math.max(6,
+        text:ys.map(value=>formatValue(value).replace(/[&<>]/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[char]))),
+        hovertemplate:horizontal ? "%{y}<br>%{text}<extra></extra>" : "%{x}<br>%{text}<extra></extra>",
+        marker: { color, opacity:LINE.has(type) ? 1 : 0.85, line: {color:"#ffffff",width:2},
+          size: type === "bubble" ? rows.map(row => Math.max(6,
           Math.min(38, Math.sqrt(Math.max(0, Number(row[spec.size] || 0))) * 3))) : 7 },
-        line: { color, shape: type === "step_line" ? "hv" : "linear", width: 2 },
+        line: { color, shape: type === "step_line" ? "hv" : "linear", width: 3 },
         connectgaps: false, orientation: horizontal ? "h" : "v", ...extra };
     };
     let traces = [];
-    if (type === "pie" || type === "donut") {
+    if (type === "treemap") {
+      if (spec.data.some(row=>typeof row[y] !== "number" || !Number.isFinite(row[y]) || row[y]<0)
+          || !spec.data.some(row=>row[y]>0)) return null;
+      // Flat tiles preserve the exact source grain and values, without hidden
+      // category aggregation, hierarchy totals, or invented parent records.
+      traces=[{type:"treemap",ids:spec.data.map((_,i)=>`row-${i}`),
+        labels:spec.data.map(row=>[row[x],series ? row[series] : null].filter(v=>v!=null).map(String).join(" · ")),
+        parents:spec.data.map(()=>""),values:spec.data.map(row=>row[y]),
+        customdata:spec.data.map(row=>row[x]),textinfo:"label+value",
+        marker:{colors:spec.data.map((_,i)=>colors[i%colors.length])},
+        hovertemplate:"%{label}<br>%{value}<extra></extra>"}];
+    } else if (type === "pie" || type === "donut") {
       if (spec.data.some(row => numeric(row[y]) === null || numeric(row[y]) < 0)) return null;
       traces = [{type: "pie", labels: spec.data.map(row => String(row[x])),
         values: spec.data.map(row => numeric(row[y])), customdata: spec.data.map(row => row[x]),
-        hole: type === "donut" ? 0.48 : 0, marker: {colors}, textinfo: "label+percent"}];
+        hole: type === "donut" ? 0.52 : 0, marker: {colors,line:{color:css("--surface","#fff"),width:2}}, textinfo: spec.data.length>10 ? "none" : "label+percent"}];
     } else if (["scatter", "bubble"].includes(type)) {
       if (spec.data.some(row => !Number.isFinite(Number(row[x])))) return null;
       traces = [makeTrace(y, spec.data, "markers", colors[0])];
@@ -79,7 +97,7 @@ window.QueryflowPlotly = (function () {
       traces = measures.map((name, index) => {
         const byX = new Map(spec.data.map(row => [String(row[x]), row]));
         return makeTrace(name, rawCategories.map(value => byX.get(value) || {[x]: value, [name]: null}),
-          type, colors[index % colors.length]);
+          type, window.QueryflowChartTheme?.colorFor(name,colors) || colors[index % colors.length]);
       });
     } else if (GROUPED.has(type) && series) {
       if (spec.data.some(row => !Object.hasOwn(row, series))) return null;
@@ -96,7 +114,7 @@ window.QueryflowPlotly = (function () {
         const byX = new Map(spec.data.filter(row => String(row[series]) === group)
           .map(row => [String(row[x]), row]));
         const rows = rawCategories.map(value => byX.get(value) || {[x]: value, [y]: null});
-        const trace = makeTrace(y, rows, type, colors[index % colors.length], {name: group});
+        const trace = makeTrace(y, rows, type, window.QueryflowChartTheme?.colorFor(group,colors) || colors[index % colors.length], {name: group});
         if (type === "percent_stacked_bar") trace.y = rows.map(row => row[y] == null ? null
           : totals.get(String(row[x])) > 0 ? Number(row[y]) / totals.get(String(row[x])) * 100 : null);
         if (type === "stacked_area") trace.stackgroup = "total";
@@ -112,21 +130,40 @@ window.QueryflowPlotly = (function () {
     const layout = {
       paper_bgcolor: css("--surface", "#fff"), plot_bgcolor: css("--surface", "#fff"),
       font: {family: "Inter, sans-serif", color: text, size: 12},
-      margin: {l: horizontal ? 115 : 58, r: 22, t: 16, b: isTimeSeries ? 64 : 52},
+      hoverlabel:{bgcolor:css("--surface","#fff"),bordercolor:css("--border","#c5e5d0"),font:{color:text,size:12}},
+      legend:{orientation:"h",y:-0.22,x:0},
+      bargap:0.24,bargroupgap:0.08,
+      transition:{duration:window.QueryflowChartTheme?.reducedMotion() ? 0 : 120},
+      margin: {l: horizontal ? 115 : 58, r: 22, t: 16, b: 68},
       showlegend: spec.legend !== false && traces.length > 1,
       hovermode: isTimeSeries ? "x unified" : "closest", dragmode: "zoom", uirevision: "queryflow",
       barmode: type === "grouped_bar" ? "group" : STACK.has(type) ? "stack" : "relative",
-      xaxis: {title: {text: horizontal ? spec.y_label || y : spec.x_label || x},
-        type: time ? "date" : ["scatter", "bubble"].includes(type) ? "linear" : "category",
+      xaxis: {title: {text: horizontal ? spec.y_label || y : spec.x_label || x,standoff:16,font:{size:13,color:text}},
+        type: horizontal || ["scatter", "bubble"].includes(type) ? "linear" : time ? "date" : "category",
         categoryorder: "array", categoryarray: time ? undefined : rawCategories,
-        automargin: true, color: muted, gridcolor: css("--border", "#e5e5eb"),
-        rangeslider: {visible: isTimeSeries && domain.length > 5, thickness: 0.14}},
+        automargin: true, color: muted, showgrid:false, zeroline:false, gridcolor: css("--chart-grid", "#e8eef0"),
+        rangeslider: {visible: false}},
       yaxis: {title: {text: horizontal ? spec.x_label || x : spec.y_label || y},
+        tickformat:spec.measure_units?.[y] === "ratio" ? ".0%" : "~s",
+        ticksuffix:["%","percent"].includes(spec.measure_units?.[y]) ? "%" : "",
         rangemode: "tozero", automargin: true, color: muted,
-        gridcolor: css("--border", "#e5e5eb")},
+        zeroline:false, gridcolor: css("--chart-grid", "#e8eef0")},
     };
     if (type === "percent_stacked_bar") layout.yaxis.range = [0, 100];
-    if (type === "area") traces[0].fill = "tozeroy";
+    if (type === "area") {
+      traces[0].fill = "tozeroy";
+      const color = traces[0].line.color;
+      traces[0].fillcolor = /^#[0-9a-f]{6}$/i.test(color)
+        ? `rgba(${parseInt(color.slice(1,3),16)},${parseInt(color.slice(3,5),16)},${parseInt(color.slice(5,7),16)},0.12)`
+        : "rgba(22,132,71,0.12)";
+      traces[0].line.width = 3;
+      const rgb = /^#[0-9a-f]{6}$/i.test(color)
+        ? `${parseInt(color.slice(1,3),16)},${parseInt(color.slice(3,5),16)},${parseInt(color.slice(5,7),16)}`
+        : "22,132,71";
+      traces[0].fillgradient = {type:"vertical", colorscale:[
+        [0, `rgba(${rgb},0.015)`], [1, `rgba(${rgb},0.28)`],
+      ]};
+    }
     if (time && spec.zoom_start != null && spec.zoom_end != null && domain.length > 1) {
       const first = Date.parse(domain[0]), last = Date.parse(domain.at(-1));
       const span = last - first;
@@ -195,6 +232,26 @@ window.QueryflowPlotly = (function () {
     observer?.observe(container);
     return {
       renderer: "plotly",
+      highlightPoint(point) {
+        if (disposed) return;
+        const matches=[];
+        (container.data || figure.data).forEach((trace,curveNumber)=>{
+          if (trace.name !== point.series_name) return;
+          (trace.customdata || []).forEach((raw,pointNumber)=>{
+            const values=spec.chart_type === "horizontal_bar" ? trace.x : trace.y;
+            if (String(raw)===String(point.x) && values?.[pointNumber]===point.y)
+              matches.push({curveNumber,pointNumber});
+          });
+        });
+        if (matches.length) plotly.Fx?.hover?.(container,matches);
+      },
+      highlightSeries(name) {
+        if (disposed) return;
+        const traces=container.data || figure.data;
+        const matches=traces.map((trace,index)=>trace.name === name ? index : -1).filter(index=>index>=0);
+        if (!matches.length) return;
+        void plotly.restyle(container,{opacity:traces.map((_,index)=>matches.includes(index) ? 1 : 0.25)});
+      },
       dispose() {
         disposed = true; observer?.disconnect();
         for (const [event, handler] of subscriptions) container.removeListener?.(event, handler);

@@ -25,7 +25,7 @@ test('Plotly time series keeps all rows, chronological dates, NULL gaps and rang
   assert.equal(figure.data[0].y[2], null);
   assert.equal(figure.data[0].y[0], -4);
   assert.equal(figure.layout.xaxis.type, 'date');
-  assert.equal(figure.layout.xaxis.rangeslider.visible, true);
+  assert.equal(figure.layout.xaxis.rangeslider.visible, false);
   assert.equal(figure.config.scrollZoom, true);
   assert.equal(rows.length, 50);
 });

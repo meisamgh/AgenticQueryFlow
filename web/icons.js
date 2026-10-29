@@ -1,6 +1,11 @@
 /* Curated Lucide icon path data (ISC-licensed) rendered as inline SVG.
    Only these constant strings pass through innerHTML; user data never does. */
 const ICON_PATHS = {
+  trash:'<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/>',
+  'chart-line': '<path d="M3 3v18h18"/><path d="m6 15 4-5 4 3 6-8"/>',
+  'chart-bar': '<path d="M3 3v18h18"/><path d="M7 17v-5m5 5V7m5 10V4"/>',
+  'chart-pie': '<path d="M21 12a9 9 0 1 1-9-9v9Z"/><path d="M15 3v6h6a9 9 0 0 0-6-6Z"/>',
+  leaf: '<path d="M20 4c-9-1-16 3-16 9a7 7 0 0 0 7 7c6 0 10-7 9-16Z"/><path d="M3 21 15 9"/>',
   plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
