@@ -1098,6 +1098,14 @@ class ConversationalAnalyticsAgent:
             "accepted_result_available": bool(
                 last and last.generation and last.generation.accepted
             ),
+            "accepted_result_completeness": ({
+                "result_id": last.result_id,
+                "retained_rows": len(last.generation.rows),
+                "row_count": last.generation.row_count,
+                "truncated": last.generation.truncated,
+                "complete": not last.generation.truncated
+                and last.generation.row_count == len(last.generation.rows),
+            } if last and last.generation and last.generation.accepted else None),
             "result_columns": previous.last_columns if previous else [],
             "accepted_analytical_contract": (
                 previous.semantic_contract.model_dump(
@@ -1144,6 +1152,11 @@ class ConversationalAnalyticsAgent:
             "7. INVESTIGATION: Break complex analytical questions into distinct, "
             "evidence-driven steps. Avoid unnecessary tool calls.\n"
             "8. INSUFFICIENT DATA: If a tool returns REQUERY_REQUIRED, determine the missing "
+            "requirements. Check accepted_result_completeness: a truncated preview is not "
+            "complete evidence. When the user has specified a metric and grouping, ask_data "
+            "for that aggregated result while preserving filters and periods; do not add an "
+            "arbitrary LIMIT or repeat the same incomplete detail query. Do not invent a "
+            "new metric or grouping merely to fit a chart. Determine the missing "
             "requirements, call ask_data to obtain them when feasible, then retry the "
             "original visualization. Do not invent missing data.\n"
             "9. AMBIGUITY: Request clarification only when materially different "

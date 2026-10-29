@@ -1351,6 +1351,7 @@ body.sidebar-collapsed .sidebar { display:none; }
 .chart-kpi-card .kpi-icon-bubble svg { width:16px; height:16px; }
 .kpi-value-row > strong { font-size:22px; }
 .chart-kpi-card .kpi-comparison-bubble { display:none; }
+.chart-kpi-card[data-comparison="true"] .kpi-comparison-bubble { display:flex; }
 .chart-kpi-card .kpi-value-row { min-height:28px; }
 .chart-kpi-row { margin-top:10px; gap:10px; }
 .kpi-value-only { justify-content:flex-start; }

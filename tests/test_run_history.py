@@ -24,6 +24,34 @@ class CountingModel:
         )
 
 
+def test_historical_inspection_api_is_read_only_and_reset_scoped(
+    registry, monkeypatch, tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    monkeypatch.setenv("TEXT2SQL_GLOSSARY_ROOT", str(tmp_path / "glossaries"))
+    monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
+    model = CountingModel()
+    client = TestClient(
+        create_app(TextToSQLAgent(registry, model), run_history=RunHistoryStore(None))
+    )
+    run = client.post("/api/chat", json={
+        "session_id": "owner", "db_id": "shop", "model": "test",
+        "message": "Count orders per customer", "execute": True,
+    }).json()
+    before = model.calls
+    request = {"session_id": "owner", "db_id": "shop", "result_id": run["run_id"],
+               "offset": 0, "page_size": 5}
+    inspected = client.post("/api/results/inspect", json=request)
+    assert inspected.status_code == 200
+    assert inspected.json()["complete"]
+    assert inspected.json()["result_id"] == run["result_id"]
+    for invalid in [{"session_id": "other"}, {"db_id": "other"}]:
+        assert client.post("/api/results/inspect", json={**request, **invalid}).status_code == 404
+    assert model.calls == before
+    client.post("/api/conversations/owner/reset")
+    assert client.post("/api/results/inspect", json=request).status_code == 404
+
+
 def test_reopen_restore_branch_and_rerun_survive_api_restart(
     registry,
     monkeypatch,

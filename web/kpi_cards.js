@@ -209,6 +209,7 @@ window.QueryflowKpis = (() => {
         && Number.isFinite(evidence.current_value) && evidence.baseline_value>0
         && Number.isFinite(spec.comparison.change)
         && Math.abs(spec.comparison.change-(evidence.current_value-evidence.baseline_value)/Math.abs(evidence.baseline_value)*100)<1e-8;
+      card.dataset.comparison=String(Boolean(supported));
       const change=document.createElement("strong"),period=document.createElement("small");
       const trend=supported ? evidence.sparkline : spec.sparkline;
       if (supported) {

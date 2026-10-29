@@ -1637,8 +1637,8 @@ async function appendAssistant(body, elapsed, options = {}) {
   if (mode === "chart" && chartDataComplete && kpiContainer && window.QueryflowKpis) {
     // Built once from the accepted source, not during cosmetic chart rerenders.
     const kpis = window.QueryflowKpis.build(body, presentation.chart_spec)
-      .filter(spec => spec.calculation !== "PERIOD_CHANGE")
-      .map(spec => ({...spec, sparkline:[], comparison:undefined, comparison_evidence:undefined}));
+      .filter(spec => spec.calculation !== "PERIOD_CHANGE"
+        || generation.semantic_contract?.comparison_periods?.length === 2);
     article._kpiSpecs = kpis;
     const titleBadge=article.querySelector(".chart-change-badge");
     titleBadge?.remove();

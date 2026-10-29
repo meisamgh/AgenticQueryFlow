@@ -985,6 +985,10 @@ class FilterValuesResponse(StrictModel):
     values: list[str] = Field(default_factory=list, max_length=100)
     more_available: bool = False
     cached: bool = False
+    provenance: str = "LIVE_BOUNDED_QUERY"
+    expires_in_seconds: int = 60
+    complete_domain: bool = False
+    ambiguous: bool = False
 
 
 class RecommendedChart(StrictModel):

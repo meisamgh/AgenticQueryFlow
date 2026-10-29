@@ -595,7 +595,8 @@ test('ECharts preserves all 50 points in chronological order and exposes zoom', 
   assert.equal(option.series[0].data.length, 50);
   assert.equal(option.series[0].data[0], 0);
   assert.equal(option.series[0].data[49], 49);
-  assert.equal(option.dataZoom.length, 2);
+  assert.equal(option.dataZoom.length, 1);
+  assert.equal(option.dataZoom[0].type, 'inside');
 });
 test('ECharts renders missing points as gaps, keeps zero and negative values, and rejects unsafe stacks', () => {
   const base = {x: 'Month', y: 'Revenue', time_format: 'month', data: [
@@ -726,14 +727,14 @@ test('zoom counts unique positions and also handles dense ordinary categories', 
     }))});
   assert.equal(context.window.QueryflowECharts.buildOption(make(2, true)).dataZoom.length, 0);
   assert.equal(context.window.QueryflowECharts.buildOption(make(25, true)).dataZoom.length, 1);
-  assert.equal(context.window.QueryflowECharts.buildOption(make(26, true)).dataZoom.length, 2);
-  assert.equal(context.window.QueryflowECharts.buildOption(make(30, false)).dataZoom.length, 2);
-  assert.equal(context.window.QueryflowECharts.buildOption({...make(30, false), chart_type: 'horizontal_bar'}).dataZoom.length, 2);
+  assert.equal(context.window.QueryflowECharts.buildOption(make(26, true)).dataZoom.length, 1);
+  assert.equal(context.window.QueryflowECharts.buildOption(make(30, false)).dataZoom.length, 1);
+  assert.equal(context.window.QueryflowECharts.buildOption({...make(30, false), chart_type: 'horizontal_bar'}).dataZoom.length, 1);
   assert.ok(!fs.readFileSync(`${__dirname}/../web/echarts_view.js`, 'utf8').includes('spec.chart_type !== "horizontal_bar"'));
   const multi = make(26, true);
   multi.chart_type = 'multi_line'; multi.series = 'Country';
   multi.data = multi.data.flatMap(row => [{...row, Country: 'DE'}, {...row, Country: 'FR'}]);
-  assert.equal(context.window.QueryflowECharts.buildOption(multi).dataZoom.length, 2);
+  assert.equal(context.window.QueryflowECharts.buildOption(multi).dataZoom.length, 1);
   const zoomed = explorer.apply(make(26, true), {start: '2026-01-10', end: '2026-01-20'});
   assert.equal(zoomed.data.length, 11);
 });

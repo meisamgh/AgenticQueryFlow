@@ -97,7 +97,10 @@ async def design_chart(
         return PlottingOutcome("REQUERY_REQUIRED", "No accepted result is available to plot.")
     if generation.truncated or generation.row_count != len(generation.rows):
         return PlottingOutcome(
-            "REQUERY_REQUIRED", "The accepted result is incomplete; a new governed query is needed."
+            "REQUERY_REQUIRED",
+            f"Only {len(generation.rows)} rows are retained, and this is not the complete result. "
+            "I cannot chart it accurately yet. Request a summary by date or category, "
+            "or narrow the requested period, so the complete result can be plotted.",
         )
     selected_dimensions = [
         str(item.new_value or item.target) for item in changes or []

@@ -1,5 +1,96 @@
 # V6.4 progress checkpoint
 
+Local KPI comparison-bubble continuation: removed the visible Understood-as strip
+and its response-render call. Each KPI now has a neutral value-side comparison
+bubble. Existing PERIOD_CHANGE cards use exact retained baseline/current evidence,
+formula validation, known units and chronological observations. Other summary KPIs
+show No comparison rather than borrowing an unrelated period growth rate. No
+unsupported min/max comparisons, inferred polarity, model or SQL calls. Per-card
+container queries wrap the bubble at narrow card widths without changing the grid.
+Tests cover comparison evidence and absent extrema baselines. Browser visual
+verification remains unavailable.
+
+Treemap/chart-change continuation: added native Plotly flat treemap tiles with
+one unique ID/value per source row, and equivalent ECharts fallback; negative,
+missing, or nonfinite values are rejected. Non-additive metrics are not newly
+offered treemap. Forwarded KPI highlight methods through the shared chart handle.
+Added reusable ChartChangeBubble with 36px neutral pill, verified percentage and
+48x24 chronological microchart, plus exact values/period/formula tooltip. Existing
+comparison eligibility remains strict; absent approved metric-polarity metadata
+means neutral styling, never green/red based on sign alone. KPI icon bubbles are
+44px with 20px semantic SVGs and matched shadows. Frontend/KPI/bubble tests: 104
+passed. Synthetic 500-iteration mock-DOM build/render measured p50 0.037ms and p95
+0.045ms, zero network/model/database calls; this is not real-browser render timing.
+Full Python suite passed on rerun (one skip); an earlier run hit the pre-existing
+timing-sensitive optimization assertion, which passed in isolation. Browser visual
+verification remains unavailable. No SQL generation or backend calculations changed.
+
+KPI/icon detail refinement: deterministic metric/calculation icon selection with
+neutral fallback; green/amber/violet 40px outlined/shadowed bubbles; consistent
+36px forest-green assistant leaf avatar. Chart title now receives a neutral,
+result-ID-bound period-change badge only from existing valid comparison evidence.
+Periods are formatted from known temporal granularity. Missing, zero, and unsupported
+negative baselines remain suppressed; no business-performance polarity inferred.
+No KPI calculations, SQL execution, or model calls were added for these UI changes.
+KPI/frontend tests: 99 passed. Responsive CSS is preserved; connected-browser visual
+validation remains unavailable.
+
+Targeted frontend refinements: mint bordered user bubbles, consistent circular
+leaf assistant/loading avatars, conditional chart tab (Data default without a
+validated chart), metadata-aware compact number displays with raw values kept for
+sorting/CSV, em-dash NULL display, comparison badges in KPI headings, and exact-value
+hover text. Plotly range slider disabled, smaller bottom margin, white marker
+outlines, and formatted hover text. Sidebar Clear styled with trash icon and
+confirmation before any reset/deletion request. Regression verifies cancellation
+causes zero API calls and absent charts cannot expose Visualization. Browser
+desktop/mobile visual inspection remains unavailable; no backend logic changed.
+
+KPI-only premium visual refinement: reusable icon bubbles and semantic calculation
+accents (green primary, amber MIN, violet MAX), compact locale-aware K/M formatting,
+right-aligned verified sparklines with extrema markers, and evidence-derived context
+badges. Exact raw values/calculations remain in hover and accessible labels. Min/max
+cards target exact Plotly source points via curve/point hover, without SQL/model
+calls or source-row mutations. Existing calculation eligibility, placement, result
+identities, and responsive grid are preserved. Added number/unit/locale, evidence
+badge, DOM, and exact point-targeting tests. Connected-browser visual verification
+is still unavailable; responsive CSS/DOM tests are not screenshot verification.
+
+KPI completion continuation: cards consume explicit ChartSpec measure units and
+accepted approved-metric/aggregation definitions. Additive totals require an exact
+approved SUM input, matching SUM stage grouped by the selected temporal dimension,
+unique periods, complete source rows, and no contract LIMIT. Other metrics keep
+descriptive row statistics. Sparklines use unique, validated temporal values in
+chronological order. Growth is emitted only for two explicitly named contract
+periods with exact source-row matches and a positive baseline; unavailable periods
+and zero/negative baselines suppress growth. Grouped cards retain exact series
+names for local Plotly/ECharts highlighting. Currency/percentage units are never
+guessed from metric names. Added DOM/unit tests without network or SQL access.
+Browser visual verification was attempted but no browser is connected; not verified.
+
+Local visualization styling/KPI continuation: enlarged filled white leaf; area
+line width 3 with top-to-bottom fading fill in Plotly/ECharts; zoom-guide text
+and reset control hidden while built-in zoom is preserved. Added typed JSDoc KPI
+specifications and deterministic complete-result row summaries below charts.
+Only numeric non-NULL complete accepted evidence with a stable result ID is used;
+no inferred totals, units, growth or comparison baselines. KPI calculation runs
+once per response, outside styling rerenders. Minimum/maximum and unweighted
+single-series row averages are descriptive statistics, not business-total claims.
+No additional SQL or LLM calls. KPI/front-end suites: 87 passed; browser visual
+verification remains outstanding. Optional comparative KPIs/sparklines are not
+implemented when the accepted data lacks explicit supporting semantics.
+
+Local green frontend continuation: QueryFlow/leaf branding, hidden database selector,
+removed Home/data-source navigation, icon-triggered local history search, and user
+questions beside avatars. Restored exclusive Visualization/Data/SQL views with
+response-local tab and vertical-scroll state. Added retained-row search/sorting,
+column visibility, modifier-click cell/row selection and clipboard copying, SQL
+download/expansion, and expandable actual backend validation/execution/context
+metadata. Raw values remain the CSV source; numeric display adds grouping without
+changing source values. Observed value types appear in header tooltips (not claimed
+database types). Partial results explicitly scope local search/sort to cached rows.
+Verification: 83 frontend tests, full Python suite (one skip), Ruff, mypy, and diff
+check passed. Live-provider/browser end-to-end interaction remains unverified.
+
 October 26 results-table update (local, uncommitted):
 
 - Data now has responsive column widths, sticky numeric-aligned headers, drag-to-resize columns, compact small-result sizing, 20/50/100-row pages, a bounded 100-row virtual window, and a full-screen table. The source result and CSV values remain unchanged; truncated CSV export is explicitly labeled as partial.
@@ -96,3 +187,34 @@ October 26 local Gemma understanding integration (uncommitted):
 - Verified the installed Ollama model tag `gemma4:12b`; local `.env` now selects it for the Top-layer assistant. SQL and plotting configuration is unchanged.
 - Added an Ollama conversation completer with task token limits, token accounting, bounded HTTP timeout and native JSON/schema output. The installed Ollama build rejects the complete AgentDecision grammar; a specific capability fallback uses JSON mode and existing local decision validation, remembering the rejected capability per model.
 - A live local greeting produced a valid AgentDecision via fallback in 6.98 seconds, reporting 123 tokens. This verifies local completion and parsing, not analytical routing accuracy or production latency. Provider regression tests, full pytest (one skipped), Ruff and mypy passed.
+# Local premium chart styling — 2026-10-29
+
+## Historical inspection and categorical evidence hardening — local follow-up
+
+- Added `RunHistoryStore.inspect_result` and POST `/api/results/inspect`, reusing
+  history and accepted state. Both run/result IDs resolve; returned rows are bounded
+  retained snapshots, never silently re-executed or installed as active results.
+- Incomplete previews report `complete=false`, `calculation_allowed=false` and a
+  warning. Tests cover 19, 20, 21 and 40 rows, memory/disk stores, database/session
+  isolation, failed results and resets. Inspection reset cutoffs persist in the
+  existing history SQLite database; audit records remain available separately.
+- Existing bounded live category lookup now supports parameterized exact matching,
+  complete-domain/ambiguity/provenance metadata, remaining cache lifetime, and
+  profile-version invalidation. No automatic fuzzy substitution or new scans.
+- Removed fallback bottom slider, retaining inside zoom. Explicit comparison-period
+  KPI cards may show verified changes/sparklines; no inferred comparison bubble is
+  displayed. Existing icons, shadows, raw rows and SQL are preserved.
+- Isolated 1,000-call in-memory history microbenchmark: p50 0.0088 ms, p95
+  0.0091 ms, zero model/business DB calls. No equivalent baseline or live-provider
+  performance comparison was measured; these numbers are not production latency.
+- Remaining: Top-layer historical tool exposure, broader fuzzy/alias category
+  indexing, end-to-end semantic comparison enforcement, authenticated multi-user
+  authorization, PostgreSQL/live-provider checks and browser visual regression.
+
+Shared `chart_theme.js` and CSS palette tokens now align Plotly and ECharts.
+Updated line/step markers, tooltip surfaces, legends, bar spacing, pie spacing,
+treemap boundaries, signed heatmap scales and box styling without changing source rows.
+Added renderer tests for cross-renderer series-color stability, reduced motion,
+step geometry and missing-value preservation. Browser screenshot comparison is
+NOT RUN: no browser executable or connected browser is available locally.
+No backend generation, KPI calculations, SQL execution or provider calls changed.

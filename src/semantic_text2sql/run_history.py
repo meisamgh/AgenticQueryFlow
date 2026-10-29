@@ -71,10 +71,15 @@ class RunHistoryStore:
         self.path = path
         self._sessions: list[RunRecord] = []
         self._by_id: dict[str, RunRecord] = {}
+        self._reset_after: dict[str, float] = {}
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path) as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS history_reset_boundaries "
+                "(session_id TEXT PRIMARY KEY, reset_at REAL NOT NULL)"
+            )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS query_runs ("
                 "run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, "
@@ -256,6 +261,64 @@ class RunHistoryStore:
                 if record and (session_id is None or record.session_id == session_id)
                 else None
             )
+
+    def inspect_result(
+        self, session_id: str, db_id: str, reference: str,
+        *, offset: int = 0, page_size: int = 20, conversation_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Read retained evidence only; never restore state or execute saved SQL."""
+        if offset < 0 or not 1 <= page_size <= 100:
+            raise ValueError("Invalid historical page bounds.")
+        records = self._inspection_records(session_id)
+        boundary = self._reset_after.get(session_id, 0.0)
+        if self.path is not None:
+            with self._lock, self._connect() as connection:
+                row = connection.execute(
+                    "SELECT reset_at FROM history_reset_boundaries WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                boundary = float(row[0]) if row else boundary
+        record = next((item for item in records if item.db_id == db_id and item.accepted
+            and item.created_at > boundary
+            and (not conversation_id or item.conversation_id == conversation_id)
+            and reference in {item.run_id, item.response_payload.get("result_id")}), None)
+        if record is None:
+            return None
+        complete = not record.truncated and record.row_count == len(record.rows_preview)
+        state = record.state_snapshot
+        return {
+            "run_id": record.run_id,
+            "result_id": record.response_payload.get("result_id") or record.run_id,
+            "historical": True, "question": record.original_message,
+            "resolved_question": record.resolved_question, "sql": record.sql,
+            "answer": record.presentation_summary, "columns": record.columns,
+            "rows": record.rows_preview[offset:offset + page_size],
+            "row_count": record.row_count, "retained_row_count": len(record.rows_preview),
+            "complete": complete, "truncated": record.truncated,
+            "calculation_allowed": complete, "offset": offset,
+            "has_more_retained": offset + page_size < len(record.rows_preview),
+            "semantic_contract": state.semantic_contract.model_dump(mode="json")
+                if state and state.semantic_contract else None,
+            "warning": None if complete else (
+                "Retained preview only; do not calculate full-result totals or comparisons."
+            ),
+            "created_at": record.created_at,
+        }
+
+    def _inspection_records(self, session_id: str) -> list[RunRecord]:
+        return self.list_sessions(session_id, GLOBAL_RETENTION_LIMIT)
+
+    def mark_memory_reset(self, session_id: str) -> None:
+        """Invalidate inspection references, preserving audit records."""
+        boundary = time.time()
+        with self._lock:
+            self._reset_after[session_id] = boundary
+            if self.path is not None:
+                with self._connect() as connection:
+                    connection.execute(
+                        "INSERT OR REPLACE INTO history_reset_boundaries VALUES (?, ?)",
+                        (session_id, boundary),
+                    )
 
     def conversation(self, session_id: str, conversation_id: str) -> list[RunRecord]:
         return list(

@@ -580,6 +580,27 @@ def create_app(
             raise HTTPException(status_code=404, detail="Run not found.")
         return record
 
+    @app.post("/api/results/inspect")
+    async def inspect_historical_result(
+        request: ResultPageRequest, response: Response,
+    ) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        current = accepted_state(request.session_id)
+        configured = request.db_id in sqlite.list_ids() or (
+            postgres is not None and request.db_id in postgres.configured_ids()
+        )
+        if not configured:
+            raise HTTPException(404, "Database is unavailable.")
+        if current is None or current.db_id != request.db_id:
+            raise HTTPException(404, "No active analytical context for this historical result.")
+        data = await asyncio.to_thread(
+            runs.inspect_result, request.session_id, request.db_id, request.result_id,
+            offset=request.offset, page_size=request.page_size,
+        )
+        if data is None:
+            raise HTTPException(404, "Historical result is unavailable in this context.")
+        return data
+
     @app.get("/api/history/{run_id}/turns", response_model=list[RunRecord])
     async def history_turns(response: Response, run_id: str, session_id: str) -> list[RunRecord]:
         response.headers["Cache-Control"] = "no-store"
@@ -624,6 +645,7 @@ def create_app(
         """Start a fresh conversation without invoking any model or deleting audit history."""
         response.headers["Cache-Control"] = "no-store"
         conversations.reset(session_id)
+        await asyncio.to_thread(runs.mark_memory_reset, session_id)
         for key in [key for key in recent_results if key[0] == session_id]:
             recent_results.pop(key, None)
         return Response(status_code=204, headers={"Cache-Control": "no-store"})
@@ -730,7 +752,8 @@ def create_app(
 
     @app.get("/api/databases/{db_id}/filter-values", response_model=FilterValuesResponse)
     async def filter_values(
-        db_id: str, table: str, column: str, search: str | None = None
+        db_id: str, table: str, column: str, search: str | None = None,
+        exact: bool = False,
     ) -> FilterValuesResponse:
         """Bounded, read-only distinct values for one verified filter field.
 
@@ -797,7 +820,9 @@ def create_app(
                 status_code=403,
                 detail="This field is not available for value discovery.",
             )
-        cache_key = (db_id, table, column, search_term)
+        # Profile/schema changes invalidate domains even inside the cache TTL.
+        version = str(profile.profiled_at) if profile else schema.model_dump_json()
+        cache_key = (db_id, table, column, search_term + "\x00" + str(exact) + version)
         cached = filter_values_cache.get(cache_key)
         if cached is not None and monotonic() - cached[0] < 60:
             _, cached_values, cached_more = cached
@@ -809,6 +834,9 @@ def create_app(
                 values=cached_values,
                 more_available=cached_more,
                 cached=True,
+                expires_in_seconds=max(0, int(60 - (monotonic() - cached[0]))),
+                complete_domain=not search_term and not cached_more,
+                ambiguous=bool(search_term and len(cached_values) > 1),
             )
         if search_term:
             # Treat the user's text literally; it is never SQL or a LIKE pattern.
@@ -818,6 +846,8 @@ def create_app(
                 if schema.dialect == "sqlite"
                 else f'strpos(lower(CAST("{column}" AS TEXT)), lower({placeholder})) > 0'
             )
+            if exact:
+                predicate = f'lower(CAST("{column}" AS TEXT)) = lower({placeholder})'
             sql = (
                 f'SELECT DISTINCT CAST("{column}" AS TEXT) FROM "{table}" '
                 f'WHERE "{column}" IS NOT NULL AND {predicate} ORDER BY 1 LIMIT 101'
@@ -851,6 +881,8 @@ def create_app(
             column=column,
             search=search_term or None,
             values=values[:100],
+            complete_domain=not search_term and not more_available,
+            ambiguous=bool(search_term and len(values) > 1),
             more_available=more_available,
             cached=False,
         )
@@ -1507,6 +1539,7 @@ def create_app(
             pending = pending.model_copy(update={"semantic_contract": updated_contract})
         if operation == "RESET_CONTEXT":
             conversations.reset(request.session_id)
+            await asyncio.to_thread(runs.mark_memory_reset, request.session_id)
             return ChatResponse(
                 session_id=request.session_id,
                 operation="RESET_CONTEXT",
@@ -2147,6 +2180,7 @@ def create_app(
     )
     def reset_assistant_context(session_id: str) -> None:
         conversations.reset(session_id)
+        runs.mark_memory_reset(session_id)
         for key in [key for key in recent_results if key[0] == session_id]:
             recent_results.pop(key, None)
 

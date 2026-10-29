@@ -48,19 +48,23 @@ window.QueryflowPlotly = (function () {
       ? DISPLAY_PALETTES[spec.display_palette]
       : COLORS.map((fallback, index) => css(`--chart-${index + 1}`, fallback));
     const horizontal = type === "horizontal_bar";
+    const escapeLabel=value=>String(value).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
+    const compactValue=value=>window.QueryflowChartTheme?.compact(value,spec.measure_units?.[y]) || String(value);
+    const exactValue=value=>window.QueryflowChartTheme?.exact(value,spec.measure_units?.[y]) || String(value);
     const makeTrace = (name, rows, mode, color, extra = {}) => {
       const xs = rows.map(row => shownX(row[x]));
       const ys = rows.map(row => numeric(row[name]));
       const raw = rows.map(row => row[x]);
       const unit=spec.measure_units?.[name];
-      const formatValue=value => value==null ? "—" : window.QueryflowKpis
+      const formatValue=value => window.QueryflowChartTheme ? window.QueryflowChartTheme.exact(value,unit) : value==null ? "—" : window.QueryflowKpis
         ? window.QueryflowKpis.format(value,unit)
         : new Intl.NumberFormat(undefined,{maximumFractionDigits:2,notation:Math.abs(value)>=1000 ? "compact" : "standard"}).format(value);
       return { type: LINE.has(type) || ["scatter", "bubble"].includes(type) ? "scatter" : "bar",
-        mode: LINE.has(type) ? "lines+markers" : ["scatter", "bubble"].includes(type) ? "markers" : undefined,
-        name: name === y && !series ? (spec.y_label || name) : name,
+        mode: LINE.has(type) ? (rows.length>40 ? "lines" : "lines+markers") : ["scatter", "bubble"].includes(type) ? "markers" : undefined,
+        name: name === y && !series ? (spec.y_label || window.QueryflowChartTheme?.label(name) || name) : name,
         x: horizontal ? ys : xs, y: horizontal ? xs : ys,
         customdata: raw,
+        meta:{measure_unit:unit},
         text:ys.map(value=>formatValue(value).replace(/[&<>]/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[char]))),
         hovertemplate:horizontal ? "%{y}<br>%{text}<extra></extra>" : "%{x}<br>%{text}<extra></extra>",
         marker: { color, opacity:LINE.has(type) ? 1 : 0.85, line: {color:"#ffffff",width:2},
@@ -79,12 +83,19 @@ window.QueryflowPlotly = (function () {
         labels:spec.data.map(row=>[row[x],series ? row[series] : null].filter(v=>v!=null).map(String).join(" · ")),
         parents:spec.data.map(()=>""),values:spec.data.map(row=>row[y]),
         customdata:spec.data.map(row=>row[x]),textinfo:"label+value",
+        text:spec.data.map(row=>escapeLabel(compactValue(row[y]))),
+        texttemplate:"%{label}<br>%{text}",
+        hovertext:spec.data.map(row=>escapeLabel(exactValue(row[y]))),
         marker:{colors:spec.data.map((_,i)=>colors[i%colors.length])},
-        hovertemplate:"%{label}<br>%{value}<extra></extra>"}];
+        hovertemplate:"%{label}<br>%{hovertext}<extra></extra>"}];
     } else if (type === "pie" || type === "donut") {
       if (spec.data.some(row => numeric(row[y]) === null || numeric(row[y]) < 0)) return null;
       traces = [{type: "pie", labels: spec.data.map(row => String(row[x])),
         values: spec.data.map(row => numeric(row[y])), customdata: spec.data.map(row => row[x]),
+        text:spec.data.map(row=>escapeLabel(compactValue(row[y]))),
+        texttemplate:spec.data.length>10 ? undefined : "%{label}<br>%{text} · %{percent:.1%}",
+        hovertext:spec.data.map(row=>escapeLabel(exactValue(row[y]))),
+        hovertemplate:"%{label}<br>%{hovertext}<br>%{percent:.1%}<extra></extra>",
         hole: type === "donut" ? 0.52 : 0, marker: {colors,line:{color:css("--surface","#fff"),width:2}}, textinfo: spec.data.length>10 ? "none" : "label+percent"}];
     } else if (["scatter", "bubble"].includes(type)) {
       if (spec.data.some(row => !Number.isFinite(Number(row[x])))) return null;
@@ -125,6 +136,16 @@ window.QueryflowPlotly = (function () {
       const byX = new Map(spec.data.map(row => [String(row[x]), row]));
       traces = [makeTrace(y, rawCategories.map(value => byX.get(value)), type, colors[0])];
     }
+    for (const trace of traces) {
+      if (trace.type!=="bar") continue;
+      trace.hovertext=trace.text;
+      trace.hovertemplate=trace.hovertemplate.replaceAll("%{text}","%{hovertext}");
+      const unit=type==="percent_stacked_bar" ? "%" : trace.meta?.measure_unit;
+      trace.text=(horizontal ? trace.x : trace.y).map(value=>window.QueryflowChartTheme
+        ? window.QueryflowChartTheme.compact(value,unit) : value==null ? "" : String(value));
+      trace.textposition="inside";trace.insidetextanchor="middle";
+      trace.textfont={color:"#ffffff",size:11};trace.constraintext="inside";
+    }
     const isTimeSeries = time && LINE.has(type);
     const domain = time ? rawCategories.map(temporalValue) : rawCategories;
     const layout = {
@@ -133,17 +154,19 @@ window.QueryflowPlotly = (function () {
       hoverlabel:{bgcolor:css("--surface","#fff"),bordercolor:css("--border","#c5e5d0"),font:{color:text,size:12}},
       legend:{orientation:"h",y:-0.22,x:0},
       bargap:0.24,bargroupgap:0.08,
+      uniformtext:{minsize:10,mode:"hide"},
       transition:{duration:window.QueryflowChartTheme?.reducedMotion() ? 0 : 120},
       margin: {l: horizontal ? 115 : 58, r: 22, t: 16, b: 68},
       showlegend: spec.legend !== false && traces.length > 1,
       hovermode: isTimeSeries ? "x unified" : "closest", dragmode: "zoom", uirevision: "queryflow",
       barmode: type === "grouped_bar" ? "group" : STACK.has(type) ? "stack" : "relative",
-      xaxis: {title: {text: horizontal ? spec.y_label || y : spec.x_label || x,standoff:16,font:{size:13,color:text}},
+      xaxis: {title: {text: window.QueryflowChartTheme?.label(horizontal ? spec.y_label || y : spec.x_label || x) || (horizontal ? spec.y_label || y : spec.x_label || x),standoff:16,font:{size:13,color:text}},
+        nticks:7,tickformat:time && !horizontal ? (spec.time_format==="year" ? "%Y" : "%b %Y") : undefined,
         type: horizontal || ["scatter", "bubble"].includes(type) ? "linear" : time ? "date" : "category",
         categoryorder: "array", categoryarray: time ? undefined : rawCategories,
         automargin: true, color: muted, showgrid:false, zeroline:false, gridcolor: css("--chart-grid", "#e8eef0"),
         rangeslider: {visible: false}},
-      yaxis: {title: {text: horizontal ? spec.x_label || x : spec.y_label || y},
+      yaxis: {title: {text:window.QueryflowChartTheme?.label(horizontal ? spec.x_label || x : spec.y_label || y) || (horizontal ? spec.x_label || x : spec.y_label || y),standoff:12},nticks:5,
         tickformat:spec.measure_units?.[y] === "ratio" ? ".0%" : "~s",
         ticksuffix:["%","percent"].includes(spec.measure_units?.[y]) ? "%" : "",
         rangemode: "tozero", automargin: true, color: muted,
@@ -179,6 +202,7 @@ window.QueryflowPlotly = (function () {
     const spec = presentation.chart_spec;
     const figure = buildFigure(spec);
     if (!figure) return null;
+    if (container.style && window.QueryflowChartTheme) container.style.height=`${window.QueryflowChartTheme.height(spec,container.clientWidth || 800)}px`;
     const plotly = window.Plotly;
     let disposed = false;
     const ready = Promise.resolve(plotly.newPlot(container, figure.data, figure.layout, figure.config))

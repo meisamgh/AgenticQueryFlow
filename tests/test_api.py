@@ -520,6 +520,7 @@ def test_public_post_surface_contains_only_current_workflow() -> None:
         "/api/chat",
         "/api/chat/jobs",
         "/api/results/page",
+        "/api/results/inspect",
         "/api/sql/diff",
         "/api/voice/transcribe",
         "/api/history/{run_id}/continue",
@@ -586,9 +587,8 @@ def test_web_chat_application_is_served() -> None:
     assert 'class="technical-details"' not in page.text
     tokens_position = page.text.index('id="tokensContent"')
     assert 'id="pipelineContent"' in page.text
-    attempts_position = script.text.index('class="attempts-panel')
     assert 'class="attempts-panel' not in page.text
-    assert attempts_position > 0
+    assert 'class="attempts-panel' not in script.text
     # The inspector (with token and pipeline details) is defined before the
     # answer template in the document, and the answer keeps only its own
     # closable panels inline.

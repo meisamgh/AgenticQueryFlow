@@ -90,13 +90,17 @@ window.QueryflowECharts = (function () {
         valueFormatter: value => value == null ? "Missing" : formatNumber(value, false) },
       aria: { enabled: true, decal: { show: false } },
     };
-    const format = value => formatNumber(value, compact);
+    const format = value => window.QueryflowChartTheme?.compact(value,spec.measure_units?.[y])
+      || formatNumber(value, compact);
+    const exact = value => window.QueryflowChartTheme?.exact(value,spec.measure_units?.[y])
+      || formatNumber(value, false);
     if (["pie", "donut"].includes(type)) {
       return { ...base, legend: { bottom: 0, type: "scroll", textStyle: { color: muted } },
         series: [{ type: "pie", radius: type === "donut" ? ["42%", "67%"] : "67%",
           itemStyle:{borderColor:cssVar("--surface","#fff"),borderWidth:2,borderRadius:4},
           data: data.map(row => ({ name: label(row[x]), value: row[y] })),
-          label: { formatter: "{b}" } }] };
+          label: { formatter: point=>`${point.name}\n${format(point.value)} · ${formatNumber(point.percent,false)}%` },
+          tooltip:{valueFormatter:exact} }] };
     }
     if (type === "treemap") {
       if (data.some(row=>typeof row[y]!=="number" || !Number.isFinite(row[y]) || row[y]<0)
@@ -106,13 +110,14 @@ window.QueryflowECharts = (function () {
         value:row[y]}));
       return { ...base, series: [{ type: "treemap", data: children, roam: false,
         itemStyle:{borderColor:cssVar("--surface","#fff"),borderWidth:2,gapWidth:3},
-        breadcrumb: { show: true }, label: { show: true } }] };
+        tooltip:{valueFormatter:exact},
+        breadcrumb: { show: true }, label: { show: true,formatter:point=>`${point.name}\n${format(point.value)}` } }] };
     }
     if (type === "calendar_heatmap") {
       const years = unique(data.map(row => canonicalDate(row[x]).slice(0, 4)));
       const min = Math.min(...data.map(row => Number(row[y])));
       const max = Math.max(...data.map(row => Number(row[y])));
-      return { ...base, tooltip: { ...base.tooltip, formatter: item => `${item.value[0]}: ${format(item.value[1])}` },
+      return { ...base, tooltip: { ...base.tooltip, formatter: item => `${item.value[0]}: ${exact(item.value[1])}` },
         visualMap: { min, max, calculable: true, orient: "horizontal", left: "center", top: 10,
           inRange: { color: min<0 ? ["#8b5cf6","#f8faf9","#168447"] : ["#e8f5ec","#86cfa0","#168447"] },
           ...(min<0 ? {min:-Math.max(Math.abs(min),Math.abs(max)),max:Math.max(Math.abs(min),Math.abs(max))} : {}) },
@@ -157,17 +162,14 @@ window.QueryflowECharts = (function () {
       splitLine: { lineStyle: { color: border, type: "solid" } } };
     const shortLabel = value => { const full = label(value); return full.length > 20 ? `${full.slice(0, 19)}…` : full; };
     const categoryAxis = { type: "category", data: category.map(value => friendlyDate(value, spec.time_format)),
-      name: spec.x_label, axisLabel: { color: muted, hideOverlap: true,
+      name: window.QueryflowChartTheme?.label(spec.x_label || x) || spec.x_label, axisLabel: { color: muted, hideOverlap: true,
         formatter: shortLabel, rotate: !temporal && category.length > 8 ? 30 : 0 } };
     const option = { ...base,
       grid: { left: 35, right: 35, top: 35, bottom: 55, containLabel: true },
       xAxis: {...(horizontal ? valueAxis : numericX ? { ...valueAxis, name: spec.x_label } : categoryAxis),nameLocation:"middle",nameGap:35,nameTextStyle:{color:text,fontSize:13}},
-      yAxis: horizontal ? categoryAxis : { ...valueAxis, name: spec.y_label },
+      yAxis: horizontal ? categoryAxis : { ...valueAxis, name:window.QueryflowChartTheme?.label(spec.y_label || y) || spec.y_label },
       dataZoom: category.length > 2 && !numericX
-        ? [...(category.length > 25 ? [{ type: "slider", [horizontal ? "yAxisIndex" : "xAxisIndex"]: 0,
-          [horizontal ? "right" : "bottom"]: 12, [horizontal ? "width" : "height"]: 22,
-          filterMode: "filter", start: spec.zoom_start ?? 0, end: spec.zoom_end ?? 100 }] : []),
-        { type: "inside", [horizontal ? "yAxisIndex" : "xAxisIndex"]: 0, filterMode: "filter",
+        ? [{ type: "inside", [horizontal ? "yAxisIndex" : "xAxisIndex"]: 0, filterMode: "filter",
           start: spec.zoom_start ?? 0, end: spec.zoom_end ?? 100 }] : [],
       legend: { show: spec.legend !== false && (grouped || measures.length > 1), type: "scroll", top: 0, textStyle: { color: muted } },
       series: [],
@@ -217,11 +219,16 @@ window.QueryflowECharts = (function () {
     for (const item of option.series) {
       const stableColor=(grouped || measures.length>1) && window.QueryflowChartTheme?.colorFor(item.name,palette(spec.display_palette));
       if (item.type === "line") {
-        item.smooth=false; item.symbol="circle"; item.symbolSize=7;
+        item.smooth=false; item.symbol="circle"; item.symbolSize=7; item.showSymbol=item.data.length<=40;
         item.lineStyle={...item.lineStyle,width:3,...(stableColor ? {color:stableColor} : {})};
         item.itemStyle={borderColor:"#ffffff",borderWidth:2,...(stableColor ? {color:stableColor} : {})};
       } else if (item.type === "bar") {
         item.barMaxWidth=44; item.itemStyle={borderRadius:horizontal ? [0,5,5,0] : [5,5,0,0],...(stableColor ? {color:stableColor} : {})};
+        const measure=measures.find(name=>name===item.name) || y;
+        item.label={show:true,position:"inside",color:"#ffffff",fontSize:11,
+          formatter:point=>window.QueryflowChartTheme?.compact(point.value,
+            type==="percent_stacked_bar" ? "%" : spec.measure_units?.[measure]) || ""};
+        item.labelLayout={hideOverlap:true};
       } else if (item.type === "scatter") item.itemStyle={opacity:.8,borderColor:"#ffffff",borderWidth:2};
     }
     return option;
@@ -232,10 +239,11 @@ window.QueryflowECharts = (function () {
     const spec = presentation.chart_spec;
     const option = buildOption(spec);
     if (!option) return null;
+    if (container.style && window.QueryflowChartTheme) container.style.height=`${window.QueryflowChartTheme.height(spec,container.clientWidth || 800)}px`;
     const horizontal = spec.chart_type === "horizontal_bar";
     const chart = window.echarts.init(container, null, { renderer: "canvas" });
     chart.setOption(option);
-    const pinchEnabled = option.dataZoom.length > 0;
+    const pinchEnabled = (option.dataZoom?.length || 0) > 0;
     let pinch = null;
     const distance = touches => Math.hypot(
       touches[0].clientX - touches[1].clientX,
