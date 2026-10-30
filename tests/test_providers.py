@@ -15,8 +15,11 @@ from semantic_text2sql.llm import (
     GroqSQLModel,
     JustDoWorkSQLModel,
     ModelError,
+    OllamaCompleter,
+    OpenRouterSQLModel,
     ProviderRequestError,
     RoutingSQLModel,
+    StructuredOutputUnsupported,
     TrueSotaSQLModel,
     _prompt,
 )
@@ -28,6 +31,43 @@ from semantic_text2sql.models import (
     TokenUsage,
 )
 from semantic_text2sql.runtime import RequestBudget, use_request_budget
+
+
+def test_ollama_understanding_uses_native_schema_and_task_budget(monkeypatch: Any) -> None:
+    monkeypatch.setenv("TEXT2SQL_TOP_DECISION_MAX_TOKENS", "321")
+    schema: dict[str, object] = {"type": "object", "properties": {"action": {"type": "string"}}}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/chat"
+        payload = json.loads(request.content)
+        assert payload["model"] == "gemma4:12b"
+        assert payload["format"] == schema
+        assert payload["options"]["num_predict"] == 321
+        assert payload["think"] is False
+        assert payload["stream"] is False
+        return httpx.Response(200, json={
+            "message": {"content": '{"action":"ANSWER"}'},
+            "prompt_eval_count": 20, "eval_count": 5,
+        })
+
+    model = OllamaCompleter(transport=httpx.MockTransport(handler))
+    result, usage = asyncio.run(model.complete_structured_task(
+        "gemma4:12b", "Understand the request", "AgentDecision", schema, "decision",
+    ))
+    assert json.loads(result)["action"] == "ANSWER"
+    assert usage.total_tokens == 25
+
+
+def test_ollama_grammar_rejection_disables_native_schema_for_that_model() -> None:
+    model = OllamaCompleter(transport=httpx.MockTransport(lambda request: httpx.Response(
+        400, json={"error": "Failed to initialize samplers: failed to parse grammar"},
+    )))
+    with pytest.raises(StructuredOutputUnsupported):
+        asyncio.run(model.complete_structured_task(
+            "gemma4:12b", "Question", "AgentDecision", {"type": "object"}, "decision",
+        ))
+    assert not model.native_schema_supported("gemma4:12b", "AgentDecision")
+    assert model.native_schema_supported("another-model", "AgentDecision")
 
 
 def test_true_sota_uses_responses_without_codex_cli_or_key_leak() -> None:
@@ -53,6 +93,124 @@ def test_true_sota_uses_responses_without_codex_cli_or_key_leak() -> None:
     assert usage.total_tokens == 5
     assert requests[0]["model"] == "gpt-6-sol"
     assert requests[0]["store"] is False
+
+
+def test_task_specific_structured_limits_reach_provider_payloads(monkeypatch: Any) -> None:
+    monkeypatch.setenv("TEXT2SQL_TOP_DECISION_MAX_TOKENS", "321")
+    captured: dict[str, dict[str, Any]] = {}
+
+    def sota_handler(request: httpx.Request) -> httpx.Response:
+        captured["sota"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "output_text": '{"action":"ANSWER"}', "usage": {},
+        })
+
+    def codex_handler(request: httpx.Request) -> httpx.Response:
+        captured["agentrouter"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"action":"ANSWER"}'}}],
+            "usage": {},
+        })
+
+    def groq_handler(request: httpx.Request) -> httpx.Response:
+        captured["groq"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"action":"ANSWER"}'}}],
+            "usage": {},
+        })
+
+    schema: dict[str, object] = {"type": "object"}
+    asyncio.run(TrueSotaSQLModel(
+        "key", "https://sota.test", transport=httpx.MockTransport(sota_handler)
+    ).complete_structured_task("gpt-6-sol", "decide", "AgentDecision", schema, "decision"))
+    asyncio.run(AgentRouterCodexModel(
+        "key", "https://agentrouter.test", transport=httpx.MockTransport(codex_handler)
+    ).complete_structured_task("gpt-5.6-sol", "decide", "AgentDecision", schema, "decision"))
+    asyncio.run(GroqSQLModel(
+        "key", transport=httpx.MockTransport(groq_handler)
+    ).complete_structured_task("qwen", "decide", "AgentDecision", schema, "decision"))
+    assert captured["sota"]["max_output_tokens"] == 321
+    assert captured["agentrouter"]["max_completion_tokens"] == 321
+    assert captured["groq"]["max_completion_tokens"] == 321
+
+
+def test_anthropic_and_codecraft_task_limits_reach_provider_payloads(
+    monkeypatch: Any,
+) -> None:
+    monkeypatch.setenv("TEXT2SQL_TOP_ANSWER_MAX_TOKENS", "456")
+    captured: dict[str, dict[str, Any]] = {}
+
+    def anthropic_handler(request: httpx.Request) -> httpx.Response:
+        captured["anthropic"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "content": [{"type": "tool_use", "input": {"answer": "done"}}],
+            "usage": {},
+        })
+
+    def codecraft_handler(request: httpx.Request) -> httpx.Response:
+        captured["codecraft"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": '{"answer":"done"}'}}],
+            "usage": {},
+        })
+
+    asyncio.run(AgentRouterClaudeModel(
+        "key", "https://agentrouter.test", transport=httpx.MockTransport(anthropic_handler)
+    ).complete_structured_task(
+        "claude-opus-5", "answer", "AgentDecision", {"type": "object"}, "final_answer"
+    ))
+    asyncio.run(CodeCraftSQLModel(
+        "key", transport=httpx.MockTransport(codecraft_handler)
+    ).complete_task("model", "answer", "final_answer", json_mode=True))
+    assert captured["anthropic"]["max_tokens"] == 456
+    assert captured["codecraft"]["max_tokens"] == 456
+
+
+def test_openrouter_nemotron_sql_completion_and_local_json_policy() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["authorization"] = request.headers["authorization"]
+        captured["body"] = json.loads(request.content)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "SELECT 1"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 3},
+        })
+
+    model = OpenRouterSQLModel(
+        "test-key", transport=httpx.MockTransport(handler),
+    )
+    sql, _, usage = asyncio.run(model.generate(
+        model="nvidia/nemotron-3-ultra-550b-a55b:free",
+        question="Return one", evidence=None,
+        schema=SchemaInfo(db_id="shop", tables=[]),
+        strategy=StrategyHints(mode="exact"), dialect="sqlite",
+        profile_context="{}", previous_sql=None, feedback=None,
+        rejected_shapes=[], generation_style="reasoning",
+    ))
+    assert sql == "SELECT 1" and usage.total_tokens == 11
+    assert captured["path"] == "/api/v1/chat/completions"
+    assert captured["authorization"] == "Bearer test-key"
+    body = captured["body"]
+    assert body["model"] == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert "response_format" not in body
+    assert model.native_schema_supported(body["model"], "AgentDecision") is False
+
+
+def test_openrouter_missing_key_and_truncation_fail_safely() -> None:
+    with pytest.raises(ModelError, match="OPENROUTER_API_KEY"):
+        asyncio.run(OpenRouterSQLModel(None).complete_detailed("nemotron", "SELECT 1"))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "choices": [{"message": {"content": "SELECT"}, "finish_reason": "length"}],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 3},
+        })
+
+    model = OpenRouterSQLModel("test-key", transport=httpx.MockTransport(handler))
+    with pytest.raises(ModelError, match="truncated"):
+        asyncio.run(model.complete_detailed("nemotron", "SELECT 1"))
 
 
 def test_groq_rate_limit_retry_claims_shared_model_budget(
@@ -560,6 +718,7 @@ def test_groq_retries_transient_rate_limit() -> None:
 
     assert text == "SELECT 1"
     assert usage.total_tokens == 3
+    assert usage.provider_retries == 1
     assert calls == 2
 
 
@@ -573,7 +732,8 @@ def test_agent_decision_schema_enumerates_every_allowed_value() -> None:
     schema = _agent_decision_schema_typed()
     properties = schema["properties"]
     assert schema["required"] == [
-        "action", "intent", "tool", "tool_arguments", "instruction", "answer"
+        "action", "intent", "tool", "tool_arguments", "instruction", "answer",
+        "finish_after_tool", "chart_proposal",
     ]
     assert properties["action"]["enum"] == [
         "ANSWER",
@@ -601,16 +761,16 @@ def test_agent_decision_schema_enumerates_every_allowed_value() -> None:
         "get_column_profile",
         "get_available_metrics",
         "get_business_context",
-        "search_business_context",
         "ask_data",
-        "inspect_result",
-        "search_conversation_memory",
         "analyze_result",
         "check_sql_correctness",
         "change_visualization",
         "present_result",
         "explain_existing_result",
         "reset_context",
+        "inspect_result",
+        "search_conversation_memory",
+        "refresh_analysis",
     ]
     assert schema["additionalProperties"] is False
     from semantic_text2sql.conversational_agent import _DECISION_EXAMPLES
@@ -769,7 +929,8 @@ def test_justdowork_structured_output_uses_forced_tool_schema() -> None:
     )
     schema: dict[str, Any] = forced_tool["input_schema"]
     assert schema["required"] == [
-        "action", "intent", "tool", "tool_arguments", "instruction", "answer"
+        "action", "intent", "tool", "tool_arguments", "instruction", "answer",
+        "finish_after_tool", "chart_proposal",
     ]
     assert schema["properties"]["action"]["enum"] == [
         "ANSWER",
@@ -824,6 +985,101 @@ def test_agentrouter_routes_structured_output_and_falls_back() -> None:  # noqa:
     )
     with pytest.raises(ModelError):
         asyncio.run(router.complete_structured("claude-x", "p", "AgentDecision", {}))
+
+
+def test_agentrouter_complete_task_prefers_task_aware_json_transports() -> None:
+    class TaskAware:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str, bool]] = []
+
+        async def complete_task(
+            self, model: str, prompt: str, task: str, *, json_mode: bool = False,
+        ) -> tuple[str, TokenUsage]:
+            self.calls.append((model, prompt, task, json_mode))
+            return json.dumps({"done": True}), TokenUsage(input_tokens=4, output_tokens=2)
+
+        async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            raise AssertionError("complete_task should be delegated directly")
+
+    class StructuredOnly:
+        def __init__(self) -> None:
+            self.structured: list[tuple[str, str, str, dict[str, object]]] = []
+            self.plain = 0
+
+        async def complete_structured(
+            self, model: str, prompt: str, schema_name: str, schema: dict[str, object],
+        ) -> tuple[str, TokenUsage]:
+            self.structured.append((model, prompt, schema_name, schema))
+            return json.dumps({"done": True}), TokenUsage(input_tokens=1, output_tokens=1)
+
+        async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            self.plain += 1
+            return json.dumps({"done": True}), TokenUsage(input_tokens=1, output_tokens=1)
+
+    class UnsupportedStructured(StructuredOnly):
+        async def complete_structured(
+            self, model: str, prompt: str, schema_name: str, schema: dict[str, object],
+        ) -> tuple[str, TokenUsage]:
+            raise StructuredOutputUnsupported("gateway rejects response_format")
+
+    task_aware = TaskAware()
+    router = AgentRouterModel(task_aware, AgentRouterCodexModel(None))  # type: ignore[arg-type]
+    text, usage = asyncio.run(
+        router.complete_task("claude-x", "prompt", "decision", json_mode=True)
+    )
+    assert json.loads(text) == {"done": True}
+    assert usage.total_tokens == 6
+    assert task_aware.calls == [("claude-x", "prompt", "decision", True)]
+
+    structured_only = StructuredOnly()
+    router = AgentRouterModel(structured_only, AgentRouterCodexModel(None))  # type: ignore[arg-type]
+    text, usage = asyncio.run(
+        router.complete_task("claude-x", "prompt", "decision", json_mode=True)
+    )
+    assert json.loads(text) == {"done": True}
+    assert usage.total_tokens == 2
+    assert structured_only.structured[0][2] == "BoundedTaskOutput"
+    assert structured_only.structured[0][3] == {"type": "object"}
+    assert structured_only.plain == 0
+
+    unsupported = UnsupportedStructured()
+    router = AgentRouterModel(unsupported, AgentRouterCodexModel(None))  # type: ignore[arg-type]
+    text, usage = asyncio.run(
+        router.complete_task("claude-x", "prompt", "decision", json_mode=True)
+    )
+    assert json.loads(text) == {"done": True}
+    assert usage.total_tokens == 2
+    assert unsupported.plain == 1
+
+    # Without JSON mode the plain completion path is preserved even when a
+    # structured transport exists.
+    asyncio.run(router.complete_task("claude-x", "prompt", "decision", json_mode=True))
+    assert unsupported.plain == 2
+
+
+def test_agentrouter_native_schema_capability_delegates_to_the_backend() -> None:
+    class Structured:
+        async def complete_structured(
+            self, model: str, prompt: str, schema_name: str, schema: dict[str, object],
+        ) -> tuple[str, TokenUsage]:
+            return "{}", TokenUsage()
+
+    class Bookkeeping(Structured):
+        def native_schema_supported(self, model: str, schema_name: str) -> bool:
+            return False
+
+    class Bare:
+        pass
+
+    router = AgentRouterModel(Structured(), AgentRouterCodexModel(None))  # type: ignore[arg-type]
+    assert router.native_schema_supported("claude-x", "AgentDecision") is True
+    assert router.native_schema_supported("some-gpt-model", "AgentDecision") is True
+
+    router = AgentRouterModel(Bookkeeping(), AgentRouterCodexModel(None))  # type: ignore[arg-type]
+    assert router.native_schema_supported("claude-x", "AgentDecision") is False
+
+    router = AgentRouterModel(Bare(), Bare())  # type: ignore[arg-type]
+    assert router.native_schema_supported("claude-x", "AgentDecision") is False
 
 
 def test_groq_max_completion_tokens_is_configurable(monkeypatch: pytest.MonkeyPatch) -> None:

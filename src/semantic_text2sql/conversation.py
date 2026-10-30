@@ -171,6 +171,10 @@ def resolve_semantic_contract(
             if old_period:
                 old_year = re.fullmatch(r"\d{4}", old_period)
                 old_end = str(int(old_period) + 1) if old_year else None
+                old_end_boundaries = (
+                    {old_end, f"{old_end}01", f"{old_end}-01-01", f"{old_end}/01/01"}
+                    if old_end else set()
+                )
                 for field in ("filters", "temporal_boundaries"):
                     values[field] = [
                         item for item in values[field]
@@ -180,7 +184,7 @@ def resolve_semantic_contract(
                                 str(item["value"]).startswith(old_period)
                                 or (old_end is not None
                                     and item["operator"] in {"<", "<="}
-                                    and str(item["value"]).startswith(old_end))
+                                    and str(item["value"]) in old_end_boundaries)
                             )
                         )
                     ]
@@ -199,9 +203,13 @@ def resolve_semantic_contract(
                 values["ranking_direction"] = "ASC"
             elif re.search(r"\b(top|highest|most|descending)\b", normalized):
                 values["ranking_direction"] = "DESC"
-            ranked = re.search(r"\bby\s+([\w.]+)", replacement, re.I)
+            ranked = re.search(
+                r"\bby\s+([\w.]+(?:\s+[\w.]+)*?)(?=\s+(?:in|for|where|between|"
+                r"during|with|per|and|ascending|descending)\b|[,.;!?]|$)",
+                replacement, re.I,
+            )
             if ranked:
-                values["ranked_metric"] = ranked.group(1)
+                values["ranked_metric"] = ranked.group(1).strip()
             limit_match = re.search(r"\b(?:top|bottom|first|last)\s+(\d+)\b", replacement, re.I)
             if limit_match:
                 values["limit"] = int(limit_match.group(1))
@@ -503,8 +511,13 @@ Previous resolved request: {previous.resolved_question}
 Previous accepted SQL: {previous.last_sql or "None"}
 Current message: {message}
 """
+    task_completion = getattr(completer, "complete_task", None)
     detailed = getattr(completer, "complete_detailed", None)
-    if callable(detailed):
+    if callable(task_completion):
+        raw, usage = await cast(Any, task_completion)(
+            model, prompt, "decision", json_mode=True,
+        )
+    elif callable(detailed):
         raw, usage = await cast(Any, detailed)(model, prompt)
     else:
         raw = await completer.complete(model, prompt)

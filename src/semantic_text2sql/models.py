@@ -5,13 +5,16 @@ from __future__ import annotations
 import os
 from typing import Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, computed_field, model_validator
 
+from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.sql_formatting import format_sql_for_display
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 GROQ_QWEN_MODEL = "qwen/qwen3.8-27b"
-ModelProvider = Literal["agentrouter", "groq", "justdowork", "codecraft", "true_sota"]
+ModelProvider = Literal[
+    "agentrouter", "groq", "justdowork", "codecraft", "true_sota", "openrouter"
+]
 
 
 class StrictModel(BaseModel):
@@ -45,7 +48,7 @@ class TableInfo(StrictModel):
 
 class SchemaInfo(StrictModel):
     db_id: str
-    dialect: Literal["sqlite", "postgres"] = "sqlite"
+    dialect: DatabaseDialect = "sqlite"
     tables: list[TableInfo]
     relationships: list[ForeignKeyInfo] = Field(default_factory=list)
 
@@ -130,7 +133,7 @@ class RelationshipProfile(StrictModel):
 
 class DatabaseProfile(StrictModel):
     db_id: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     profiled_at: str
     columns: list[ColumnProfile]
     tables: list[TableProfile] = Field(default_factory=list)
@@ -175,6 +178,7 @@ class TokenUsage(StrictModel):
     output_tokens: int | None = Field(default=None, ge=0)
     cache_read_tokens: int | None = Field(default=None, ge=0)
     cache_creation_tokens: int | None = Field(default=None, ge=0)
+    provider_retries: int = Field(default=0, ge=0)
 
     @property
     def total_tokens(self) -> int | None:
@@ -384,7 +388,7 @@ class VerifiedRelationship(StrictModel):
 
 class VerifiedContext(StrictModel):
     question: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     tables: dict[str, VerifiedTable] = Field(default_factory=dict)
     relationships: list[VerifiedRelationship] = Field(default_factory=list)
     business_context: str | None = None
@@ -483,6 +487,8 @@ class CallLedgerEntry(StrictModel):
     component: str
     kind: Literal["MODEL", "DATABASE", "TOOL"]
     status: Literal["SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]
+    task: str | None = None
+    retry_count: int | None = Field(default=None, ge=0)
     provider: str | None = None
     requested_model: str | None = None
     effective_model: str | None = None
@@ -581,9 +587,8 @@ class Attempt(StrictModel):
     normalized_sql: str
     validation: ValidationResult
     latency_ms: int = Field(ge=0)
-    validation_ms: int | None = Field(default=None, ge=0)
-    optimization_ms: int | None = Field(default=None, ge=0)
-    execution_ms: int | None = Field(default=None, ge=0)
+    validation_latency_ms: int | None = Field(default=None, ge=0)
+    execution_latency_ms: int | None = Field(default=None, ge=0)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
 
 
@@ -686,7 +691,7 @@ class VerifiedSchemaSnapshot(StrictModel):
     """Live schema/profile inspected once within a governed SQL request."""
 
     db_id: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     live_schema: SchemaInfo
     profile: DatabaseProfile | None = None
 
@@ -695,7 +700,7 @@ class GenerateRequest(StrictModel):
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     question: str = Field(min_length=1, max_length=4_000)
     evidence: str | None = Field(default=None, max_length=8_000)
-    dialect: Literal["sqlite", "postgres"] = "sqlite"
+    dialect: DatabaseDialect = "sqlite"
     provider: ModelProvider = "agentrouter"
     model: str = Field(default=DEFAULT_MODEL, min_length=1, max_length=200)
     max_attempts: int = Field(default=3, ge=1, le=3)
@@ -776,6 +781,10 @@ class ChatRequest(StrictModel):
     ] | None = None
     assistant_changes: list[RequestedChange] = Field(default_factory=list, max_length=10)
     assistant_original_question: str | None = Field(default=None, max_length=4_000)
+    # Request-local Top-layer handoff; not accepted from or serialized to API JSON.
+    _turn_state: ConversationState | None = PrivateAttr(default=None)
+    _turn_expected_version: int | None = PrivateAttr(default=None)
+    _history_source_run_id: str | None = PrivateAttr(default=None)
 
 
 class ConversationState(StrictModel):
@@ -978,6 +987,10 @@ class FilterValuesResponse(StrictModel):
     values: list[str] = Field(default_factory=list, max_length=100)
     more_available: bool = False
     cached: bool = False
+    provenance: str = "LIVE_BOUNDED_QUERY"
+    expires_in_seconds: int = 60
+    complete_domain: bool = False
+    ambiguous: bool = False
 
 
 class RecommendedChart(StrictModel):
@@ -1056,11 +1069,12 @@ class ChatResponse(StrictModel):
 
 
 class GenerateResponse(StrictModel):
+    execution_timestamp: float | None = None
     db_id: str
     question: str
     provider: ModelProvider
     model: str
-    dialect: Literal["sqlite", "postgres"] = "sqlite"
+    dialect: DatabaseDialect = "sqlite"
     strategy: StrategyHints
     schema_selection: SchemaSelection | None = None
     semantic_contract: SemanticContract | None = None
@@ -1097,14 +1111,14 @@ class GenerateResponse(StrictModel):
 class CheckRequest(StrictModel):
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     sql: str = Field(min_length=1, max_length=50_000)
-    dialect: Literal["sqlite", "postgres"] = "sqlite"
+    dialect: DatabaseDialect = "sqlite"
     execute: bool = False
     max_rows: int = Field(default=100, ge=1, le=500)
 
 
 class CheckResponse(StrictModel):
     db_id: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     validation: ValidationResult
     rows: list[list[Any]] = Field(default_factory=list)
     columns: list[str] = Field(default_factory=list)
@@ -1122,5 +1136,5 @@ class ModelOption(StrictModel):
 
 class DatabaseOption(StrictModel):
     db_id: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     configured: bool

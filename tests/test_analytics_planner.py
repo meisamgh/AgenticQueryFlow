@@ -15,6 +15,7 @@ from semantic_text2sql.analytics_planner import (
     refine_plan_with_model,
 )
 from semantic_text2sql.conversation import ConversationState
+from semantic_text2sql.models import TokenUsage
 from semantic_text2sql.runtime import RequestBudget
 from semantic_text2sql.visualization import parse_intent
 
@@ -320,3 +321,61 @@ def test_timeout_or_transport_failure_falls_back_cleanly() -> None:
 
     assert refined.source == "fallback"
     assert refined.operation == deterministic.operation
+
+
+def test_model_refinement_prefers_task_aware_json_mode() -> None:
+    class _TaskCompleter:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str, bool]] = []
+
+        async def complete_task(
+            self, model: str, prompt: str, task: str, *, json_mode: bool = False,
+        ) -> tuple[str, TokenUsage]:
+            self.calls.append((model, prompt, task, json_mode))
+            return (
+                json.dumps({
+                    "operation": "CHANGE_GRAIN_AND_VISUALIZE",
+                    "depends_on_previous": True,
+                    "requested_analysis": {"time_grain": "monthly"},
+                    "semantic_changes": [
+                        {
+                            "operation": "CHANGE_GRAIN",
+                            "target": "time_grain",
+                            "new_value": "monthly",
+                        },
+                    ],
+                    "visualization_intent": {"requested": True},
+                }),
+                TokenUsage(input_tokens=7, output_tokens=5),
+            )
+
+        async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            raise AssertionError("complete_task should take precedence")
+
+    previous = _previous(columns=["month", "consumption"])
+    deterministic = plan_analytics(
+        "Plot it per month.",
+        viz_intent=parse_intent("Plot it per month.", has_previous=True),
+        previous=previous,
+        db_id="books",
+    )
+    completer = _TaskCompleter()
+
+    refined, usage, _latency = asyncio.run(
+        refine_plan_with_model(
+            completer,
+            provider="groq",
+            model="mocked-model",
+            message="Plot it per month.",
+            previous=previous,
+            plan=deterministic,
+        )
+    )
+
+    assert refined.source == "model"
+    assert refined.requested_analysis.time_grain == "monthly"
+    assert usage.input_tokens == 7
+    assert completer.calls == [
+        ("mocked-model", completer.calls[0][1], "decision", True),
+    ]
+    assert "Plot it per month." in completer.calls[0][1]

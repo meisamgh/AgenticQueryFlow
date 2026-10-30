@@ -1,6 +1,22 @@
 /* Curated Lucide icon path data (ISC-licensed) rendered as inline SVG.
    Only these constant strings pass through innerHTML; user data never does. */
 const ICON_PATHS = {
+  'chart-heatmap':'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/><path d="M4 4h4v4H4zM10 10h4v4h-4zM16 16h4v4h-4z" fill="currentColor" stroke="none"/>',
+  'chart-treemap':'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M11 3v18M11 11h10M16 11v10"/>',
+  'chart-scatter':'<path d="M3 3v18h18"/><circle cx="7" cy="15" r="1"/><circle cx="10" cy="9" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="19" cy="5" r="1"/>',
+  'chart-bubble':'<circle cx="7" cy="15" r="3"/><circle cx="16" cy="7" r="4"/><circle cx="18" cy="17" r="2"/>',
+  'chart-area':'<path d="M3 3v18h18M4 18l5-9 5 5 6-8v12Z"/><path d="M4 18h16"/>',
+  'chart-step':'<path d="M3 3v18h18M5 17h4v-5h5V7h6"/>',
+  'chart-box':'<path d="M12 3v5m0 8v5M8 3h8M8 21h8"/><rect x="6" y="8" width="12" height="8" rx="1"/><path d="M6 12h12"/>',
+  'chart-donut':'<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="4"/><path d="M12 3v5m4 4h5"/>',
+  'chart-horizontal':'<path d="M3 3v18h18M7 6h12M7 11h8M7 16h4"/>',
+  'chart-stacked':'<path d="M3 3v18h18"/><rect x="7" y="8" width="4" height="10"/><rect x="15" y="4" width="4" height="14"/><path d="M7 13h4M15 10h4"/>',
+  'chart-calendar':'<rect x="3" y="5" width="18" height="16" rx="2"/><path d="M7 3v4M17 3v4M3 10h18M7 14h2m3 0h2m3 0h1M7 18h2m3 0h2"/>',
+  trash:'<path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/>',
+  'chart-line': '<path d="M3 3v18h18"/><path d="m6 15 4-5 4 3 6-8"/>',
+  'chart-bar': '<path d="M3 3v18h18"/><path d="M7 17v-5m5 5V7m5 10V4"/>',
+  'chart-pie': '<path d="M21 12a9 9 0 1 1-9-9v9Z"/><path d="M15 3v6h6a9 9 0 0 0-6-6Z"/>',
+  leaf: '<path d="M20 4c-9-1-16 3-16 9a7 7 0 0 0 7 7c6 0 10-7 9-16Z"/><path d="M3 21 15 9"/>',
   plus: '<path d="M5 12h14"/><path d="M12 5v14"/>',
   x: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',

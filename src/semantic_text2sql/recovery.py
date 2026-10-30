@@ -210,6 +210,8 @@ class RecoveryTools:
             f'SELECT DISTINCT "{column}" FROM "{table}" '
             f"WHERE LOWER(CAST(\"{column}\" AS TEXT)) {operator} LOWER('{sql_value}') LIMIT 10"
         )
+        if self.schema.dialect not in {"sqlite", "postgres"}:
+            sql = parse_one(sql, read="postgres").sql(dialect=self.schema.dialect)
         result = self.query_database(sql, allowed_tables=allowed_tables)
         return {
             "evidence_type": "VALUE_PROBE",

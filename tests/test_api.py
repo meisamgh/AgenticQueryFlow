@@ -462,6 +462,7 @@ def test_model_catalog_contains_configured_remote_providers(monkeypatch) -> None
     monkeypatch.setenv("JUSTDOWORK_API_KEY", "configured-key")
     monkeypatch.setenv("JUSTDOWORK_BASE_URL", "https://justdowork.test/v1")
     monkeypatch.setenv("CODECRAFT_API_KEY", "configured-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "configured-key")
 
     options = TestClient(create_app()).get("/api/models").json()
     assert {item["provider"] for item in options} == {
@@ -470,6 +471,7 @@ def test_model_catalog_contains_configured_remote_providers(monkeypatch) -> None
         "justdowork",
         "codecraft",
         "true_sota",
+        "openrouter",
     }
     agentrouter = [item for item in options if item["provider"] == "agentrouter"]
     assert [item["model"] for item in agentrouter] == [
@@ -486,6 +488,9 @@ def test_model_catalog_contains_configured_remote_providers(monkeypatch) -> None
     ]
     assert [item["model"] for item in options if item["provider"] == "codecraft"] == [
         "claude-opus-5"
+    ]
+    assert [item["model"] for item in options if item["provider"] == "openrouter"] == [
+        "nvidia/nemotron-3-ultra-550b-a55b:free"
     ]
 
 
@@ -514,6 +519,8 @@ def test_public_post_surface_contains_only_current_workflow() -> None:
         "/api/check",
         "/api/chat",
         "/api/chat/jobs",
+        "/api/results/page",
+        "/api/results/inspect",
         "/api/sql/diff",
         "/api/voice/transcribe",
         "/api/history/{run_id}/continue",
@@ -580,9 +587,8 @@ def test_web_chat_application_is_served() -> None:
     assert 'class="technical-details"' not in page.text
     tokens_position = page.text.index('id="tokensContent"')
     assert 'id="pipelineContent"' in page.text
-    attempts_position = script.text.index('class="attempts-panel')
     assert 'class="attempts-panel' not in page.text
-    assert attempts_position > 0
+    assert 'class="attempts-panel' not in script.text
     # The inspector (with token and pipeline details) is defined before the
     # answer template in the document, and the answer keeps only its own
     # closable panels inline.

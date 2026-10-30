@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Any, Literal, cast
 
 from semantic_text2sql.analytics_planner import plan_analytics
@@ -30,9 +31,11 @@ from semantic_text2sql.visualization import (
     requested_plot_columns,
 )
 from semantic_text2sql.visualization_recommender import (
+    LLMChartProposal,
     materialize_recommendation,
     recommend_charts,
     refine_charts_with_model,
+    validate_chart_proposal,
 )
 
 PlotStatus = Literal[
@@ -90,6 +93,7 @@ async def design_chart(
     db_id: str | None = None,
     fresh_result: bool = False,
     changes: list[RequestedChange] | None = None,
+    provisional_proposal: LLMChartProposal | None = None,
 ) -> PlottingOutcome:
     """Design from the exact accepted rows; never rerun SQL or invent values."""
     generation = result.generation if result is not None else None
@@ -97,7 +101,10 @@ async def design_chart(
         return PlottingOutcome("REQUERY_REQUIRED", "No accepted result is available to plot.")
     if generation.truncated or generation.row_count != len(generation.rows):
         return PlottingOutcome(
-            "REQUERY_REQUIRED", "The accepted result is incomplete; a new governed query is needed."
+            "REQUERY_REQUIRED",
+            f"Only {len(generation.rows)} rows are retained, and this is not the complete result. "
+            "I cannot chart it accurately yet. Request a summary by date or category, "
+            "or narrow the requested period, so the complete result can be plotted.",
         )
     selected_dimensions = [
         str(item.new_value or item.target) for item in changes or []
@@ -224,6 +231,54 @@ async def design_chart(
         and _type_only_chart_change(objective, generation.columns, prior, changes)
     )
 
+    if preserve_encodings and prior is not None:
+        # The Top layer has already selected the visualization tool. This is
+        # execution of that decision, not another natural-language router.
+        # Rebuild through the existing validator instead of trusting a copied
+        # ChartSpec or paying a model to reselect identical encodings.
+        try:
+            spec = plan_chart(
+                intent.model_copy(update={
+                    "x": prior.x, "x_components": list(prior.x_components),
+                    "y": prior.y, "y_measures": list(prior.y_measures),
+                    "series": prior.series, "size": prior.size,
+                }),
+                question="", columns=generation.columns, rows=generation.rows,
+                truncated=False,
+            )
+        except VisualizationError as exc:
+            return PlottingOutcome("UNSUPPORTED", str(exc))
+        return PlottingOutcome(
+            "CHART_READY", "Applied the chart type to the accepted encodings.", spec=spec,
+        )
+
+    proposal_ledger: tuple[CallLedgerEntry, ...] = ()
+    if provisional_proposal is not None:
+        validation_started = perf_counter()
+        candidate = validate_chart_proposal(
+            provisional_proposal, columns=generation.columns, rows=generation.rows,
+            question=objective, truncated=False, score=1.0,
+            required_chart_type=intent.chart_type if intent.explicit_type else None,
+            previous_chart=prior, preserve_previous_encodings=preserve_encodings,
+        )
+        proposal_ledger = (CallLedgerEntry(
+            component="chart_proposal_validation", kind="TOOL",
+            status="SUCCEEDED" if candidate is not None else "FAILED",
+            latency_ms=int((perf_counter() - validation_started) * 1000),
+        ),)
+        if candidate is not None:
+            spec = materialize_recommendation(
+                candidate, question=objective, columns=generation.columns,
+                rows=generation.rows, truncated=False,
+            )
+            return PlottingOutcome(
+                "CHART_READY", "Validated the Top-layer chart proposal against executed data.",
+                spec=spec, recommendations=ChartRecommendations(
+                    primary_chart=candidate, alternative_charts=[],
+                ),
+                ledger=proposal_ledger,
+            )
+
     # The dedicated model sees a bounded profile/sample, not the full result;
     # its proposal is always rechecked against every executed row.
     calls_before = budget.model_calls
@@ -240,9 +295,15 @@ async def design_chart(
         previous_chart=prior,
         chart_changes=changes,
         preserve_previous_encodings=preserve_encodings,
+        analytical_context={
+            "complete": True,
+            "result_id": result.result_id if result is not None else None,
+            "grain": list(previous.semantic_contract.grain)
+            if previous and previous.semantic_contract else [],
+        },
     )
     model_called = budget.model_calls > calls_before
-    ledger = (
+    ledger = proposal_ledger + ((
         CallLedgerEntry(
             component="plotting_model",
             kind="MODEL",
@@ -254,7 +315,7 @@ async def design_chart(
             output_tokens=usage.output_tokens,
             latency_ms=latency_ms,
         ),
-    ) if model_called else ()
+    ) if model_called else ())
     if recommendations is not None:
         try:
             spec = materialize_recommendation(

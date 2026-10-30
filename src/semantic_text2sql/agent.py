@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 from collections import Counter
 from collections.abc import Callable, Iterable
 from statistics import median
-from time import perf_counter_ns
+from time import perf_counter_ns, time
 
 from sqlglot import exp, parse_one
 from sqlglot.errors import ParseError
@@ -69,7 +70,10 @@ class TextToSQLAgent:
     def _database(self, dialect: str) -> DatabaseRegistry | PostgresRegistry:
         if dialect == "sqlite":
             return self.registry
-        if dialect == "postgres" and self.postgres is not None:
+        if (
+            dialect in {"postgres", "mysql", "tsql", "snowflake", "bigquery"}
+            and self.postgres is not None
+        ):
             return self.postgres
         raise DatabaseError("DATABASE_DIALECT_UNAVAILABLE", f"{dialect} is not configured.")
 
@@ -82,11 +86,32 @@ class TextToSQLAgent:
         if budget:
             budget.claim("database")
         schema = database.inspect(request.db_id)
+        if allowed_columns is not None:
+            live_columns = {table.name.casefold(): {c.name.casefold() for c in table.columns}
+                            for table in schema.tables}
+            allowed_columns = {
+                table: {column for column in names
+                        if column.casefold() in live_columns.get(table.casefold(), set())}
+                for table, names in allowed_columns.items()
+            }
         sql = clean_model_sql(request.sql)
         validation = validate_sql(
             sql, schema, dialect=request.dialect,
             allowed_tables=allowed_tables, allowed_columns=allowed_columns,
         )
+        if validation.valid and allowed_columns is not None:
+            root = parse_one(sql, read=request.dialect)
+            wildcard = any(isinstance(item, exp.Star) for select in root.find_all(exp.Select)
+                           for item in select.expressions)
+            if wildcard and any(
+                not {c.name.casefold() for c in table.columns}.issubset(
+                    {c.casefold() for c in allowed_columns.get(table.name, set())}
+                ) for table in schema.tables if table.name in validation.tables
+            ):
+                validation = validation.model_copy(update={
+                    "valid":False, "code":"SQL_COLUMN_NOT_AUTHORIZED",
+                    "message":"Wildcard output exceeds the saved authorized column scope.",
+                })
         if not validation.valid or not request.execute:
             return CheckResponse(
                 db_id=request.db_id,
@@ -327,7 +352,6 @@ class TextToSQLAgent:
                                     validation.explain_plan,
                                     max_rows=max(request.max_rows, 1_000),
                                     budget=budget,
-                                    already_warmed=True,
                                 )
                             ).model_copy(update={"optimizer": "sqlglot"})
                             if optimization_evidence.status == "optimized":
@@ -418,8 +442,8 @@ class TextToSQLAgent:
                         "semantic_findings": findings,
                     }
                 )
-            validation_ms = round((perf_counter_ns() - validation_started) / 1_000_000)
-            optimization_started = perf_counter_ns()
+            validation_latency_ms = round((perf_counter_ns() - validation_started) / 1_000_000)
+            execution_latency_ms: int | None = None
             if validation.valid and request.optimization_required and request.previous_sql:
                 validation = await asyncio.to_thread(
                     _validate_result_equivalence,
@@ -442,7 +466,6 @@ class TextToSQLAgent:
                     validation.explain_plan,
                     max_rows=max(request.max_rows, 1_000),
                     budget=budget,
-                    already_warmed=True,
                 )
                 optimization_evidence = measured_optimization
                 if measured_optimization.status != "optimized":
@@ -502,7 +525,6 @@ class TextToSQLAgent:
                                     candidate_validation.explain_plan,
                                     max_rows=max(request.max_rows, 1_000),
                                     budget=budget,
-                                    already_warmed=True,
                                 )
                             ).model_copy(update={"optimizer": "sqlglot"})
                             optimization_evidence = candidate_evidence
@@ -532,8 +554,6 @@ class TextToSQLAgent:
                         result_equivalent=False,
                         selected_sql="baseline",
                     )
-            optimization_ms = round((perf_counter_ns() - optimization_started) / 1_000_000)
-            execution_ms: int | None = None
             if validation.valid and request.execute:
                 if progress:
                     progress("execution")
@@ -552,7 +572,10 @@ class TextToSQLAgent:
                             "message": f"Read-only execution failed: {error}",
                         }
                     )
-                execution_ms = round((perf_counter_ns() - execution_started) / 1_000_000)
+                finally:
+                    execution_latency_ms = round(
+                        (perf_counter_ns() - execution_started) / 1_000_000
+                    )
             attempts.append(
                 Attempt(
                     number=number,
@@ -560,9 +583,8 @@ class TextToSQLAgent:
                     normalized_sql=normalized,
                     validation=validation,
                     latency_ms=latency,
-                    validation_ms=validation_ms,
-                    optimization_ms=optimization_ms,
-                    execution_ms=execution_ms,
+                    validation_latency_ms=validation_latency_ms,
+                    execution_latency_ms=execution_latency_ms,
                     token_usage=usage,
                 )
             )
@@ -589,8 +611,8 @@ class TextToSQLAgent:
                     progress=progress,
                     allowed_tables=[table.name for table in retrieved_schema.tables],
                     completer=self.model,
-                    provider=request.provider,
-                    model=request.model,
+                    provider=os.environ.get("TEXT2SQL_RECOVERY_PROVIDER") or request.provider,
+                    model=os.environ.get("TEXT2SQL_RECOVERY_MODEL") or request.model,
                     budget=budget,
                 )
                 if recovery_trace.agent_action in {"INFORM", "ESCALATE"}:
@@ -636,6 +658,7 @@ class TextToSQLAgent:
                     sql=request.previous_sql,
                     accepted=True,
                     execution_status="ACCEPTED",
+                    execution_timestamp=time(),
                     attempts=attempts,
                     rows=baseline_rows,
                     columns=baseline_columns,
@@ -682,6 +705,7 @@ class TextToSQLAgent:
                     sql=request.previous_sql,
                     accepted=True,
                     execution_status="ACCEPTED",
+                    execution_timestamp=time(),
                     attempts=attempts,
                     rows=baseline_rows,
                     columns=baseline_columns,
@@ -749,6 +773,7 @@ class TextToSQLAgent:
             sql=final_sql,
             accepted=True,
             execution_status="ACCEPTED" if request.execute else "SAFETY_VALIDATED",
+            execution_timestamp=time() if request.execute else None,
             attempts=attempts,
             rows=rows,
             columns=columns,
@@ -848,7 +873,7 @@ def _validate_result_equivalence(
                 ),
             }
         )
-    ordered = _has_meaningful_order(baseline_sql, dialect=validation_dialect(database))
+    ordered = _has_meaningful_order(baseline_sql, dialect=validation_dialect(database, db_id))
     same_rows = (
         _normalized_rows(baseline_rows) == _normalized_rows(candidate_rows)
         if ordered
@@ -894,16 +919,14 @@ def _benchmark_optimization(
     max_rows: int,
     repetitions: int = 1,
     budget: RequestBudget | None = None,
-    already_warmed: bool = False,
 ) -> OptimizationEvidence:
     """Benchmark equivalent queries alternately; retain baseline unless improvement is material."""
-    if not already_warmed:
-        if budget is not None:
-            budget.claim("database")
-        database.execute(db_id, baseline_sql, max_rows=max_rows)
-        if budget is not None:
-            budget.claim("database")
-        database.execute(db_id, candidate_sql, max_rows=max_rows)
+    if budget is not None:
+        budget.claim("database")
+    database.execute(db_id, baseline_sql, max_rows=max_rows)
+    if budget is not None:
+        budget.claim("database")
+    database.execute(db_id, candidate_sql, max_rows=max_rows)
     baseline_times: list[float] = []
     candidate_times: list[float] = []
 
@@ -947,8 +970,8 @@ def _has_meaningful_order(sql: str, *, dialect: str) -> bool:
         return True
 
 
-def validation_dialect(database: DatabaseRegistry | PostgresRegistry) -> str:
-    return "postgres" if isinstance(database, PostgresRegistry) else "sqlite"
+def validation_dialect(database: DatabaseRegistry | PostgresRegistry, db_id: str = "") -> str:
+    return database.dialect_for(db_id) if isinstance(database, PostgresRegistry) else "sqlite"
 
 
 def _normalized_rows(rows: list[list[object]]) -> list[tuple[object, ...]]:

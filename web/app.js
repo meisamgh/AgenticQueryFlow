@@ -5,7 +5,7 @@ localStorage.setItem("queryRoomSession", sessionId);
 const state = {
   busy: false, jobId: null, cancelled: false, currentQuestion: "", ready: false,
   lastBody: null, history: [], saved: [], glossaryByDb: {}, schemaRequest: 0,
-  activeRunId: null, diffCache: new Map(), modelConfig: null,
+  activeRunId: null, branchFromRunId: null, diffCache: new Map(), modelConfig: null,
   restorePending: false,
 };
 let voiceInput = null;
@@ -63,6 +63,11 @@ async function api(path, options = {}) {
 
 async function initialize() {
   hydrateIcons();
+  if (window.matchMedia("(max-width: 760px)").matches) {
+    document.body.classList.add("sidebar-collapsed");
+    $("#sidebarToggle").setAttribute("aria-expanded", "false");
+    $(".sidebar").inert = true;
+  }
   try {
     await api("/api/health");
     setHealth(true);
@@ -300,7 +305,8 @@ function appendUser(message) {
   const question = document.createElement("p");
   question.className = "question-text";
   question.textContent = message;
-  article.append(speaker, question);
+  speaker.append(question);
+  article.append(speaker);
   $("#messages").append(article);
 }
 
@@ -405,8 +411,6 @@ function updatePipeline(progress, currentStage, jobStatus, events = [], response
   events.forEach((event) => seen.add(visiblePipelineStage(event.stage)));
   if (progress.dataset.activeStage && progress.dataset.activeStage !== visibleStage) seen.add(progress.dataset.activeStage);
   seen.add(visibleStage);
-  const resultAccepted = jobStatus === "completed" && response?.generation?.accepted === true;
-  if (resultAccepted) seen.add("result_review");
   progress.dataset.activeStage = visibleStage;
   progress.dataset.seenStages = JSON.stringify([...seen]);
   progress.querySelectorAll(".pipeline-tracker span").forEach((step) => {
@@ -414,9 +418,11 @@ function updatePipeline(progress, currentStage, jobStatus, events = [], response
       && (jobStatus === "completed" || step.dataset.stage !== visibleStage);
     step.classList.toggle("complete", completed);
     step.classList.toggle("active", jobStatus !== "completed" && step.dataset.stage === visibleStage);
-    const recoverySkipped = resultAccepted && step.dataset.stage === "recovery" && !seen.has("recovery");
+    const recoverySkipped = jobStatus === "completed"
+      && ["recovery", "result_review"].includes(step.dataset.stage)
+      && !seen.has(step.dataset.stage);
     step.classList.toggle("skipped", recoverySkipped);
-    if (recoverySkipped) step.title = "Not needed — the query succeeded without recovery";
+    if (recoverySkipped) step.title = "Not called during this request";
   });
 }
 
@@ -445,7 +451,9 @@ async function send(message, feedbackCategory = null) {
         session_id: sessionId,
         db_id: $("#databaseSelect").value,
         message: message.trim(),
-        parent_run_id: state.activeRunId,
+        // An ordinary follow-up uses the accepted in-memory result. A parent
+        // run is sent only after an explicit historical Continue action.
+        parent_run_id: state.branchFromRunId,
         execute: true,
         // Keep the bounded full result available in server RAM for a later "Plot it".
         max_rows: 500,
@@ -457,7 +465,9 @@ async function send(message, feedbackCategory = null) {
     const body = await waitForJob(created.job_id, progress);
     progress.remove();
     state.activeRunId = body.history_saved ? body.run_id : null;
-    await appendAssistant(body, (performance.now() - started) / 1000);
+    state.branchFromRunId = null;
+    await appendAssistant(body, (performance.now() - started) / 1000,
+      {question: message.trim()});
     void refreshHistory();
     return body;
   } catch (error) {
@@ -777,14 +787,14 @@ function renderSemanticChips(fragment, body) {
     strip.append(more);
   }
 }
-function attachResultInvestigations(table, body) {
+function attachResultInvestigations(table, body, displayedRows = body.generation?.rows || []) {
   const cols = body.generation?.columns || [];
-  const rows = body.generation?.rows || [];
   const actual = table?.tBodies?.[0];
   if (!actual || !cols.length) return;
   Array.from(actual.rows).forEach((tr, r) => {
+    if (tr.dataset.spacer) return;
     Array.from(tr.cells).forEach((cell, c) => {
-      const value = rows[r]?.[c], column = cols[c];
+      const value = displayedRows[Number(tr.dataset.rowIndex ?? r)]?.[c], column = cols[c];
       if (value == null || !column) return;
       cell.classList.add("investigable-cell");
       cell.tabIndex = 0;
@@ -848,6 +858,8 @@ function renderChartInto(slot, presentation, generation) {
     get renderer() { return active?.renderer; },
     onSelect(callback) { selectionCallbacks.push(callback); active?.onSelect?.(callback); },
     onZoom(callback) { zoomCallbacks.push(callback); active?.onZoom?.(callback); },
+    highlightSeries(name) { active?.highlightSeries?.(name); },
+    highlightPoint(point) { active?.highlightPoint?.(point); },
     resetZoom() { active?.resetZoom?.(); },
     resize() { active?.resize?.(); },
     getDataURL(options) { return active?.getDataURL?.(options); },
@@ -866,7 +878,8 @@ function renderChartInto(slot, presentation, generation) {
     } else {
       const note = document.createElement("p");
       note.className = "chart-note";
-      note.textContent = "Interactive chart unavailable. The exact rows remain in Data.";
+      note.textContent = "This chart could not be displayed. Open Data to inspect the results, or choose another chart.";
+      note.setAttribute?.("role", "status");
       slot.append(note);
     }
   };
@@ -884,7 +897,8 @@ function renderChartInto(slot, presentation, generation) {
   }
   const note = document.createElement("p");
   note.className = "chart-note";
-  note.textContent = "Interactive charts are unavailable. SQL and the exact result table remain in their tabs.";
+  note.textContent = "This chart could not be displayed. Your results and SQL are still available in their tabs.";
+  note.setAttribute?.("role", "status");
   slot.append(note);
   return { echarts: null };
 }
@@ -897,14 +911,20 @@ function setResponseTab(article, view) {
   const split = article.querySelector(".sql-result-split");
   const sqlPane = article.querySelector(".sql-panel-pane");
   const dataPane = article.querySelector(".result-panel-pane");
+  const mapPane = article.querySelector(".map-panel-pane");
   if (!tabs || tabs.hidden || !answerPane || !split || !sqlPane || !dataPane) return;
   const button = tabs.querySelector(`[data-response-tab="${view}"]`);
   if (!button || button.disabled) return;
+  const oldView = article.dataset.activeResponseTab;
+  article._tabScroll ||= {};
+  if (oldView) article._tabScroll[oldView] = article.querySelector(oldView === "sql"
+    ? ".sql-editor" : oldView === "data" ? ".table-wrap" : ".answer-tab-panel")?.scrollTop || 0;
   article.dataset.activeResponseTab = view;
   answerPane.hidden = view !== "answer";
   split.hidden = view === "answer";
   sqlPane.hidden = view !== "sql";
   dataPane.hidden = view !== "data";
+  if (mapPane) mapPane.hidden = view !== "map";
   const versions = article.querySelector(".versions-panel");
   if (versions) versions.hidden = view !== "sql" || versions.dataset.available !== "true";
   tabs.querySelectorAll("[data-response-tab]").forEach((tab) => {
@@ -912,19 +932,26 @@ function setResponseTab(article, view) {
     tab.setAttribute("aria-selected", String(active));
     tab.tabIndex = active ? 0 : -1;
   });
-  if (view === "answer") window.requestAnimationFrame?.(() => article._echart?.resize?.());
+  if (view === "map") article._renderMap?.();
+  const scrollPane = article.querySelector(view === "sql" ? ".sql-editor"
+    : view === "data" ? ".table-wrap" : ".answer-tab-panel");
+  if (scrollPane) scrollPane.scrollTop = article._tabScroll[view] || 0;
+  window.requestAnimationFrame?.(() => article._echart?.resize?.());
 }
 
-function wireResponseTabs(article, available = {sql: true, data: true}) {
+function wireResponseTabs(article, available = {answer: true, sql: true, data: true, map: false}) {
   const tabs = article.querySelector(".response-tabs");
   if (!tabs) return;
   tabs.hidden = false;
   const group = `response-tabs-${++responseTabSequence}`;
   tabs.querySelectorAll("[data-response-tab]").forEach((tab) => {
     const view = tab.dataset.responseTab;
+    tab.hidden = !available[view];
     tab.id = `${group}-${view}`;
-    tab.disabled = view !== "answer" && !available[view];
-    const panel = article.querySelector(view === "answer" ? ".answer-tab-panel" : `.${view === "sql" ? "sql-panel-pane" : "result-panel-pane"}`);
+    tab.disabled = !available[view];
+    const panel = article.querySelector(view === "sql" ? ".sql-panel-pane"
+      : view === "map" ? ".map-panel-pane" : view === "answer"
+      ? ".answer-tab-panel" : ".result-panel-pane");
     if (panel) {
       panel.id = `${group}-${view}-panel`;
       panel.setAttribute("aria-labelledby", tab.id);
@@ -934,97 +961,87 @@ function wireResponseTabs(article, available = {sql: true, data: true}) {
     tab.addEventListener("keydown", (event) => {
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
       event.preventDefault();
-      const enabled = [...tabs.querySelectorAll("[data-response-tab]:not(:disabled)")];
+      const enabled = [...tabs.querySelectorAll("[data-response-tab]:not(:disabled)")]
+        .filter(item => !item.hidden);
       const next = enabled[(enabled.indexOf(tab) + (event.key === "ArrowRight" ? 1 : enabled.length - 1)) % enabled.length];
       setResponseTab(article, next.dataset.responseTab);
       next.focus();
     });
   });
-  setResponseTab(article, "answer");
+  setResponseTab(article, available.answer ? "answer" : available.data ? "data" : "sql");
 }
 
-/* Data scope is presentation state only; neither tab runs a query. */
-function wireDataScope(article, generation) {
+/* The Data tab always shows exact executed rows; chart display filters never
+   rewrite this table or the accepted SQL. */
+function wireDataScope(article, generation, response) {
   const pane = article.querySelector(".result-panel-pane");
   if (!pane) return;
-  const sourceTab = pane.querySelector(".data-source-tab");
-  const visibleTab = pane.querySelector(".data-visible-tab");
-  const note = pane.querySelector(".data-scope-note");
   const wrap = pane.querySelector(".table-wrap");
-  let sourceRows = generation.rows || [];
-  const columns = generation.columns || [];
+  const sourceRows = generation.rows || [];
   article._visibleChartSpec = null;
-  /* Unified chart-view display filters (chartViewState concept): narrows the
-     visible chart and the Visible Chart Data tab only. The Source Data tab
-     and the accepted SQL are immutable; SQL-backed filters go through the
-     normal validated pipeline instead of touching this state. */
-  let clientFilters = [];
-  function allowedValues(filter) {
-    return filter.values && filter.values.length
-      ? filter.values.map(String) : [String(filter.value ?? "")];
+  article._refreshDataScope = () => {};
+  article._setClientFilter = filter => article._setChartViewRowFilters?.([filter]);
+  article._setClientFilters = filters => article._setChartViewRowFilters?.(filters);
+  article._clearClientFilter = () => article._setChartViewRowFilters?.([]);
+  article._hasClientFilter = () => false;
+  renderTable(wrap, generation.columns || [], sourceRows, {
+    units: response.presentation?.chart_spec?.measure_units || {},
+    temporal: response.presentation?.chart_spec?.time_format
+      && response.presentation.chart_spec.time_format !== "raw"
+      && response.presentation.chart_spec.x
+      ? {
+          column: response.presentation.chart_spec.x,
+          time_format: response.presentation.chart_spec.time_format,
+        }
+      : null,
+    truncated: Boolean(generation.truncated || generation.row_count > sourceRows.length),
+    onPageRendered: (table, pageRows) => attachResultInvestigations(
+      table, {generation, run_id: article.dataset.runId}, pageRows),
+    onPageError: error => showError(error.message),
+    loadPage: generation.truncated && response.result_id ? async (offset, pageSize) => {
+      const page = await api("/api/results/page", {
+        method: "POST",
+        body: JSON.stringify({
+          session_id: response.session_id, db_id: generation.db_id,
+          result_id: response.result_id, offset, page_size: pageSize,
+        }),
+      });
+      if (page.result_id !== response.result_id ||
+          JSON.stringify(page.columns) !== JSON.stringify(generation.columns)) {
+        throw new Error("The result changed. Run the question again.");
+      }
+      return {rows: page.rows, has_more: page.has_more,
+        limit_reached: page.limit_reached};
+    } : null,
+  });
+  const expand = pane.querySelector(".table-expand");
+  if (expand) {
+    expand.addEventListener("click", () => {
+      pane.classList.toggle("table-fullscreen");
+      expand.setAttribute("aria-label", pane.classList.contains("table-fullscreen")
+        ? "Close expanded table" : "Expand table");
+    });
+    document.addEventListener("keydown", event => {
+      if (event.key === "Escape" && pane.classList.contains("table-fullscreen")) {
+        pane.classList.remove("table-fullscreen");
+        expand.setAttribute("aria-label", "Expand table");
+      }
+    });
   }
-  function applyClientFilters(rows, filters = clientFilters) {
-    if (!filters.length || generation.truncated) return rows;
-    const filtered = rows.filter(row => filters.every(filter => {
-      const index = columns.indexOf(filter.column);
-      if (index < 0) return true;
-      return allowedValues(filter).includes(String(row[index]));
-    }));
-    return filtered;
-  }
-  function filterNoteText() {
-    return clientFilters.map(filter => {
-      const allowed = allowedValues(filter);
-      const value = allowed.length <= 3 ? allowed.join(" | ") : `${allowed.length} values`;
-      return `${filter.column} = ${value}`;
-    }).join(", ");
-  }
-  function setClientFilters(filters) {
-    clientFilters = filters;
-    if (filters.length && !generation.truncated) scope = "visible";
-    /* One shared controller: the ECharts view updates through the same row
-       filters; the Data tab re-renders; Source Data stays the original rows. */
-    article._setChartViewRowFilters?.(filters);
-    renderScope();
-  }
-  let scope = "source";
-  function renderScope() {
-    const visible = scope === "visible" && !generation.truncated
-      && (article._visibleChartSpec || clientFilters.length);
-    const spec = article._visibleChartSpec;
-    const shownColumns = visible && spec?.transformation && spec.transformation !== "none"
-      ? Object.keys(spec.data[0] || {}) : columns;
-    /* Source Data is the original executed result, never a filtered copy. */
-    const rows = visible
-      ? spec ? spec.data.map(row => shownColumns.map(column => row[column] ?? null))
-        : applyClientFilters(sourceRows)
-      : sourceRows;
-    wrap.replaceChildren();
-    renderTable(wrap, shownColumns, rows);
-    if (!visible) {
-      const table = wrap.querySelector("table");
-      if (table) { table.className = "result-grid"; attachResultInvestigations(table, {generation, run_id: article.dataset.runId}); }
-    }
-    const filterNote = visible && clientFilters.length && !generation.truncated
-      ? ` · row filter: ${filterNoteText()} (display only)`
-      : "";
-    note.textContent = visible
-      ? spec
-        ? `${rows.length} visible chart rows · X: ${spec.x} · Y: ${(spec.y_measures || [spec.y]).join(", ")}${filterNote}`
-        : `${rows.length} visible rows · display filter: ${filterNoteText()} · SQL unchanged`
-      : `${sourceRows.length} of ${generation.row_count ?? sourceRows.length} returned rows (source result, unfiltered)${generation.truncated ? " · preview only; source result truncated" : " · complete within the executed row limit"}`;
-    sourceTab.setAttribute("aria-selected", String(!visible));
-    visibleTab.setAttribute("aria-selected", String(Boolean(visible)));
-    visibleTab.disabled = !spec && !clientFilters.length;
-  }
-  sourceTab.addEventListener("click", () => { scope = "source"; renderScope(); });
-  visibleTab.addEventListener("click", () => { scope = "visible"; renderScope(); });
-  article._refreshDataScope = renderScope;
-  article._setClientFilter = filter => setClientFilters([filter]);
-  article._setClientFilters = setClientFilters;
-  article._clearClientFilter = () => setClientFilters([]);
-  article._hasClientFilter = () => clientFilters.length > 0;
-  renderScope();
+}
+
+function mapCoordinates(columns, rows, requested, truncated) {
+  if (!requested || truncated) return null;
+  const latitude = columns.findIndex(name => /^(?:lat|latitude)$/i.test(name));
+  const longitude = columns.findIndex(name => /^(?:lon|lng|long|longitude)$/i.test(name));
+  if (latitude < 0 || longitude < 0) return null;
+  const points = rows.filter(row => typeof row[latitude] === "number"
+    && typeof row[longitude] === "number"
+    && Number.isFinite(row[latitude]) && Number.isFinite(row[longitude])
+    && Math.abs(row[latitude]) <= 90 && Math.abs(row[longitude]) <= 180);
+  return points.length === rows.length && points.length ? {
+    lat: points.map(row => row[latitude]), lon: points.map(row => row[longitude]),
+  } : null;
 }
 
 function wireChartSection(article, presentation, generation, runId, recommendations = null) {
@@ -1032,10 +1049,16 @@ function wireChartSection(article, presentation, generation, runId, recommendati
   const slot = article.querySelector(".chart-slot");
   if (!section || !slot) return;
   const kinds = section.querySelector(".chart-kinds");
+  section.querySelector(".chart-tools")?.prepend(kinds);
   const more = section.querySelector(".chart-more");
   const menu = section.querySelector(".chart-menu");
   const explorer = window.QueryflowChartExplorer;
   const original = presentation.chart_spec;
+  const stableTypeOrder = [...new Set([
+    recommendations?.primary_chart?.chart_type,
+    ...(recommendations?.alternative_charts || []).map(item=>item.chart_type),
+    ...(explorer?.choices(original) || []),
+  ].filter(Boolean))];
   const settingKey = runId ? `queryflow-chart-${runId}` : null;
   let stored = null;
   try { stored = settingKey ? JSON.parse(sessionStorage.getItem(settingKey) || "null") : null; }
@@ -1082,7 +1105,9 @@ function wireChartSection(article, presentation, generation, runId, recommendati
     chartPres.chart_spec = next;
     article._visibleChartSpec = next;
     article._refreshDataScope?.();
-    section.querySelector(".chart-sub").textContent = next.chart_type.replaceAll("_", " ");
+    const subtitle = section.querySelector(".chart-sub");
+    subtitle.textContent = (next.warnings || []).join(" · ");
+    subtitle.hidden = !subtitle.textContent;
     article._echart = renderChartInto(slot, chartPres, generation).echarts;
     article._echart?.onZoom?.(range => {
       settings.zoom = range;
@@ -1090,44 +1115,60 @@ function wireChartSection(article, presentation, generation, runId, recommendati
     });
     attachChartInvestigations(article, chartPres, runId);
     const zoomActions = section.querySelector(".chart-zoom-actions");
-    zoomActions.hidden = new Set(next.data.map(row => String(row[next.x]))).size <= 2;
+    zoomActions.hidden = true;
     const zoomGuide = section.querySelector(".chart-zoom-guide");
-    zoomGuide.hidden = !(article._echart?.renderer === "plotly"
-      && next.time_format && next.time_format !== "raw"
-      && ["line", "multi_line", "step_line", "area", "stacked_area"].includes(next.chart_type)
-      && new Set(next.data.map(row => String(row[next.x]))).size > 1);
+    zoomGuide.hidden = true;
     kinds.replaceChildren();
     if (explorer) {
       const recommended = [recommendations?.primary_chart, ...(recommendations?.alternative_charts || [])]
         .filter(item => item && explorer.choices(next).includes(item.chart_type));
-      const recommendedTypes = [...new Set(recommended.map(item => item.chart_type))];
-      const types = [...recommendedTypes, ...explorer.choices(next).filter(type => !recommendedTypes.includes(type))];
+      const types = explorer.orderedChoices(next,stableTypeOrder,original.chart_type);
+      const picker = document.createElement("details");
+      picker.className = "chart-choice";
+      picker.addEventListener("keydown", event => {
+        if (event.key === "Escape") { picker.open = false; summary.focus(); }
+      });
+      const summary = document.createElement("summary");
+      const chartSymbol = type => ({heatmap:"chart-heatmap",treemap:"chart-treemap",
+        scatter:"chart-scatter",bubble:"chart-bubble",area:"chart-area",stacked_area:"chart-area",
+        step_line:"chart-step",box:"chart-box",donut:"chart-donut",pie:"chart-pie",
+        horizontal_bar:"chart-horizontal",stacked_bar:"chart-stacked",percent_stacked_bar:"chart-stacked",
+        calendar_heatmap:"chart-calendar",bar:"chart-bar",grouped_bar:"chart-bar",histogram:"chart-bar"})[type] || "chart-line";
+      summary.innerHTML = icon(chartSymbol(next.chart_type), 19);
+      const selectedLabel = document.createElement("span");
+      selectedLabel.textContent = readableResultLabel(next.chart_type);
+      summary.append(selectedLabel);
+      summary.insertAdjacentHTML("beforeend", icon("chevron-down", 12));
+      summary.setAttribute("aria-label", "Choose chart type");
+      const menu = document.createElement("div"); menu.className = "chart-choice-menu";
+      picker.append(summary, menu); kinds.append(picker);
       types.forEach(type => {
         const button = document.createElement("button");
         button.type = "button";
         button.className = "chart-kind";
-        button.textContent = type.replaceAll("_", " ");
+        button.innerHTML = icon(chartSymbol(type), 19);
+        const label = document.createElement("span"); label.textContent = readableResultLabel(type);
+        button.append(label);
         button.title = `Show ${button.textContent} using these returned rows`;
         button.classList.toggle("active", type === next.chart_type);
         button.setAttribute("aria-pressed", String(type === next.chart_type));
         button.addEventListener("click", () => {
-          const proposal = recommended.find(item => item.chart_type === type);
-          // These choices were already validated against this exact result.
-          // Switching their display is not a new analytical request.
-          if (proposal && article._chartViewState?.tryChart(proposal)) return;
-          if (type !== next.chart_type && !state.busy) {
-            void sendFromAnswer(runId, `Change the previous chart to a ${type.replaceAll("_", " ")} chart.`);
-          }
+          const proposal = recommended.find(item => item.chart_type === type)
+            || {...next, chart_type: type};
+          // Every displayed choice is a local view of the validated result.
+          // A failed local switch must not silently call the model or SQL.
+          if (article._chartViewState?.tryChart(proposal)) return;
+          showError("This chart cannot display the current result without changing its data.");
         });
-        kinds.append(button);
+        menu.append(button);
       });
     }
   }
   article._echart = null;
   article._chartType = presentation.chart_type;
   kinds.hidden = !explorer;
-  /* A validated recommendation changes display only. Requests for a chart
-     that was not recommended go through the conversational orchestrator. */
+  /* Chart controls change display only. Analytical changes still go through
+     the conversational orchestrator when requested in the chat. */
   article._chartViewState = {
     sourceRunId: runId,
     settings,
@@ -1251,7 +1292,8 @@ function openChartFullscreen(article, presentation, generation) {
   inner.setAttribute("aria-label", "Expanded chart");
   const header = document.createElement("header");
   const title = document.createElement("strong");
-  title.textContent = presentation.title || `${presentation.y} by ${presentation.x}`;
+  title.textContent = window.QueryflowChartTheme?.title(presentation.chart_spec || presentation)
+    || presentation.title || `${presentation.y} by ${presentation.x}`;
   const closeButton = document.createElement("button");
   closeButton.type = "button";
   closeButton.className = "icon-button";
@@ -1358,8 +1400,13 @@ function readableResultLabel(column) {
   return words ? words[0].toUpperCase() + words.slice(1).replace(/\bId\b/g, "ID") : "Result";
 }
 
-function formatKpiValue(value) {
-  if (value == null) return "NULL";
+function formatKpiValue(value, unit) {
+  if (value == null) return "—";
+  if (typeof value === "number" && Number.isFinite(value)) {
+    if (typeof window !== "undefined" && window.QueryflowKpis) return window.QueryflowKpis.format(value,unit);
+    return new Intl.NumberFormat(undefined,{maximumFractionDigits:2,
+      notation:Math.abs(value)>=1000 ? "compact" : "standard"}).format(value);
+  }
   const raw = String(value);
   // Group ordinary decimal numbers without rounding or altering identifier-like strings.
   if (!/^-?(?:0|[1-9]\d*)(?:\.\d+)?$/.test(raw)) return raw;
@@ -1373,15 +1420,36 @@ function renderAnswerPreview(fragment, body, mode) {
   const generation = body.generation || {};
   const columns = generation.columns || [];
   const rows = generation.rows || [];
-  if (!preview || mode === "chart" || mode === "explanation" || body.clarification_required
-      || !generation.accepted || columns.length !== 1 || rows.length !== 1) return;
+  if (!preview || mode === "explanation" || body.clarification_required
+      || !generation.accepted || generation.truncated || rows.length !== 1) return;
+  const metricColumns = columns.length === 1 ? columns : columns.filter((column, index) =>
+    !/(?:^|_)(?:id|key|code|year|month|date)(?:$|_)/i.test(column)
+    && !/[a-z](?:ID|Id)$/.test(column)
+    && (rows[0][index] == null || typeof rows[0][index] === "number"
+      && Number.isFinite(rows[0][index])));
+  if (!metricColumns.length || metricColumns.length > 8) return;
+  const context = columns.filter(column => !metricColumns.includes(column))
+    .map(column => `${readableResultLabel(column)}: ${formatKpiValue(rows[0][columns.indexOf(column)])}`)
+    .join(" · ");
   preview.hidden = false;
-  preview.classList.add("answer-kpi");
-  const label = document.createElement("span");
-  label.textContent = readableResultLabel(columns[0]);
-  const value = document.createElement("strong");
-  value.textContent = formatKpiValue(rows[0][0]);
-  preview.append(label, value);
+  preview.classList.add(metricColumns.length > 1 ? "answer-kpi-grid" : "answer-kpi");
+  for (const column of metricColumns) {
+    const card = metricColumns.length > 1 ? document.createElement("div") : preview;
+    if (card !== preview) card.className = "kpi-tile";
+    const label = document.createElement("span");
+    label.textContent = readableResultLabel(column);
+    const value = document.createElement("strong");
+    value.textContent = formatKpiValue(rows[0][columns.indexOf(column)]);
+    value.title = String(rows[0][columns.indexOf(column)] ?? "SQL NULL");
+    card.append(label, value);
+    if (context) {
+      const detail = document.createElement("small");
+      detail.className = "kpi-context";
+      detail.textContent = context;
+      card.append(detail);
+    }
+    if (card !== preview) preview.append(card);
+  }
 }
 
 
@@ -1390,10 +1458,20 @@ function chartMatchesResultIdentity(body) {
   return !sourceId || !body.result_id || sourceId === body.result_id;
 }
 
+function isPlotOnlyTurn(body) {
+  if (body.operation !== "VISUALIZE") return false;
+  // A visualization may follow new SQL in the same turn. Only hide the
+  // technical views when this turn reused an already accepted result.
+  return !(body.call_ledger || []).some(entry =>
+    ["sql_generation", "sql_repair", "sql_execution"].includes(entry.component));
+}
+
 async function appendAssistant(body, elapsed, options = {}) {
+  if (!options.restored) rememberChartSnapshot(body);
   const fragment = $("#assistantTemplate").content.cloneNode(true);
   const article = fragment.querySelector("article");
   const generation = body.generation || {};
+  const plotOnly = isPlotOnlyTurn(body);
   const accepted = generation.accepted === true;
   const attempts = generation.attempts || [];
   const { explanatory, modelUnavailable, status } = responseStatus(body, attempts);
@@ -1401,9 +1479,6 @@ async function appendAssistant(body, elapsed, options = {}) {
 
   const responseMessage = body.explanation || body.presentation?.summary || body.message || "";
   fragment.querySelector(".response-note").textContent = responseMessage;
-  const note = fragment.querySelector(".presentation-note");
-  if (body.presentation?.note) { note.hidden = false; note.textContent = body.presentation.note; }
-  renderSemanticChips(fragment, body);
 
   // Distinct empty / anomaly states, grounded in the real response.
   if (accepted && generation.row_count === 0) {
@@ -1434,10 +1509,11 @@ async function appendAssistant(body, elapsed, options = {}) {
   if (mode === "chart" && chartDataComplete) {
     chartSection.hidden = false;
     const spec = presentation.chart_spec;
-    fragment.querySelector(".chart-title").textContent = presentation.title || `${presentation.y} by ${presentation.x}`;
-    fragment.querySelector(".chart-sub").textContent = [
-      spec.chart_type.replaceAll("_", " "), ...(spec.warnings || []),
-    ].join(" · ");
+    fragment.querySelector(".chart-title").textContent = window.QueryflowChartTheme?.title(spec)
+      || presentation.title || `${presentation.y} by ${presentation.x}`;
+    const subtitle = fragment.querySelector(".chart-sub");
+    subtitle.textContent = (spec.warnings || []).join(" · ");
+    subtitle.hidden = !subtitle.textContent;
   } else if (mode === "chart") {
     // A versioned "chart" state with incomplete data must never render a
     // partial chart; demand a fresh validated execution instead.
@@ -1458,21 +1534,21 @@ async function appendAssistant(body, elapsed, options = {}) {
   const sqlNotAvailable = explanatory || modelUnavailable || body.clarification_required;
   const sqlText = generation.sql || "";
   const displaySql = sqlNotAvailable ? "" : (generation.formatted_sql || formatSqlForDisplay(sqlText));
-  fragment.querySelector(".sql-panel-pane").hidden = sqlNotAvailable;
+  fragment.querySelector(".sql-panel-pane").hidden = sqlNotAvailable || plotOnly;
   if (!sqlNotAvailable) {
     renderHighlightedSql(fragment.querySelector(".language-sql"), displaySql);
     const validity = fragment.querySelector(".sql-validity");
     if (validity) {
-      const parts = ["Validated"];
+      const parts = [generation.dialect, generation.execution_status].filter(Boolean);
       if (body.sql_version) parts.push(`SQL v${body.sql_version}`);
       if (generation.truncated) parts.push("preview");
       validity.textContent = parts.join(" · ");
     }
   }
-  fragment.querySelector(".result-panel-pane").hidden = sqlNotAvailable || explanatory;
+  fragment.querySelector(".result-panel-pane").hidden = sqlNotAvailable || explanatory || plotOnly;
 
   const actions = fragment.querySelector(".answer-actions");
-  if (accepted && !explanatory && !sqlNotAvailable) {
+  if (accepted && !explanatory && !sqlNotAvailable && !plotOnly) {
     const sqlActions = fragment.querySelector(".sql-actions");
     const runId = body.run_id || options.run?.run_id || null;
     sqlActions.append(
@@ -1491,29 +1567,55 @@ async function appendAssistant(body, elapsed, options = {}) {
     }
     const snapshot = document.createElement("p");
     snapshot.className = "snapshot-note";
-    snapshot.textContent = `Saved snapshot · ${Math.min(options.run.rows_preview.length, 20)} preview rows of ${options.run.row_count} returned${options.run.truncated ? " (original result truncated)" : ""}. Opening history did not run the query.`;
+    const retained = generation.rows?.length || 0;
+    const complete = !generation.truncated && retained === generation.row_count;
+    snapshot.textContent = `Retained snapshot · ${retained} of ${generation.row_count || 0} rows${complete ? " · complete" : " · preview only"}. Opening history did not run the query.`;
     actions.before(snapshot);
   }
   actions.hidden = !actions.children.length;
 
   renderHumanReview(fragment, body.human_review, responseMessage);
   if (!sqlNotAvailable) {
+    const metadata = fragment.querySelector(".sql-metadata");
+    if (metadata) {
+      const status = document.createElement("div");
+      status.className = "sql-execution-summary";
+      const heading = document.createElement("strong");
+      heading.textContent = ["ACCEPTED", "EXECUTED", "SUCCEEDED"].includes(generation.execution_status)
+        ? "✓ Query executed successfully" : generation.execution_status || "Execution status unavailable";
+      const detail = document.createElement("small");
+      const duration = body.timings_ms?.sql_execution;
+      detail.textContent = [
+        `${generation.rows?.length || 0} retained rows${generation.truncated ? " · partial result" : ""}`,
+        typeof duration === "number" ? `${(duration / 1000).toFixed(2)}s execution` : null,
+      ].filter(Boolean).join(" · ");
+      status.append(heading, detail); metadata.append(status);
+    }
+    for (const [label, value] of [
+      ["Validation Details", attempts.map(attempt => attempt.validation).filter(Boolean)],
+      ["Execution Plan", attempts.map(attempt => attempt.validation?.explain_plan)
+        .filter(plan => Array.isArray(plan) && plan.length).at(-1) || "No execution plan was recorded."],
+      ["Execution Details", {status: generation.execution_status,
+        timings_ms: body.timings_ms, returned_rows: generation.row_count,
+        retained_rows: generation.rows?.length, truncated: generation.truncated}],
+      ["Query Context", {original_question: body.state?.root_question,
+        resolved_question: body.resolved_question, result_id: body.result_id,
+        contract: generation.semantic_contract || body.state?.semantic_contract}],
+    ]) {
+      if (!metadata) break;
+      const details = document.createElement("details");
+      const summary = document.createElement("summary"); summary.textContent = label;
+      const pre = document.createElement("pre"); pre.textContent = JSON.stringify(value, null, 2);
+      details.append(summary, pre); metadata.append(details);
+    }
     fragment.querySelector(".copy-button").addEventListener("click", (event) => {
       navigator.clipboard.writeText(sqlText);
       event.currentTarget.classList.add("active");
       window.setTimeout(() => event.currentTarget.classList.remove("active"), 1200);
     });
-    fragment.querySelector(".csv-button").addEventListener("click", () => {
-      downloadCsv(generation.columns || [], generation.rows || []);
-    });
-    const wrap = fragment.querySelector(".result-panel-pane .table-wrap");
-    renderTable(wrap, generation.columns || [], generation.rows || []);
-    const table = wrap.querySelector("table");
-    if (table) {
-      table.className = "result-grid";
-      attachResultInvestigations(table, body);
-    }
-    fragment.querySelector(".row-count").textContent = `${generation.row_count || 0} rows${generation.truncated ? " · truncated" : ""}`;
+    fragment.querySelector(".row-count").textContent = generation.truncated
+      ? `${generation.rows?.length || 0} returned · partial result`
+      : `${generation.row_count || 0} rows · ${generation.columns?.length || 0} columns`;
     wireSqlIdents(fragment, article);
     const versionPanel = fragment.querySelector(".versions-panel");
     const previous = latestAcceptedPreviousSql(body, options.restored ? options.run : null);
@@ -1532,11 +1634,48 @@ async function appendAssistant(body, elapsed, options = {}) {
     article.dataset.runId = body.run_id || "";
     article.dataset.resultId = body.result_id || "";
     article.dataset.chartId = body.chart_id || "";
-    wireDataScope(article, generation);
+    wireDataScope(article, generation, body);
   }
   if (mode === "chart") wireChartSection(article, presentation, generation, body.run_id, body.chart_recommendations);
+  const kpiContainer = article.querySelector(".chart-kpi-row");
+  if (mode === "chart" && chartDataComplete && kpiContainer && window.QueryflowKpis) {
+    // Built once from the accepted source, not during cosmetic chart rerenders.
+    const kpis = window.QueryflowKpis.build(body, presentation.chart_spec)
+      .filter(spec => spec.calculation !== "PERIOD_CHANGE"
+        || generation.semantic_contract?.comparison_periods?.length === 2);
+    article._kpiSpecs = kpis;
+    const titleBadge=article.querySelector(".chart-change-badge");
+    titleBadge?.remove();
+    window.QueryflowKpis.render(kpiContainer, kpis, spec => {
+      if (spec.point && article._echart?.highlightPoint) article._echart.highlightPoint(spec.point);
+      else article._echart?.highlightSeries?.(spec.series_name);
+    });
+  }
   if (accepted && !explanatory && !body.clarification_required) {
-    wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length)});
+    const mapRequested = /\bmap\b/i.test([
+      options.question, body.resolved_question,
+      body.state?.semantic_contract?.original_question,
+    ].filter(Boolean).join(" "));
+    const coordinates = mapCoordinates(generation.columns || [], generation.rows || [],
+      mapRequested, generation.truncated);
+    if (coordinates && window.Plotly) {
+      article._renderMap = () => {
+        if (article._mapRendered) return;
+        article._mapRendered = true;
+        const slot = article.querySelector(".map-slot");
+        Promise.resolve(window.Plotly.newPlot(slot, [{type: "scattergeo", mode: "markers",
+          lat: coordinates.lat, lon: coordinates.lon,
+          marker: {size: 9, color: "#6e60e6"}}],
+        {margin: {t: 10, r: 10, b: 10, l: 10}, geo: {showland: true}},
+        {responsive: true, displaylogo: false})).catch(() => {
+          article._mapRendered = false;
+          slot.textContent = "The map renderer is unavailable. The source data remains in Data.";
+        });
+      };
+    }
+    wireResponseTabs(article, {answer:mode === "chart" && chartDataComplete,
+      sql: Boolean(sqlText), data: Boolean(generation.columns?.length),
+      map: Boolean(article._renderMap)});
   }
   if (!options.restored) updateInspector(body);
   return article;
@@ -1840,11 +1979,6 @@ function renderInspectorRunDetails(body) {
   const generation = body.generation || {};
   const tech = document.createElement("div");
   tech.innerHTML = [
-    '<details class="attempts-panel inspector-block">',
-    '  <summary><span data-icon="shield"></span> SQL validation attempts <span class="attempts-count"></span></summary>',
-    '  <div class="attempt-summary"></div>',
-    '  <div class="attempts-list"></div>',
-    '</details>',
     '<details class="token-card inspector-block">',
     '  <summary><span data-icon="hash"></span> Token usage</summary>',
     '  <div class="token-reduction"></div>',
@@ -1854,13 +1988,10 @@ function renderInspectorRunDetails(body) {
     '<details class="pipeline-details inspector-block">',
     '  <summary><span data-icon="clock"></span> Pipeline timings</summary>',
     '  <div class="pipeline-rows"></div>',
-    '  <details class="progress-history"><summary>Request activity</summary><ul></ul></details>',
     '</details>',
   ].join("\n");
   renderTokenAccounting(tech, body, generation);
-  renderAttempts(tech, generation.attempts || []);
   const tokenCard = tech.querySelector(".token-card");
-  const attemptsCard = tech.querySelector(".attempts-panel");
   if (tokenCard) { tokenCard.open = true; target.append(tokenCard); }
   const pipelineCard = tech.querySelector(".pipeline-details");
   if (pipelineCard && pipelineTarget) {
@@ -1872,7 +2003,6 @@ function renderInspectorRunDetails(body) {
     pipelineTarget.append(pipelineCard);
     pipelineCard.open = true;
     renderPipelineDetails(pipelineTarget, body.timings_ms || {}, body, generation);
-    if (attemptsCard) pipelineTarget.append(attemptsCard);
   }
   const context = JSON.stringify(generation.model_context || {}, null, 2);
   if (context !== "{}" && schemaContent) {
@@ -2179,7 +2309,23 @@ function renderHumanReview(fragment, review, responseMessage = "") {
   });
 }
 
-function renderTable(container, columns, rows) {
+function filterAndSortResultRows(rows, query, sortColumn = -1, direction = 1) {
+  const needle = query.trim().toLocaleLowerCase();
+  const filtered = rows.filter(row => !needle || row.some(value =>
+    String(value ?? "NULL").toLocaleLowerCase().includes(needle)));
+  if (sortColumn < 0) return filtered;
+  return filtered.slice().sort((a, b) => {
+    const left = a[sortColumn], right = b[sortColumn];
+    if (left == null) return right == null ? 0 : 1;
+    if (right == null) return -1;
+    return direction * (typeof left === "number" && typeof right === "number"
+      ? left - right : String(left).localeCompare(String(right), undefined, {numeric:true}));
+  });
+}
+
+function renderTable(container, columns, rows, options = {}) {
+  container._tableResizeObserver?.disconnect();
+  container.replaceChildren();
   if (!columns.length) {
     const empty = document.createElement("div");
     empty.className = "empty-result";
@@ -2188,25 +2334,345 @@ function renderTable(container, columns, rows) {
     return;
   }
   const table = document.createElement("table");
+  table.className = "result-grid";
+  const canvas = document.createElement("canvas");
+  const measureContext = canvas.getContext?.("2d");
+  const manualWidths = new Set();
+  const hiddenColumns = new Set();
+  const visibleColumns = columns.map(() => true);
+  const widths = columns.map(() => 84);
+  let textFont = "12.3px sans-serif";
+  const sampled = (data, maximum = 120) => {
+    if (data.length <= maximum) return data;
+    return Array.from({length: maximum}, (_, index) =>
+      data[Math.round(index * (data.length - 1) / (maximum - 1))]);
+  };
+  const measure = (value, numeric = false) => {
+    const label = String(value ?? "NULL");
+    if (measureContext) measureContext.font = numeric ? "12.3px monospace" : textFont;
+    return measureContext ? measureContext.measureText(label).width : label.length * 7;
+  };
+  const applyWidths = () => {
+    // Hidden columns leave no reserved gap inside the table's own borders.
+    widths.forEach((width, index) => {
+      colgroup.children[index].style.width = `${hiddenColumns.has(index) ? 0 : width}px`;
+    });
+    const contentWidth = widths.reduce(
+      (sum, width, index) => sum + (hiddenColumns.has(index) ? 0 : width), 0);
+    table.style.width = `${contentWidth}px`;
+    const pane = container.parentElement;
+    if (pane?.classList?.contains?.("result-panel-pane")) {
+      // The response card stays full-width and responsive; the table itself is
+      // content-sized and scrolls inside the card instead of stretching its
+      // columns, so two-column results never fill the whole chat width.
+      pane.style.width = "100%";
+    }
+  };
+  const colgroup = document.createElement("colgroup");
+  widths.forEach(width => {
+    const col = document.createElement("col");
+    col.style.width = `${width}px`;
+    colgroup.append(col);
+  });
+  table.append(colgroup);
+  const recalculateWidths = (data = rows) => {
+    if (typeof getComputedStyle === "function") textFont = getComputedStyle(table).font || textFont;
+    const examples = sampled(data);
+    columns.forEach((name, index) => {
+      if (manualWidths.has(index)) return;
+      const content = examples.reduce((largest, row) =>
+        Math.max(largest, measure(row[index], typeof row[index] === "number")), measure(name));
+      // 12px cell padding on each side plus the resize affordance; a sensible
+      // minimum keeps headers readable and a maximum reserves room for the rest.
+      widths[index] = Math.round(Math.max(84, Math.min(420, content + 40)));
+    });
+    applyWidths();
+  };
+  recalculateWidths();
   const head = table.createTHead().insertRow();
-  columns.forEach((column) => { const cell = document.createElement("th"); cell.textContent = column; head.append(cell); });
+  columns.forEach((column, index) => {
+    const cell = document.createElement("th");
+    cell.textContent = column;
+    const observed = [...new Set(rows.map(row => row[index]).filter(value => value != null)
+      .map(value => typeof value))];
+    cell.title = `${column} · Observed values: ${observed.join(" / ") || "NULL only"}`;
+    cell.classList.toggle("numeric", rows.some(row => typeof row[index] === "number"));
+    const handle = document.createElement("span");
+    handle.className = "column-resize";
+    handle.setAttribute("role", "separator");
+    handle.setAttribute("aria-label", `Resize ${column} column`);
+    handle.addEventListener("pointerdown", event => {
+      event.preventDefault();
+      const initialX = event.clientX;
+      const initialWidth = widths[index];
+      handle.setPointerCapture?.(event.pointerId);
+      const move = moved => {
+        widths[index] = Math.max(72, Math.min(600, initialWidth + moved.clientX - initialX));
+        manualWidths.add(index);
+        applyWidths();
+      };
+      const done = () => {
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", done);
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", done);
+    });
+    cell.append(handle);
+    head.append(cell);
+  });
   const body = table.createTBody();
-  rows.forEach((row) => {
-    const tr = body.insertRow();
-    row.forEach((value) => {
-      const td = tr.insertCell();
-      if (value === null) {
-        const badge = document.createElement("span");
-        badge.className = "null-value";
-        badge.textContent = "NULL";
-        td.append(badge);
-      } else {
-        td.textContent = String(value);
-        if (typeof value === "number") td.classList.add("numeric");
-      }
+  container.append(table);
+  const controls = container.parentElement?.querySelector(".table-controls");
+  if (controls) controls.replaceChildren();
+  let pageSize = 5;
+  let page = 0;
+  let currentRows = rows.slice(0, pageSize);
+  let hasMore = Boolean(options.truncated && options.loadPage) || rows.length > pageSize;
+  let limitReached = false;
+  let loading = false;
+  const pages = new Map();
+  let viewRows = rows;
+  let localView = false;
+  let sortColumn = -1;
+  let sortDirection = 1;
+  /* Table tools live in the Data section header (top right); page controls
+     stay underneath the table. The search sorts over every retained row of
+     the authorized result scope, never just the visible page. */
+  const paneForTools = container.parentElement;
+  const headerEl = paneForTools && typeof paneForTools.querySelector === "function"
+    ? paneForTools.querySelector(".data-header") : null;
+  const tools = headerEl && typeof headerEl.querySelector === "function"
+    ? headerEl.querySelector(".data-header-tools") : null;
+  const applyView = () => {
+    localView = Boolean(tools?.querySelector?.(".data-search")?.value?.trim()) || sortColumn >= 0;
+    viewRows = filterAndSortResultRows(rows, tools?.querySelector?.(".data-search")?.value ?? "", sortColumn, sortDirection);
+    pages.clear(); page = 0; currentRows = viewRows.slice(0, pageSize);
+    hasMore = viewRows.length > pageSize || (!localView && Boolean(options.truncated && options.loadPage));
+    renderRows(); updateControls();
+  };
+  if (tools) {
+    tools.replaceChildren();
+    const search = document.createElement("input");
+    search.type = "search"; search.className = "data-search";
+    search.placeholder = "Search rows…";
+    search.setAttribute("aria-label", "Search retained result rows");
+    search.addEventListener("input", applyView);
+    const filters = document.createElement("details");
+    filters.className = "data-column-controls";
+    const summary = document.createElement("summary");
+    summary.textContent = "Filters";
+    filters.append(summary);
+    const hint = document.createElement("small");
+    hint.textContent = "Search filters retained rows. Choose visible columns:";
+    filters.append(hint);
+    columns.forEach((column, index) => {
+      const label = document.createElement("label");
+      const check = document.createElement("input");
+      check.type = "checkbox"; check.checked = true;
+      check.addEventListener("change", () => {
+        visibleColumns[index] = check.checked;
+        head.children[index].hidden = !check.checked;
+        colgroup.children[index].style.display = check.checked ? "" : "none";
+        [...body.children].forEach(row => { if (row.cells?.[index]) row.cells[index].hidden = !check.checked; });
+        if (!check.checked) hiddenColumns.add(index); else hiddenColumns.delete(index);
+        applyWidths();
+      });
+      label.append(check, column); filters.append(label);
+    });
+    tools.append(search, filters);
+  }
+  const exportButton = container.parentElement?.querySelector?.(".data-header .csv-button") || null;
+  if (exportButton && !exportButton._exportWired) {
+    exportButton._exportWired = true;
+    exportButton.addEventListener("click", () => {
+      // Export the current retained view: raw values, applied search/sort,
+      // and only the visible columns. Never reformatted display strings.
+      const exportColumns = columns.filter((_, index) => visibleColumns[index]);
+      const exportRows = viewRows.map(row => columns.map((_, index) => row[index])
+        .filter((_, index) => visibleColumns[index]));
+      downloadCsv(exportColumns, exportRows);
+      appendExportBubble(exportColumns, exportRows, {
+        truncated: Boolean(options.truncated),
+        source: `Data tab retained result · ${localView ? "search/sort applied · " : ""}raw values`,
+      });
+    });
+  }
+  columns.forEach((column, index) => {
+    const th = head.children[index];
+    const button = document.createElement("button"); button.type = "button";
+    button.textContent = `${column} ↕`; button.title = `Sort retained rows by ${column}`;
+    th.firstChild?.remove(); th.prepend(button);
+    button.addEventListener("click", () => {
+      sortDirection = sortColumn === index ? -sortDirection : 1; sortColumn = index;
+      [...head.children].forEach(cell => cell.removeAttribute("aria-sort"));
+      th.setAttribute("aria-sort", sortDirection > 0 ? "ascending" : "descending");
+      button.textContent = `${column} ${sortDirection > 0 ? "↑" : "↓"}`; applyView();
     });
   });
-  container.append(table);
+  const renderRows = () => {
+    body.replaceChildren();
+    const virtual = currentRows.length >= 80;
+    const start = virtual ? Math.max(0, Math.min(currentRows.length - 36,
+      Math.floor((container.scrollTop || 0) / 38) - 6)) : 0;
+    const visibleRows = virtual ? currentRows.slice(start, start + 36) : currentRows;
+    const spacer = height => {
+      if (!height) return;
+      const tr = body.insertRow();
+      tr.dataset.spacer = "true";
+      const td = tr.insertCell();
+      td.colSpan = columns.length;
+      td.style.height = `${height}px`;
+      td.className = "virtual-spacer";
+    };
+    spacer(start * 46);
+    visibleRows.forEach((row, index) => {
+      const tr = body.insertRow();
+      tr.dataset.rowIndex = String(start + index);
+      row.forEach((value, columnIndex) => {
+        const column = columns[columnIndex];
+        const td = tr.insertCell();
+        if (value === null) {
+          const badge = document.createElement("span");
+          badge.className = "null-value";
+          badge.textContent = "—"; badge.title = "SQL NULL (missing value)";
+          td.append(badge);
+        } else {
+          // Display formatting is metadata-aware; the exact raw value stays on
+          // hover and drives sorting, filtering, and CSV export unchanged.
+          const formatDisplay = globalThis.QueryflowFormat?.formatCellValue;
+          td.textContent = typeof formatDisplay === "function"
+            ? formatDisplay(value, {
+                unit: options.units?.[column],
+                timeFormat: options.temporal?.time_format ?? null,
+                timeColumn: options.temporal?.column ?? null,
+                column,
+              })
+            : typeof value === "number"
+            && !/(?:id|key|code)$/i.test(column) && typeof formatKpiValue === "function"
+            ? formatKpiValue(value, options.units?.[column])
+            : String(value);
+          td.title = String(value);
+          if (typeof value === "number") td.classList.add("numeric");
+        }
+      });
+    });
+    spacer((currentRows.length - start - visibleRows.length) * 46);
+    options.onPageRendered?.(table, currentRows);
+    columns.forEach((_, index) => {
+      if (visibleColumns[index]) return;
+      [...body.children].forEach(row => { if (row.cells?.[index]) row.cells[index].hidden = true; });
+    });
+  };
+  const updateControls = () => {
+    if (!controls) return;
+    controls.replaceChildren();
+    const status = document.createElement("span");
+    status.className = "table-page-status";
+    const offset = page * pageSize;
+    status.textContent = currentRows.length
+      ? `Showing ${offset + 1}–${offset + currentRows.length} of ${localView ? viewRows.length : rows.length} rows`
+      : `No rows match · ${options.truncated ? `${rows.length} cached · partial result` : `${rows.length} rows · complete result`}`;
+    if (localView) status.textContent += ` · matching cached rows only · ${options.truncated ? "searching partial result" : "complete retained result"}`;
+    if (limitReached) status.textContent += " · 10,000-row paging limit reached";
+    controls.append(status);
+    const meta = container.parentElement?.querySelector?.(".row-count");
+    if (meta) meta.textContent = currentRows.length
+      ? `Showing ${offset + 1}–${offset + currentRows.length} of ${localView ? viewRows.length : rows.length} rows · ${columns.length} columns${options.truncated ? " · partial" : ""}`
+      : `No rows match · ${columns.length} columns${options.truncated ? " · partial result" : ""}`;
+    if (viewRows.length <= 5 && !options.truncated) return;
+    const pagesHost = document.createElement("div");
+    pagesHost.className = "table-pages";
+    const count = Math.ceil(viewRows.length / pageSize);
+    for (let target = Math.max(0, page - 2); target < Math.min(count, page + 3); target++) {
+      const numbered = document.createElement("button"); numbered.type = "button";
+      numbered.textContent = String(target + 1);
+      numbered.className = target === page ? "table-page active" : "table-page";
+      numbered.setAttribute("aria-label", `Page ${target + 1}`);
+      if (target === page) numbered.setAttribute("aria-current", "page");
+      numbered.disabled = loading;
+      numbered.addEventListener("click", () => { void goToPage(target); }); pagesHost.append(numbered);
+    }
+    for (const [label, target, disabled] of [
+      ["Previous", page - 1, page === 0],
+      ["Next", page + 1, !hasMore],
+    ]) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.textContent = label;
+      button.disabled = disabled || loading;
+      button.addEventListener("click", () => { void goToPage(target); });
+      pagesHost.append(button);
+    }
+    controls.append(pagesHost);
+  };
+  async function goToPage(target) {
+    if (target < 0 || loading) return;
+    const offset = target * pageSize;
+    const key = `${offset}:${pageSize}`;
+    let next = pages.get(key);
+    if (!next) {
+      if (offset < viewRows.length || localView) {
+        next = {
+          rows: viewRows.slice(offset, offset + pageSize),
+          has_more: (!localView && Boolean(options.truncated && options.loadPage))
+            || offset + pageSize < viewRows.length,
+        };
+      } else if (options.loadPage) {
+        loading = true;
+        updateControls();
+        try { next = await options.loadPage(offset, pageSize); }
+        catch (error) { options.onPageError?.(error); return; }
+        finally { loading = false; }
+      } else return;
+      pages.set(key, next);
+    }
+    page = target;
+    currentRows = next.rows;
+    recalculateWidths([...sampled(rows, 80), ...sampled(currentRows, 40)]);
+    hasMore = next.has_more;
+    limitReached = Boolean(next.limit_reached);
+    container.scrollTop = 0;
+    renderRows();
+    updateControls();
+  }
+  container.addEventListener("scroll", () => {
+    if (currentRows.length >= 80) renderRows();
+  });
+  container.classList.toggle("table-compact", rows.length <= 8 && columns.length <= 5);
+  if (typeof ResizeObserver !== "undefined") {
+    let previousWidth = container.clientWidth;
+    container._tableResizeObserver = new ResizeObserver(() => {
+      if (container.clientWidth === previousWidth) return;
+      previousWidth = container.clientWidth;
+      recalculateWidths([...sampled(rows, 80), ...sampled(currentRows, 40)]);
+    });
+    container._tableResizeObserver.observe(container);
+  }
+  document.fonts?.ready?.then(() => recalculateWidths([...sampled(rows, 80), ...sampled(currentRows, 40)]));
+  renderRows();
+  updateControls();
+  return {goToPage, get pageSize() { return pageSize; }};
+}
+
+/* Exporting data stays a client-side action: it never re-runs SQL or calls a
+   model. The bubble records what was exported (raw values) so retained-result
+   and truncated previews stay clearly distinguishable in the conversation. */
+function appendExportBubble(columns, rows, { source = null, truncated = false } = {}) {
+  const fragment = $("#exportTemplate").content.cloneNode(true);
+  const article = fragment.querySelector("article");
+  const count = rows.length;
+  fragment.querySelector(".export-note").textContent = truncated
+    ? `Exported the first ${count} retained rows as CSV — this is a partial result preview; more rows can be paged from the Data tab.`
+    : `Exported ${count} rows × ${columns.length} columns as CSV from the retained result.`;
+  fragment.querySelector(".export-meta").textContent = source
+    || `${columns.join(" · ")} · raw values, no formatting applied`;
+  const again = fragment.querySelector(".export-again");
+  again.addEventListener("click", () => downloadCsv(columns, rows));
+  hydrateIcons(article);
+  const messages = $("#messages");
+  messages.append(article);
+  article.scrollIntoView?.({ behavior: "smooth", block: "end" });
 }
 
 function downloadCsv(columns, rows) {
@@ -2384,25 +2850,26 @@ function renderPipelineDetails(fragment, timings, body, generation) {
   headlineValue.textContent = knownTotal == null ? "Not reported" : `${(knownTotal / 1000).toFixed(1)} s`;
   headline.append(headlineLabel, headlineValue);
   container.append(headline);
-  const config = state.modelConfig || {};
-  const configuredModels = [
-    ["Assistant model", config.assistant_model],
-    ["Context", config.context_mode === "model1" ? config.context_model : "Retrieval"],
-    ["SQL model", config.sql_model],
-    ["Plotting model", config.plotting_model],
-  ];
-  for (const [role, model] of configuredModels) {
-    if (!model) continue;
-    const row = document.createElement("div");
-    row.className = "pipeline-run unmeasured";
-    const label = document.createElement("span");
-    label.textContent = role;
-    const value = document.createElement("b");
-    value.textContent = model;
-    row.append(label, value);
-    container.append(row);
-  }
-  const stages = [
+  const sectionHeading = title => {
+    const heading = document.createElement("div");
+    heading.className = "pipeline-section-heading";
+    heading.textContent = title;
+    container.append(heading);
+  };
+  sectionHeading("Stage timing");
+  const topLayerMeasured = Object.hasOwn(timings, "top_decisions");
+  const stages = topLayerMeasured ? [
+    ["Top-layer decisions", timings.top_decisions],
+    ["Analytics planning model", timings.analytics_planning],
+    ["Context planning", timings.context_planning],
+    ["SQL generation and repair", timings.sql_generation],
+    ["SQL validation", timings.sql_validation],
+    ["Database execution", timings.sql_execution],
+    ["Result analysis", timings.result_analysis],
+    ["Result explanation", timings.result_explanation],
+    ["Charting model", timings.charting_model],
+    ["Top-layer final answer", timings.top_final_answer],
+  ] : [
     ["Conversation interpretation", timings.conversation_interpretation],
     ["Analytics planning", timings.analytics_planning],
     ["Routing", timings.routing],
@@ -2410,6 +2877,7 @@ function renderPipelineDetails(fragment, timings, body, generation) {
     ["Generation / validation / execution", timings.generation_validation_execution],
   ];
   stages.forEach(([label, milliseconds]) => {
+    if (topLayerMeasured && milliseconds == null) return;
     const row = document.createElement("div");
     row.className = `pipeline-run${milliseconds == null ? " unmeasured" : ""}`;
     const status = document.createElement("span");
@@ -2430,6 +2898,26 @@ function renderPipelineDetails(fragment, timings, body, generation) {
     row.append(track);
     container.append(row);
   });
+  const modelCalls = (body.call_ledger || []).filter(entry => entry.kind === "MODEL");
+  if (modelCalls.length) sectionHeading("Model calls");
+  for (const entry of modelCalls) {
+    const row = document.createElement("div");
+    row.className = "pipeline-run pipeline-model-call";
+    const label = document.createElement("span");
+    label.textContent = entry.task ? `${entry.component} · ${entry.task}` : entry.component;
+    const detail = document.createElement("b");
+    const tokens = entry.input_tokens == null && entry.output_tokens == null
+      ? "tokens unavailable" : `${(entry.input_tokens || 0) + (entry.output_tokens || 0)} tokens`;
+    detail.textContent = [
+      [entry.provider, entry.effective_model || entry.requested_model].filter(Boolean).join("/"),
+      entry.latency_ms == null ? "time unavailable" : `${entry.latency_ms} ms`,
+      tokens,
+      entry.retry_count > 0 ? `retry ${entry.retry_count}` : null,
+      entry.status === "FAILED" ? "failed" : null,
+    ].filter(Boolean).join(" · ");
+    row.append(label, detail);
+    container.append(row);
+  }
   if (body.progress_events?.length) {
     const history = container.parentElement.querySelector(".progress-history");
     const list = history ? history.querySelector("ul") : null;
@@ -2474,6 +2962,32 @@ async function refreshHistory() {
   }
 }
 
+$("#historySearch")?.addEventListener("input", () => renderHistory());
+$("#historySearchToggle")?.addEventListener("click", event => {
+  const input = $("#historySearch"); input.hidden = !input.hidden;
+  event.currentTarget.setAttribute("aria-expanded", String(!input.hidden));
+  if (!input.hidden) input.focus();
+  else { input.value = ""; renderHistory(); }
+});
+$("#sidebarToggle")?.addEventListener("click", () => {
+  const collapsed = document.body.classList.toggle("sidebar-collapsed");
+  $("#sidebarToggle").setAttribute("aria-expanded", String(!collapsed));
+  $(".sidebar").inert = collapsed;
+  window.dispatchEvent(new Event("resize"));
+});
+$("#dataNavigation")?.addEventListener("click", event => {
+  event.preventDefault();
+  $("#databaseSelect").focus();
+});
+$("#settingsNavigation")?.addEventListener("click", event => {
+  event.preventDefault();
+  $("#themeToggle").click();
+});
+$("#homeNavigation")?.addEventListener("click", event => {
+  event.preventDefault();
+  $("#messageInput").focus();
+});
+
 function renderHistory() {
   const container = $("#conversationHistory");
   container.replaceChildren();
@@ -2482,9 +2996,13 @@ function renderHistory() {
     const id = run.conversation_id || run.run_id;
     if (!groups.has(id)) groups.set(id, run);
   }
-  const visible = [...groups.values()];
+  const search = $("#historySearch")?.value?.trim().toLocaleLowerCase() || "";
+  const visible = [...groups.values()].filter(run => !search ||
+    state.history.some(turn => (turn.conversation_id || turn.run_id) ===
+      (run.conversation_id || run.run_id) &&
+      `${turn.original_message || ""} ${turn.resolved_question || ""}`.toLocaleLowerCase().includes(search)));
   if (!visible.length) {
-    container.append(emptyNote("Completed queries appear here."));
+    container.append(emptyNote(search ? "No matching conversations." : "Completed queries appear here."));
     return;
   }
   for (const run of visible) {
@@ -2519,6 +3037,7 @@ async function openRun(run) {
   if (state.busy || voiceInput?.busy) return;
   $("#emptyState").hidden = true;
   state.activeRunId = run.run_id;
+  state.branchFromRunId = null;
   renderHistory();
   try {
     const records = await api(`/api/history/${encodeURIComponent(run.run_id)}/turns?session_id=${encodeURIComponent(sessionId)}`);
@@ -2542,6 +3061,7 @@ async function continueRun(runId, focus = true) {
   const savedState = await api(`/api/history/${encodeURIComponent(runId)}/continue?session_id=${encodeURIComponent(sessionId)}`, {method: "POST"});
   if (savedState.db_id !== $("#databaseSelect").value) throw new Error("This conversation belongs to another database.");
   state.activeRunId = runId;
+  state.branchFromRunId = runId;
   state.restorePending = false;
   renderHistory();
   if (focus) {
@@ -2558,6 +3078,7 @@ async function rerunSaved(record) {
   try {
     const response = await api(`/api/history/${encodeURIComponent(record.run_id)}/rerun?session_id=${encodeURIComponent(sessionId)}`, {method: "POST"});
     state.activeRunId = response.run_id;
+    state.branchFromRunId = null;
     state.restorePending = false;
     appendUser("Rerun the saved SQL against current data.");
     await appendAssistant(response, 0);
@@ -2570,9 +3091,38 @@ async function rerunSaved(record) {
   }
 }
 
+/* Bounded, session-local display snapshots. Never persisted as analytical memory. */
+function chartSnapshotKey(session, db, run, result, chart) {
+  return JSON.stringify([session,db,run,result,chart || null]);
+}
+
+function rememberChartSnapshot(body) {
+  state.chartSnapshots ||= new Map();
+  if (body.operation === "RESET_CONTEXT") return;
+  const generation=body.generation, chart=body.presentation?.chart_spec;
+  if (!body.run_id || !body.result_id || !generation?.accepted || !chart
+      || generation.truncated || generation.row_count !== generation.rows?.length
+      || !chartMatchesResultIdentity(body)) return;
+  const key=chartSnapshotKey(sessionId,generation.db_id,body.run_id,body.result_id,body.chart_id);
+  state.chartSnapshots.delete(key);
+  state.chartSnapshots.set(key,{
+    sql:generation.sql, columns:generation.columns, rows:generation.rows,
+    row_count:generation.row_count, chart_spec:chart,
+  });
+  if (state.chartSnapshots.size>100) state.chartSnapshots.delete(state.chartSnapshots.keys().next().value);
+}
+
 function restoredRunToResponse(record) {
   if (record.response_payload && Object.keys(record.response_payload).length) {
-    const payload = record.response_payload;
+    const payload = {...record.response_payload};
+    const key=chartSnapshotKey(sessionId,record.db_id,record.run_id,payload.result_id,payload.chart_id);
+    const snapshot=state.chartSnapshots?.get(key);
+    if (snapshot && payload.generation?.accepted && snapshot.sql === payload.generation.sql
+        && snapshot.row_count === payload.generation.row_count
+        && JSON.stringify(snapshot.columns) === JSON.stringify(payload.generation.columns)) {
+      payload.generation={...payload.generation,rows:snapshot.rows,truncated:false};
+      payload.presentation={...payload.presentation,chart_spec:snapshot.chart_spec};
+    }
     if (payload.presentation_state == null) {
       // History saved before the typed presentation state existed: synthesize
       // it from the validated chart spec so restored threads stay chart-first.
@@ -2722,12 +3272,15 @@ document.addEventListener("pointerdown", event => {
 });
 $("#clearHistory").addEventListener("click", async () => {
   if (state.busy) return;
+  if (!window.confirm("Clear all saved conversations in this session? This removes your conversation history.")) return;
   try {
     await api(`/api/conversations/${encodeURIComponent(sessionId)}/reset`, { method: "POST" });
     await api(`/api/history?session_id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
   } catch (error) { showError(`Could not clear history: ${error.message}`); return; }
   state.history = [];
+  state.chartSnapshots?.clear();
   state.activeRunId = null;
+  state.branchFromRunId = null;
   state.restorePending = false;
   $("#messages").replaceChildren();
   $("#emptyState").hidden = false;
@@ -2743,6 +3296,7 @@ $("#resetButton").addEventListener("click", async () => {
     $("#messages").replaceChildren();
     state.lastBody = null;
     state.activeRunId = null;
+    state.branchFromRunId = null;
     state.restorePending = false;
     $("#emptyState").hidden = false;
     $("#threadIntro").hidden = true;

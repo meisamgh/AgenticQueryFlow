@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import replace
 from typing import Any
 
 import httpx
@@ -17,7 +16,6 @@ from semantic_text2sql.conversational_agent import (
 )
 from semantic_text2sql.conversational_bridge import (
     ConversationalAnalyticsBridge,
-    MetadataToolInput,
     _route,
 )
 from semantic_text2sql.data_requirement_validator import _stored_grain_capability
@@ -35,9 +33,9 @@ from semantic_text2sql.models import (
     StrategyHints,
     TokenUsage,
 )
-from semantic_text2sql.profiling import ProfileStore, profile_database
+from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.result_cache import RecentResult
-from semantic_text2sql.run_history import RunHistoryStore, SessionMemoryTurn
+from semantic_text2sql.run_history import RunHistoryStore
 from semantic_text2sql.runtime import RequestBudget, active_request_budget, use_request_budget
 
 
@@ -58,36 +56,6 @@ class Completer:
         return json.dumps(next(self.decisions)), TokenUsage(input_tokens=10, output_tokens=5)
 
 
-def test_top_layer_gets_bounded_history_without_sql_or_rows(
-    registry: Any, tmp_path: Any,
-) -> None:
-    completer = Completer([{
-        "action": "ANSWER", "intent": "DIRECT_ANSWER", "tool": None,
-        "answer": "I can refer to the previous analysis.",
-    }])
-    agent = _agent(registry, tmp_path, completer, [])
-    calls: list[tuple[str, str, str | None]] = []
-
-    def recent(session_id: str, db_id: str, parent: str | None) -> list[SessionMemoryTurn]:
-        calls.append((session_id, db_id, parent))
-        return [SessionMemoryTurn(
-            run_id="run_previous", result_id="result_previous", question="Total spending",
-            assistant_summary="Spending increased", operation="NEW_QUERY", accepted=True,
-            sql_available=True, columns=["spend"], created_at=1.0,
-        )]
-
-    agent.get_recent_memory = recent
-    response = asyncio.run(agent.run(ChatRequest(
-        session_id="owner", db_id="shop", message="What was the previous answer?"
-    )))
-    assert response.message == "I can refer to the previous analysis."
-    assert calls == [("owner", "shop", None)]
-    assert completer.calls == 1
-    assert '"result_id": "result_previous"' in completer.prompts[0]
-    assert "Spending increased" in completer.prompts[0]
-    assert "SELECT" not in completer.prompts[0]
-
-
 def _agent(
     registry: Any, tmp_path: Any, completer: Completer, calls: list[str]
 ) -> ConversationalAnalyticsAgent:
@@ -98,6 +66,12 @@ def _agent(
             operation="NEW_QUERY",
             resolved_question=request.message,
             message="The query ran.",
+            generation=GenerateResponse(
+                db_id=request.db_id, question=request.message, provider=request.provider,
+                model=request.model, strategy=StrategyHints(mode="exact"), sql="SELECT 1",
+                accepted=True, execution_status="ACCEPTED", termination_reason="accepted",
+                rows=[[1]], columns=["count"], row_count=1,
+            ),
         )
 
     bridge = ConversationalAnalyticsBridge(
@@ -132,6 +106,32 @@ def test_agent_answers_greeting_with_one_model_call_and_no_sql(
     assert "Hello" in response.message
     assert completer.calls == 1
     assert calls == []
+
+
+def test_agent_inspects_historical_reference_without_sql(registry: Any, tmp_path: Any) -> None:
+    calls: list[str] = []
+    completer = Completer([
+        {"action":"CALL_TOOL", "intent":"EXPLAIN", "tool":"inspect_result",
+         "tool_arguments":{"objective":"result_old"}, "answer":None},
+        {"action":"ANSWER", "intent":"DIRECT_ANSWER", "tool":None,
+         "answer":"The retained historical preview contains five rows."},
+    ])
+    agent = _agent(registry, tmp_path, completer, calls)
+    references: list[tuple[str, str, str]] = []
+
+    def inspect(session: str, db: str, reference: str) -> dict[str, Any]:
+        references.append((session, db, reference))
+        return {"result_id":reference, "complete":False, "page_complete":False,
+                "calculation_allowed":False, "rows":[[1], [2], [3], [4], [5]]}
+
+    agent.history_inspector = inspect
+    response = asyncio.run(agent.run(ChatRequest(
+        session_id="history", db_id="shop", message="Inspect result_old",
+    )))
+    assert references == [("history", "shop", "result_old")]
+    assert calls == []
+    assert "five rows" in response.message
+    assert completer.calls == 2
 
 
 def test_provider_dns_failure_has_specific_safe_message() -> None:
@@ -181,7 +181,7 @@ def test_agent_policy_and_structured_tool_objective(registry: Any, tmp_path: Any
     assert response.message == "The schema search is complete."
     assert calls == []
     assert "single client-facing AI Business Analytics Assistant" in completer.prompts[0]
-    assert "Never execute SQL when verified existing data is sufficient" in completer.prompts[0]
+    assert "Do not regenerate SQL when verified existing data is sufficient" in completer.prompts[0]
     assert "tool_arguments" in completer.prompts[0]
     assert "search_schema" in completer.prompts[1]
 
@@ -374,167 +374,6 @@ def test_metadata_capabilities_are_distinct(registry: Any, tmp_path: Any) -> Non
     assert tables.evidence_id != detail.evidence_id
 
 
-def test_metadata_tools_share_one_verified_snapshot_per_turn(
-    registry: Any, tmp_path: Any, monkeypatch: Any,
-) -> None:
-    original_inspect = registry.inspect
-    inspections: list[str] = []
-
-    def counted_inspect(db_id: str) -> Any:
-        inspections.append(db_id)
-        return original_inspect(db_id)
-
-    monkeypatch.setattr(registry, "inspect", counted_inspect)
-    decisions = [
-        {"action": "CALL_TOOL", "intent": "EXPLORE_SCHEMA", "tool": "list_tables",
-         "instruction": "List tables", "answer": None},
-        {"action": "CALL_TOOL", "intent": "EXPLORE_SCHEMA", "tool": "search_schema",
-         "instruction": "Which columns are in customers?", "answer": None},
-        {"action": "ANSWER", "intent": "EXPLORE_SCHEMA", "tool": None,
-         "instruction": None, "answer": "I found the customer table and its columns."},
-    ]
-    agent = _agent(registry, tmp_path, Completer(decisions), [])
-
-    response = asyncio.run(agent.run(
-        ChatRequest(session_id="metadata", db_id="shop", message="Explore customer data")
-    ))
-
-    assert "customer table" in response.message
-    assert inspections == ["shop"]
-    assert sum(item.kind == "DATABASE" for item in response.call_ledger) == 1
-    assert sum(item.component.startswith("assistant_tool:") for item in response.call_ledger) == 2
-
-
-def test_snapshot_reuse_preserves_schema_search_facts(registry: Any, tmp_path: Any) -> None:
-    agent = _agent(registry, tmp_path, Completer([]), [])
-
-    async def compare() -> tuple[list[str], list[str]]:
-        snapshot = await agent.bridge.load_metadata_snapshot("shop")
-        ordinary = await agent.bridge.inspect_metadata(
-            "shop", "search_schema", "Which columns are in customers?"
-        )
-        reused = await agent.bridge.inspect_metadata(
-            "shop", "search_schema", "Which columns are in customers?", snapshot=snapshot
-        )
-        return ordinary.facts, reused.facts
-
-    ordinary_facts, reused_facts = asyncio.run(compare())
-    assert ordinary_facts == reused_facts
-
-    snapshot = asyncio.run(agent.bridge.load_metadata_snapshot("shop"))
-    with pytest.raises(ValueError, match="another database"):
-        asyncio.run(agent.bridge.inspect_metadata(
-            "other", "list_tables", snapshot=snapshot
-        ))
-
-
-def test_business_search_reports_profile_values_as_candidates_without_live_scan(
-    registry: Any, tmp_path: Any, monkeypatch: Any,
-) -> None:
-    agent = _agent(registry, tmp_path, Completer([]), [])
-    agent.bridge.profiles.save(profile_database(registry, "shop", "sqlite"))
-
-    def unexpected_execute(*args: Any, **kwargs: Any) -> Any:
-        raise AssertionError("Business-context search must not scan the live database")
-
-    monkeypatch.setattr(registry, "execute", unexpected_execute)
-    exact = agent.bridge.search_business_context(MetadataToolInput(
-        db_id="shop", question="Customers in Germany"
-    ))
-    fuzzy = agent.bridge.search_business_context(MetadataToolInput(
-        db_id="shop", question="Customers in Germnay"
-    ))
-
-    assert any(item.value == "Germany" and item.match == "EXACT"
-               for item in exact.value_candidates)
-    germany = next(item for item in exact.value_candidates if item.value == "Germany")
-    assert germany.verified_live is False
-    assert germany.profile_freshness
-    assert germany.provenance in {"PROFILE_COMPLETE", "PROFILE_SAMPLE"}
-    assert any(item.value == "Germany" and item.match == "FUZZY" and item.ambiguous
-               for item in fuzzy.value_candidates)
-    fuzzy_germany = next(item for item in fuzzy.value_candidates if item.value == "Germany")
-    assert fuzzy_germany.ambiguity_reason == "Fuzzy matches require live verification."
-    assert "not live existence proof" in exact.facts[-1]
-
-
-def test_inspect_result_uses_exact_accepted_identity_without_sql(
-    registry: Any, tmp_path: Any,
-) -> None:
-    accepted = _accepted_result()
-    accepted = RecentResult.from_response(ChatResponse(
-        session_id="analysis", result_id="result-42", operation="NEW_QUERY",
-        resolved_question=accepted.question, message=accepted.message,
-        generation=accepted.generation,
-    ))
-    completer = Completer([
-        {"action": "CALL_TOOL", "intent": "EXPLAIN", "tool": "inspect_result",
-         "tool_arguments": {"objective": "Inspect accepted revenue", "result_id": "result-42",
-                            "offset": 1, "limit": 1}, "answer": None},
-        {"action": "ANSWER", "intent": "EXPLAIN", "tool": None,
-         "answer": "The accepted result contains two monthly rows."},
-    ])
-    calls: list[str] = []
-    agent = _agent(registry, tmp_path, completer, calls)
-    agent.get_last_response = lambda session_id, db_id: accepted
-
-    response = asyncio.run(agent.run(ChatRequest(
-        session_id="analysis", db_id="shop", message="Inspect that result"
-    )))
-
-    assert calls == []
-    assert "two monthly rows" in response.message
-    assert '"result_id": "result-42"' in completer.prompts[1]
-    assert '"rows": [["2025-02", 15]]' in completer.prompts[1]
-    assert '"summary_statistics"' in completer.prompts[1]
-
-
-def test_inspect_result_rejects_stale_result_identity(
-    registry: Any, tmp_path: Any,
-) -> None:
-    accepted = _accepted_result()
-    completer = Completer([
-        {"action": "CALL_TOOL", "intent": "EXPLAIN", "tool": "inspect_result",
-         "tool_arguments": {"objective": "Inspect an old result", "result_id": "old-result"},
-         "answer": None},
-        {"action": "ANSWER", "intent": "EXPLAIN", "tool": None,
-         "answer": "The requested result is not available."},
-    ])
-    agent = _agent(registry, tmp_path, completer, [])
-    agent.get_last_response = lambda session_id, db_id: accepted
-
-    response = asyncio.run(agent.run(ChatRequest(
-        session_id="analysis", db_id="shop", message="Inspect an old result"
-    )))
-
-    assert "authorized" in response.message
-    assert "authorized" in completer.prompts[1]
-
-
-def test_inspect_result_can_read_authorized_historical_snapshot(
-    registry: Any, tmp_path: Any,
-) -> None:
-    historical = _accepted_result()
-    historical = replace(historical, result_id="old-result")
-    completer = Completer([
-        {"action": "CALL_TOOL", "intent": "EXPLAIN", "tool": "inspect_result",
-         "tool_arguments": {"objective": "Compare with the first analysis",
-                            "result_id": "old-result"}, "answer": None},
-        {"action": "ANSWER", "intent": "EXPLAIN", "tool": None,
-         "answer": "The historical result is available for comparison."},
-    ])
-    agent = _agent(registry, tmp_path, completer, [])
-    agent.get_historical_result = lambda session, db, result_id, parent: (
-        historical if result_id == "old-result" and session == "analysis" else None
-    )
-    response = asyncio.run(agent.run(ChatRequest(
-        session_id="analysis", db_id="shop", message="Compare with the first analysis"
-    )))
-    assert "historical result" in response.message
-    assert '"historical": true' in completer.prompts[1]
-    assert '"rows": [["2025-01", 10], ["2025-02", 15]]' in completer.prompts[1]
-
-
 def test_false_decline_premise_can_stop_without_sql(registry: Any, tmp_path: Any) -> None:
     calls: list[str] = []
     completer = Completer(
@@ -569,6 +408,12 @@ def test_agent_investigation_uses_distinct_objectives_and_preserves_session(
             operation="NEW_QUERY",
             resolved_question=request.message,
             message="The query ran.",
+            generation=GenerateResponse(
+                db_id=request.db_id, question=request.message, provider=request.provider,
+                model=request.model, strategy=StrategyHints(mode="exact"), sql="SELECT 1",
+                accepted=True, execution_status="ACCEPTED", termination_reason="accepted",
+                rows=[[1]], columns=["count"], row_count=1,
+            ),
             token_usage=TokenUsage(input_tokens=7, output_tokens=3),
             call_ledger=[
                 CallLedgerEntry(
@@ -1003,20 +848,18 @@ def test_structured_schema_enumerates_every_allowed_value() -> None:
     for expected in (
         "list_tables", "search_schema", "describe_table", "get_relationships",
         "get_column_profile", "get_available_metrics", "get_business_context",
-        "search_business_context",
-        "ask_data", "inspect_result", "search_conversation_memory",
-        "analyze_result", "check_sql_correctness",
-        "change_visualization",
+        "ask_data", "analyze_result", "check_sql_correctness", "change_visualization",
         "present_result", "explain_existing_result", "reset_context",
     ):
         assert expected in tool_enum
     assert "run_arbitrary_sql" not in tool_enum
 
     assert arguments_spec["anyOf"][0]["required"] == [  # type: ignore[index]
-        "objective", "operation", "changes", "result_id", "offset", "limit"
+        "objective", "operation", "changes", "source_run_id"
     ]
     assert AGENT_DECISION_SCHEMA["required"] == [
-        "action", "intent", "tool", "tool_arguments", "instruction", "answer"
+        "action", "intent", "tool", "tool_arguments", "instruction", "answer",
+        "finish_after_tool", "chart_proposal",
     ]
 
     from semantic_text2sql.conversational_agent import _DECISION_EXAMPLES, AgentDecision, ToolInput
@@ -1046,6 +889,11 @@ def test_agent_prompt_carries_schema_rules_and_examples(
     assert '"intent":"NEW_QUERY"' in prompt  # NEW_QUERY example
     assert '"intent":"VISUALIZE"' in prompt  # VISUALIZE example
     assert '"action":"ANSWER"' in prompt  # ANSWER example
+    assert "primary decision-maker for conversational analytics" in prompt
+    assert "Preserve all unaffected chart settings" in prompt
+    assert "Preserve unaffected SemanticContract constraints" in prompt
+    assert "REQUERY_REQUIRED" in prompt
+    assert "Return only a valid AgentDecision JSON" in prompt
 
 
 def test_top_layer_receives_accepted_analytical_contract(
@@ -1074,7 +922,7 @@ def test_top_layer_receives_accepted_analytical_contract(
                      '"ranked_metric": "revenue"', '"output_grain": ["country"]',
                      '"aggregation": "sum"', '"value": "paid"'):
         assert expected in prompt
-    assert "Do not ask the client to name" in prompt
+    assert "accepted SemanticContract" in prompt
 
 
 def test_prose_intent_is_repaired_not_converted_for_total_consumption(
@@ -1202,8 +1050,8 @@ def test_incompatible_intent_tool_is_repaired_before_execution(
     response = asyncio.run(_decision_agent(registry, tmp_path, completer, calls).run(
         ChatRequest(session_id="wrong-tool", db_id="shop", message="plot it")
     ))
-    assert calls == []  # no accepted result exists to visualize
-    assert len(completer.calls) == 3
+    assert calls == []  # No prior accepted question may be regenerated.
+    assert len(completer.calls) == 2  # Invalid decision plus one bounded repair.
     assert response.message
 
 
@@ -1375,9 +1223,10 @@ def test_plot_it_valid_visualize_decision_is_not_repaired(
     response = asyncio.run(
         agent.run(ChatRequest(session_id="viz", db_id="shop", message="plot it"))
     )
-    assert calls == []  # no accepted result exists; plotting never invokes SQL directly
+    assert calls == ["Show monthly consumption"]  # Missing rows trigger governed SQL.
     assert response.presentation is None
     assert response.message
+    assert "chart" not in response.message.casefold()
     assert len(completer.calls) == 2  # one decision per round; zero repair calls
 
 
@@ -1408,8 +1257,8 @@ def test_add_currency_category_prose_intent_is_repaired_to_modify_query(
         )
     )
     assert calls == ["Add a currency category breakdown"]
-    assert response.message == "The query ran with the currency breakdown."
-    assert len(completer.calls) == 3  # 1 invalid + 1 repaired + 1 final answer
+    assert response.message == "The query ran."
+    assert len(completer.calls) == 3  # Invalid + repaired + final decision.
     assert "Validation issues:" in completer.prompts[1]
 
 

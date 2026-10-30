@@ -1,23 +1,114 @@
 # V6.4 progress checkpoint
 
-October 28 unified-tool/performance checkpoint:
+Local KPI comparison-bubble continuation: removed the visible Understood-as strip
+and its response-render call. Each KPI now has a neutral value-side comparison
+bubble. Existing PERIOD_CHANGE cards use exact retained baseline/current evidence,
+formula validation, known units and chronological observations. Other summary KPIs
+show No comparison rather than borrowing an unrelated period growth rate. No
+unsupported min/max comparisons, inferred polarity, model or SQL calls. Per-card
+container queries wrap the bubble at narrow card widths without changing the grid.
+Tests cover comparison evidence and absent extrema baselines. Browser visual
+verification remains unavailable.
 
-- The Top-layer remains the sole conversational decision-maker. Existing governed
-  SQL, plotting, explanation and recovery interfaces were retained. Added
-  `search_business_context` for approved definitions plus advisory profiled value
-  candidates, and `inspect_result` for bounded inspection of the active accepted
-  result by exact result ID. Neither tool executes arbitrary SQL.
-- Metadata tools now reuse one request-local verified schema/profile snapshot.
-  A scripted two-tool turn measured one schema inspection instead of three.
-  The compacted Top-layer prompt measured 18,293 characters across three calls
-  versus 22,289 previously; live token savings are unverified.
-- Focused regressions cover snapshot reuse, exact/fuzzy profile-candidate
-  provenance, no live value scan, accepted-result pagination and stale-ID
-  rejection. Full-suite and frontend verification are recorded in
-  [UNIFIED_TOOLS.md](UNIFIED_TOOLS.md) and the implementation report.
-- This does not complete V6.4. Arbitrary historical result-ID inspection,
-  freshness-aware categorical indexes, full semantic equivalence, production
-  authorization and live-provider/PostgreSQL benchmarking remain open.
+Treemap/chart-change continuation: added native Plotly flat treemap tiles with
+one unique ID/value per source row, and equivalent ECharts fallback; negative,
+missing, or nonfinite values are rejected. Non-additive metrics are not newly
+offered treemap. Forwarded KPI highlight methods through the shared chart handle.
+Added reusable ChartChangeBubble with 36px neutral pill, verified percentage and
+48x24 chronological microchart, plus exact values/period/formula tooltip. Existing
+comparison eligibility remains strict; absent approved metric-polarity metadata
+means neutral styling, never green/red based on sign alone. KPI icon bubbles are
+44px with 20px semantic SVGs and matched shadows. Frontend/KPI/bubble tests: 104
+passed. Synthetic 500-iteration mock-DOM build/render measured p50 0.037ms and p95
+0.045ms, zero network/model/database calls; this is not real-browser render timing.
+Full Python suite passed on rerun (one skip); an earlier run hit the pre-existing
+timing-sensitive optimization assertion, which passed in isolation. Browser visual
+verification remains unavailable. No SQL generation or backend calculations changed.
+
+KPI/icon detail refinement: deterministic metric/calculation icon selection with
+neutral fallback; green/amber/violet 40px outlined/shadowed bubbles; consistent
+36px forest-green assistant leaf avatar. Chart title now receives a neutral,
+result-ID-bound period-change badge only from existing valid comparison evidence.
+Periods are formatted from known temporal granularity. Missing, zero, and unsupported
+negative baselines remain suppressed; no business-performance polarity inferred.
+No KPI calculations, SQL execution, or model calls were added for these UI changes.
+KPI/frontend tests: 99 passed. Responsive CSS is preserved; connected-browser visual
+validation remains unavailable.
+
+Targeted frontend refinements: mint bordered user bubbles, consistent circular
+leaf assistant/loading avatars, conditional chart tab (Data default without a
+validated chart), metadata-aware compact number displays with raw values kept for
+sorting/CSV, em-dash NULL display, comparison badges in KPI headings, and exact-value
+hover text. Plotly range slider disabled, smaller bottom margin, white marker
+outlines, and formatted hover text. Sidebar Clear styled with trash icon and
+confirmation before any reset/deletion request. Regression verifies cancellation
+causes zero API calls and absent charts cannot expose Visualization. Browser
+desktop/mobile visual inspection remains unavailable; no backend logic changed.
+
+KPI-only premium visual refinement: reusable icon bubbles and semantic calculation
+accents (green primary, amber MIN, violet MAX), compact locale-aware K/M formatting,
+right-aligned verified sparklines with extrema markers, and evidence-derived context
+badges. Exact raw values/calculations remain in hover and accessible labels. Min/max
+cards target exact Plotly source points via curve/point hover, without SQL/model
+calls or source-row mutations. Existing calculation eligibility, placement, result
+identities, and responsive grid are preserved. Added number/unit/locale, evidence
+badge, DOM, and exact point-targeting tests. Connected-browser visual verification
+is still unavailable; responsive CSS/DOM tests are not screenshot verification.
+
+KPI completion continuation: cards consume explicit ChartSpec measure units and
+accepted approved-metric/aggregation definitions. Additive totals require an exact
+approved SUM input, matching SUM stage grouped by the selected temporal dimension,
+unique periods, complete source rows, and no contract LIMIT. Other metrics keep
+descriptive row statistics. Sparklines use unique, validated temporal values in
+chronological order. Growth is emitted only for two explicitly named contract
+periods with exact source-row matches and a positive baseline; unavailable periods
+and zero/negative baselines suppress growth. Grouped cards retain exact series
+names for local Plotly/ECharts highlighting. Currency/percentage units are never
+guessed from metric names. Added DOM/unit tests without network or SQL access.
+Browser visual verification was attempted but no browser is connected; not verified.
+
+Local visualization styling/KPI continuation: enlarged filled white leaf; area
+line width 3 with top-to-bottom fading fill in Plotly/ECharts; zoom-guide text
+and reset control hidden while built-in zoom is preserved. Added typed JSDoc KPI
+specifications and deterministic complete-result row summaries below charts.
+Only numeric non-NULL complete accepted evidence with a stable result ID is used;
+no inferred totals, units, growth or comparison baselines. KPI calculation runs
+once per response, outside styling rerenders. Minimum/maximum and unweighted
+single-series row averages are descriptive statistics, not business-total claims.
+No additional SQL or LLM calls. KPI/front-end suites: 87 passed; browser visual
+verification remains outstanding. Optional comparative KPIs/sparklines are not
+implemented when the accepted data lacks explicit supporting semantics.
+
+Local green frontend continuation: QueryFlow/leaf branding, hidden database selector,
+removed Home/data-source navigation, icon-triggered local history search, and user
+questions beside avatars. Restored exclusive Visualization/Data/SQL views with
+response-local tab and vertical-scroll state. Added retained-row search/sorting,
+column visibility, modifier-click cell/row selection and clipboard copying, SQL
+download/expansion, and expandable actual backend validation/execution/context
+metadata. Raw values remain the CSV source; numeric display adds grouping without
+changing source values. Observed value types appear in header tooltips (not claimed
+database types). Partial results explicitly scope local search/sort to cached rows.
+Verification: 83 frontend tests, full Python suite (one skip), Ruff, mypy, and diff
+check passed. Live-provider/browser end-to-end interaction remains unverified.
+
+October 26 results-table update (local, uncommitted):
+
+- Data now has responsive column widths, sticky numeric-aligned headers, drag-to-resize columns, compact small-result sizing, 20/50/100-row pages, a bounded 100-row virtual window, and a full-screen table. The source result and CSV values remain unchanged; truncated CSV export is explicitly labeled as partial.
+- The old Visible chart data subview and verbose source-row note are removed. A Map tab is offered only for an explicit map request with a complete result containing valid numeric latitude/longitude columns; it plots exact returned coordinates with Plotly.
+- A new `/api/results/page` endpoint accepts only session/database/result identity and an offset/size, never client SQL. Beyond the accepted 500-row snapshot, it re-runs only the saved read-only SQL with an outer ORDER BY, checks the saved prefix for drift, and caps access at 10,000 rows / five seconds. This is bounded offset paging, not a cross-request database snapshot; concurrent source updates can still require rerunning the question. No SQL LIMIT is added or changed.
+
+October 26 single-tool response and view update (local, uncommitted):
+
+- The initial Top-layer decision can now explicitly mark a simple governed SQL result, or SQL plus its requested validated chart, as complete. Those successful paths return the tool's grounded response without a separate final-answer model call. Multi-step refinement, investigation, explanation, and failure handling retain the existing continuation path. The optimization is conditional on the model setting `finish_after_tool`; it is not a guarantee for all provider outputs.
+- The frontend no longer has an Answer tab. The response text, KPI, and requested chart remain visible above the Data/SQL tabs; switching technical tabs does not run SQL or regenerate a chart.
+- Scripted SQLite regressions verify one Top-layer call for both simple SQL and SQL-plus-chart when marked complete. Frontend tab tests verify the persistent chart area and local switching. Live-provider latency impact is not yet measured.
+
+October 25 same-turn consistency continuation (local, uncommitted):
+
+- Delegated SQL calls now receive the most recent accepted state through a request-private, request-local handoff. The second same-turn SQL call preserves the turn's original optimistic commit version; no intermediate state or result is persisted. API JSON cannot supply this handoff.
+- Same-turn result tools (`analyze_result`, `explain_existing_result`, `present_result`) read the current graph response before the persisted cache. A failed second SQL call retains the first accepted result but cannot be reported as a successful refinement.
+- Added SQLite end-to-end regressions for NEW_QUERY → REFINE → chart, SQL → each result tool, failed second SQL, historical branch replay, cancellation, and rejection of client-supplied provisional state. Date-bound cleanup now removes only the exact old-year upper boundary, ranking extraction retains multiword metric names, and explicit `fanout_risk` produces an UNRESOLVED finding for one-to-many aggregate joins.
+- Full semantic equivalence and the remaining V6.4 scenario matrix are still incomplete; these tests do not establish business correctness for every SQL rewrite.
 
 October 25 provider continuation (uncommitted):
 
@@ -72,15 +163,181 @@ October 25 PR #3 chart-follow-up integration (local, uncommitted):
 
 - Reviewed the open GitHub PR `#3` and integrated its chart-follow-up behavior into the local working tree without merging the PR or overwriting the earlier uncommitted conversation fixes.
 - The plotting model receives the prior validated chart encodings and Top-layer typed changes. A chart-type-only request cannot silently switch x, y, metric, components, or series; invalid proposals fall back to deterministic chart validation preserving the prior encodings. A period change still returns `REQUERY_REQUIRED` before the plotting model is called.
-
-### Session memory continuation (local checkpoint)
-
-- The existing run-history store now exposes compact `SessionMemoryTurn` references: question, bounded assistant summary, accepted/failed status, result/chart IDs, column names, row count, and a small contract summary. SQLite reads project only those JSON fields; they do not load full saved rows or SQL into the Top-layer prompt.
-- The Top-layer reads at most three recent same-session/database turns once per request and can call `search_conversation_memory` for older references. The existing Top-layer remains the only conversational decision-maker. Historical summaries are explicitly advisory; result IDs and accepted SQL remain the evidence boundary.
-- Reset starts a durable memory epoch without deleting audit history. Explicit historical restoration can still use the chosen parent lineage. Tests verify session/database isolation, persistence across reopening, and one-call compact prompt construction.
-- Historical numerical comparisons use bounded, authorized snapshots rather than re-executing old SQL. Full unrestricted historical result sets are intentionally not exposed. No before/after live-provider latency or semantic-correctness improvement is claimed.
-- Historical snapshot inspection is now implemented. `inspect_result` accepts an exact authorized historical `result_id` through `RunHistoryStore.authorized_result_record`, subject to same-session/database scope, reset epoch, accepted/completeness checks, and optional parent lineage. It returns only the bounded saved snapshot and provenance; SQL is never re-executed. The Top-layer marks the observation as historical so it cannot silently replace the current result.
-- Targeted verification: 68 frontend tests, full Python suite (one skip), Ruff, mypy, and `git diff --check` all pass. The synthetic memory benchmark measured 0.092 ms p50 / 0.095 ms p95 search latency and 822 bytes for the bounded recent context. Live-provider and PostgreSQL measurements remain unverified.
-- Business-context matching now uses a bounded profile-backed categorical index keyed by database, dialect, and profile timestamp. Candidates carry source table/column, complete-versus-sampled provenance, profile freshness, and an explicit fuzzy ambiguity reason. This remains advisory: sampled/profile values are not live existence proof and are not silently promoted to SQL filters. Existing approved glossary aliases and definitions remain authoritative.
 - Replaced the chart proposal prompt with the requested expert business-analytics visualization-planner instructions, retaining the application's JSON schema and bounded result sample.
 - Verification: focused visualization/V6.3 tests, full Python pytest (one skipped), 72 Deno frontend tests, Ruff, mypy over 55 source files, and `git diff --check` passed. No live-provider call was made; improved chart quality in live use remains unmeasured.
+
+October 25 Top-layer routing hardening (local, uncommitted):
+
+- Clarified DIRECT_ANSWER, NEW_QUERY, MODIFY_QUERY, VISUALIZE, EXPLAIN, INVESTIGATE and result-reuse instructions in the existing Top-layer prompt. No additional routing model or graph was added.
+- Reconciled validated `AgentDecision` proposals against accepted `SemanticContract`, result/chart availability and typed changes. Presentation-only chart edits reuse accepted data; typed analytical changes delegate to governed SQL. Exact result recaps use `present_result` and preserve result identity. Unsupported direct answers to obvious database questions are grounded through `ask_data`.
+- A safe `REQUERY_REQUIRED` follow-up now preserves the accepted question and original chart goal, runs one governed refinement and retries charting without a redundant decision call. Fresh mismatched SQL results and repeated insufficient chart results terminate without inventing a chart. This does not prove general semantic equivalence or every ambiguous natural-language change.
+- Adversarial SQLite multi-turn tests cover model misroutes, chart-type edits, filter correction, same-turn SQL/chart, result reuse, failed SQL, and a premature answer after a requery signal. Full Python pytest passed with one skipped test; 72 Deno frontend tests, Ruff, mypy over 55 source files, and `git diff --check` passed. Live provider and PostgreSQL tests were NOT RUN.
+
+October 26 same-turn orchestration and performance audit (local, uncommitted):
+
+- Confirmed the request-local provisional result/contract path through SQL → refine → explain and SQL → chart. Added regressions for latest-result use and explanation-only timing isolation. Final answers now guard against unresolved required-tool failures even if a later benign tool observation intervenes.
+- The call ledger now records actual Top-layer decision/final-answer durations, task names, retry counts and provider/model; context/SQL planner entries carry provider retry counts, and SQL validation/execution are timed separately. Removed a phantom legacy-interpreter model entry in Top-layer mode. The pipeline panel uses request-local stage timings and per-call metadata, rather than inherited SQL timings on result-only turns.
+- Task-specific completion limits and schema-constrained output paths were checked and extended across configured AgentRouter, True SOTA, Groq, JustDoWork, CodeCraft and OpenRouter adapters where their HTTP interfaces support them. The CLI fallback cannot guarantee a per-call completion cap; live-provider behavior remains unverified.
+- Corrected a local `.env` typo (`groqre` → `groq`) that made the assistant unavailable. The missing-provider error now names the setting and available configured providers. Restart the API process to reload `.env`.
+- Scripted SQLite measurement for SQL → explain: graph workflow 194 ms, SQL generation 1 ms, SQL execution 1 ms; rounded decision/final-answer/validation/explanation stages reported 0 ms. These are mock-model timings, not live-provider latency; graph total includes unclassified orchestration and test-client overhead.
+- Verification: full Python pytest passed with one skipped test, 68 Deno frontend tests passed, Ruff passed, mypy passed over 55 source files, and `git diff --check` passed. Live providers and PostgreSQL were NOT RUN.
+
+October 26 local Gemma understanding integration (uncommitted):
+
+- Verified the installed Ollama model tag `gemma4:12b`; local `.env` now selects it for the Top-layer assistant. SQL and plotting configuration is unchanged.
+- Added an Ollama conversation completer with task token limits, token accounting, bounded HTTP timeout and native JSON/schema output. The installed Ollama build rejects the complete AgentDecision grammar; a specific capability fallback uses JSON mode and existing local decision validation, remembering the rejected capability per model.
+- A live local greeting produced a valid AgentDecision via fallback in 6.98 seconds, reporting 123 tokens. This verifies local completion and parsing, not analytical routing accuracy or production latency. Provider regression tests, full pytest (one skipped), Ruff and mypy passed.
+# Local premium chart styling — 2026-10-29
+
+## Executable remote adapters — 2026-10-30
+
+- Added a shared DatabaseDialect type and lazy RemoteDatabaseRegistry, extending
+  the existing non-SQLite injection point rather than introducing another pipeline.
+- MySQL, SQL Server, Snowflake and BigQuery are registered from explicit environment
+  manifests and reach existing schema/retrieval/generation/validation/execution,
+  recovery, paging and metadata paths. SQL remains validated and schema-qualified.
+- Added parameterized native value lookup, explicit remote profiling CLI, driver
+  extras and lockfile, bounded fetches/timeouts, sanitized errors and shutdown cleanup.
+- BigQuery performs a cost dry run before the real job and attempts cancellation
+  on timeout; the extra operation is charged to the active shared DB-call budget.
+- Scripted integration tests cover all four engines via `/api/chat`, source scope,
+  forbidden SQL, parameter binding, cost rejection, cancellation and unconfirmed roles.
+- Full local verification: 477 passed, 1 skipped Python; 127 frontend passed;
+  Ruff, mypy (59 source files) and diff checks passed. These are not live-server tests.
+- Official driver import smoke tests passed for MySQL, Snowflake and BigQuery.
+  Snowflake import failed under SQLAlchemy 2.1.6; pinning below 2.1 resolved it.
+  SQL Server's Python driver is installed but its system ODBC library/driver is absent.
+- Live DB credentials/IAM were not provided: live remote queries, live-provider SQL
+  accuracy and production performance are NOT RUN. Role confirmation is an admin
+  acknowledgement, not automatic server-permission verification. See EXTERNAL_DATABASES.md.
+- Existing `.env` credentials and unrelated image additions/deletions were preserved.
+
+## Historical inspection and categorical evidence hardening — local follow-up
+
+- Added `RunHistoryStore.inspect_result` and POST `/api/results/inspect`, reusing
+  history and accepted state. Both run/result IDs resolve; returned rows are bounded
+  retained snapshots, never silently re-executed or installed as active results.
+- Incomplete previews report `complete=false`, `calculation_allowed=false` and a
+  warning. Tests cover 19, 20, 21 and 40 rows, memory/disk stores, database/session
+  isolation, failed results and resets. Inspection reset cutoffs persist in the
+  existing history SQLite database; audit records remain available separately.
+- Existing bounded live category lookup now supports parameterized exact matching,
+  complete-domain/ambiguity/provenance metadata, remaining cache lifetime, and
+  profile-version invalidation. No automatic fuzzy substitution or new scans.
+- Removed fallback bottom slider, retaining inside zoom. Explicit comparison-period
+  KPI cards may show verified changes/sparklines; no inferred comparison bubble is
+  displayed. Existing icons, shadows, raw rows and SQL are preserved.
+- Isolated 1,000-call in-memory history microbenchmark: p50 0.0088 ms, p95
+  0.0091 ms, zero model/business DB calls. No equivalent baseline or live-provider
+  performance comparison was measured; these numbers are not production latency.
+- Remaining: Top-layer historical tool exposure, broader fuzzy/alias category
+  indexing, end-to-end semantic comparison enforcement, authenticated multi-user
+  authorization, PostgreSQL/live-provider checks and browser visual regression.
+
+Shared `chart_theme.js` and CSS palette tokens now align Plotly and ECharts.
+Updated line/step markers, tooltip surfaces, legends, bar spacing, pie spacing,
+treemap boundaries, signed heatmap scales and box styling without changing source rows.
+Added renderer tests for cross-renderer series-color stability, reduced motion,
+step geometry and missing-value preservation. Browser screenshot comparison is
+NOT RUN: no browser executable or connected browser is available locally.
+No backend generation, KPI calculations, SQL execution or provider calls changed.
+# SQL-based historical memory refinement — 2026-10-30
+
+Implemented indexed accepted-SQL memory, explicit historical-source delegation,
+validated current-data refresh, snapshot-only historical figures, bounded chart
+preview retention and transactional refresh commits. See `docs/SQL_MEMORY.md`
+and `tests/test_sql_memory.py` for contracts, measurements and acceptance tests.
+Live PostgreSQL/provider verification is NOT RUN. No commit or push requested.
+Verification: Python 487 passed, 1 skipped (12.78s); frontend 127 passed;
+Ruff passed; mypy passed across 59 source files; `git diff --check` passed.
+Ten new SQL-memory acceptance cases pass. Existing dependency deprecation
+warnings remain. Local metadata benchmark: p50 1.602 → 0.090 ms; p95
+1.734 → 0.098 ms, without model or business-database calls.
+
+## Conversational visualization integration — 2026-10-30
+
+Retained one Top-layer orchestrator and existing LLMChartProposals planner.
+Added accepted grain/completeness/result identity to chart context, validated
+model-free chart-type edits, missing-provider support for those edits, and a
+failed-historical-refresh stale-source guard. Historical refresh → chart now has
+an actual SQLite integration test. See `VISUALIZATION_INTEGRATION.md` for
+measured call-count changes and the explicitly simulated latency benchmark.
+Verification: Python 489 passed/1 skipped (12.61s); frontend 127 passed (264ms);
+Ruff, mypy (59 source files), and diff checks passed. Added failed historical
+refresh → visualization regression: no stale chart, no replacement SQL query.
+Live provider, PostgreSQL and browser screenshot verification remain NOT RUN.
+
+## Premium chart presentation refinement — 2026-10-30
+
+Preserved prior uncommitted orchestration work. Frontend-only changes:
+- Shared metadata-aware number/period formatting across charts, KPIs and tables;
+  explicit compact/exact modes, unchanged raw values, validated calendar dates.
+- Default eight-color palette tested at >=3:1 contrast against white for graphical
+  marks; collision-aware series assignment retains colors within a palette.
+- 3px unsmoothed lines, 8px circular markers with 2px white borders; existing
+  disabled bottom slider and zoom/pan/reset behavior preserved.
+- Treemap tile separation, exact scatter hover labels, comparison-only visible
+  KPI sparklines, focus states, dark surfaces and mobile wrapping.
+- Cache-busted frontend assets and 22 new tests spanning all 19 chart types,
+  raw-data integrity, formatting, contrast and responsive sizing constraints.
+Verification: frontend 149 passed; Python 489 passed/1 skipped; Ruff/mypy/diff
+checks passed. Existing tests cover renderer rejection fallback, comparison
+evidence and no-network display changes. No live browser pixel-level or screen
+reader verification performed. Color contrast does not prove color-vision
+deficiency distinguishability. No SQL/LLM calls added; no runtime speedup claimed.
+
+## Integrated first-layer visualization proposals — 2026-10-30
+
+Added optional existing LLMChartProposal to AgentDecision and strict native JSON
+schema/examples. Request-local proposal propagation validates after governed SQL;
+valid proposals skip the plotting LLM, missing/rejected proposals use the same
+existing recommender. Shared validation rejects silent measure/series changes.
+Top-layer chart-only reconciliation preserves completion flags. Prior uncommitted
+frontend and memory work remains intact. See VISUALIZATION_INTEGRATION.md for
+measured calls and the scripted latency benchmark (not production claims).
+Acceptance tests cover two-call SQL+chart, fallback, historical refresh, chart
+reuse/lineage, malformed decision repair, incomplete results, incompatible units,
+duplicate grain and exact multi-measure preservation. Live-provider/PostgreSQL
+verification remains NOT RUN; no commit/push requested.
+Verification: 507 Python tests passed, 1 skipped (13.93s); 149 frontend tests
+passed (317ms); Ruff, mypy across 59 source files, and diff checks passed.
+
+## Compact chart polish — 2026-10-30
+
+Kept existing chart heights and KPI calculations. Added shared readable titles,
+non-mutating category label thinning/ellipsis, width-aware tick budgets, legends
+above Plotly charts, stable pie/donut source order, cleaner composition labels,
+readable KPI titles and accessible renderer-failure messages. Exact source labels
+remain in hover/data; no SQL, model, result identity or analytical behavior changes.
+Asset versions updated so browsers fetch the current presentation. New frontend
+cases assert 21-row integrity while thinning labels, unchanged 260px sample height,
+original pie values/order, title semantics and dense-line behavior. No browser
+screenshot/visual QA performed; these are renderer-option and DOM-mocked checks.
+Verification: 153 frontend tests passed (304ms); Python 507 passed/1 skipped
+(15.53s); Ruff, mypy across 59 source files, and diff checks passed.
+
+## Stable chart selector and history restoration — 2026-10-30
+
+- Chart choices preserve the original recommendation order while selected types
+  change; compatibility derives from accepted encodings, not the current type.
+- Browser display snapshots retain only complete chart rows/specifications with
+  session/database/run/result/chart identity and SQL/column checks (100-view cap).
+  New conversation resets analytical state without deleting displayed history;
+  Clear history clears the browser cache.
+- The history-turn endpoint hydrates exact complete charts from a bounded
+  process-local index of existing RecentResult snapshots, keyed by session,
+  database and run, validating result/chart IDs and SQL. It does not overwrite
+  active state or execute SQL. This supports page reload while the server retains
+  the snapshot. Clearing history removes its display index.
+- Persisted history stays bounded to its configured preview. After cache eviction
+  or server restart, incomplete previews remain incomplete; no hidden rerun or
+  fabricated chart. UI metadata distinguishes complete retention from previews.
+- Tests cover stable type switching, 19/20/21/100-row browser restoration,
+  identity/session/database isolation, invalid snapshots, cache bounds and a
+  real SQLite 21-row chart across new conversations/page reload. The API test
+  forbids business DB execution while opening history and checks restart behavior.
+Browser visual testing remains NOT RUN. Existing uncommitted work is preserved.
+Verification: frontend 160 passed; Python 508 passed/1 skipped (16.38s);
+Ruff, mypy and diff checks passed. Initial full run had an existing optimizer
+timing-dependent assertion fail; isolated rerun and full rerun passed unchanged.
+Already-discarded old snapshots cannot be reconstructed without an explicit rerun.

@@ -9,6 +9,7 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError, TokenError
 
+from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.models import (
     SchemaInfo,
     SemanticContract,
@@ -43,7 +44,7 @@ def clean_model_sql(value: str) -> str:
     return stripped.strip().removesuffix(";").strip()
 
 
-def normalize_sql(value: str, *, dialect: Literal["sqlite", "postgres"] = "sqlite") -> str:
+def normalize_sql(value: str, *, dialect: DatabaseDialect = "sqlite") -> str:
     try:
         return sqlglot.parse_one(value, read=dialect).sql(dialect=dialect, pretty=False)
     except (ParseError, TokenError):
@@ -54,7 +55,7 @@ def validate_sql(
     sql: str,
     schema: SchemaInfo,
     *,
-    dialect: Literal["sqlite", "postgres"] = "sqlite",
+    dialect: DatabaseDialect = "sqlite",
     allowed_tables: set[str] | None = None,
     allowed_columns: dict[str, set[str]] | None = None,
 ) -> ValidationResult:
@@ -146,7 +147,7 @@ def validate_sql_semantics(
     contract: SemanticContract,
     verified_context: dict[str, object] | None = None,
     *,
-    dialect: Literal["sqlite", "postgres"] = "sqlite",
+    dialect: DatabaseDialect = "sqlite",
 ) -> list[SemanticFinding]:
     """Reject only contract mismatches provable from the SQL AST.
 
@@ -218,7 +219,7 @@ def validate_sql_semantics(
 
 def _approved_metric_findings(
     root: exp.Expression, contract: SemanticContract,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
 ) -> list[SemanticFinding]:
     findings: list[SemanticFinding] = []
     aliases = {
@@ -500,13 +501,13 @@ def _fanout_findings(
         left = str(relationship.get("left") or "").split(".")[0].casefold()
         right = str(relationship.get("right") or "").split(".")[0].casefold()
         if (left in physical and right in physical and left != right
-                and relationship.get("cardinality") == "MANY_TO_MANY"):
+                and (relationship.get("cardinality") == "MANY_TO_MANY"
+                     or relationship.get("fanout_risk") is True)):
             return [SemanticFinding(
                 status="UNRESOLVED",
                 code="FACT_JOIN_FANOUT_RISK",
-                evidence=(f"Aggregating after a many-to-many join between "
-                          f"{left} and {right} may multiply measures; a data-backed "
-                          "cardinality check is needed before rejection."),
+                evidence=(f"Aggregating across {left} and {right} may multiply measures; "
+                          "the measure grain and join keys need a data-backed check."),
             )]
     return []
 
@@ -541,8 +542,12 @@ def _ranking_findings(root: exp.Expression, contract: SemanticContract) -> list[
             if isinstance(outer_order, exp.Order) and outer_order.expressions else None
         )
         key = first.this if isinstance(first, exp.Ordered) else None
-        expected_name = contract.ranked_metric.split(".")[-1].casefold()
+        expected_name = re.sub(
+            r"[\s_-]+", "", contract.ranked_metric.split(".")[-1].casefold()
+        )
         actual_name = key.name.casefold() if isinstance(key, exp.Column) else None
+        if actual_name is not None:
+            actual_name = re.sub(r"[\s_-]+", "", actual_name)
         if actual_name == expected_name:
             findings.append(SemanticFinding(
                 status="PASS", code="RANKED_METRIC_MATCH",
@@ -550,7 +555,7 @@ def _ranking_findings(root: exp.Expression, contract: SemanticContract) -> list[
             ))
         else:
             projected_names = {
-                expression.alias_or_name.casefold()
+                re.sub(r"[\s_-]+", "", expression.alias_or_name.casefold())
                 for expression in root.expressions if expression.alias_or_name
             }
             uncertain = (

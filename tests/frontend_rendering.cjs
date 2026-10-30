@@ -67,11 +67,43 @@ test('inspector counts model calls without counting tools as models', () => {
   assert.ok(summary.includes('entry.kind === "MODEL"'));
   assert.ok(summary.includes('usage.input_tokens == null && usage.output_tokens == null'));
 });
-test('validated recommended plots switch in place; new designs use conversation', () => {
+test('recommended and compatible chart choices switch locally without model or SQL', () => {
   const toolbar = source.slice(source.indexOf('function wireChartSection('),
     source.indexOf('function closeChartFullscreen('));
-  assert.ok(toolbar.includes('if (proposal && article._chartViewState?.tryChart(proposal)) return;'));
-  assert.ok(toolbar.includes('sendFromAnswer(runId, `Change the previous chart'));
+  assert.ok(toolbar.includes('recommended.find(item => item.chart_type === type)'));
+  assert.ok(toolbar.includes('article._chartViewState?.tryChart(proposal)'));
+  assert.ok(!toolbar.includes('sendFromAnswer('));
+  assert.ok(toolbar.includes('showError("This chart cannot display the current result'));
+});
+test('a monthly bar chart remains available after switching to a line', () => {
+  const source = {chart_type: 'bar', x: 'month', y: 'total_consumption',
+    y_measures: ['total_consumption'], time_format: 'month',
+    source_columns: ['month', 'total_consumption'],
+    data: [{month: '202401', total_consumption: 10},
+      {month: '202402', total_consumption: 20}]};
+  const line = explorer.apply(source, {chartType: 'line'});
+  assert.equal(line.chart_type, 'line');
+  assert.ok(explorer.choices(line).includes('bar'));
+  const barAgain = explorer.apply(source, {chartType: 'bar'});
+  assert.equal(barAgain.chart_type, 'bar');
+  assert.equal(JSON.stringify(barAgain.data), JSON.stringify(source.data));
+});
+test('removed chart field controls stay hidden while local view safety remains', () => {
+  assert.ok(!markup.includes('class="chart-fields"'));
+  const toolbar = source.slice(source.indexOf('function wireChartSection('),
+    source.indexOf('function closeChartFullscreen('));
+  assert.ok(!toolbar.includes('function renderFields('));
+  assert.ok(!toolbar.includes('sendFromAnswer('));
+  const spec = {chart_type: 'grouped_bar', x: 'Month', y: 'Revenue', series: 'Country',
+    source_columns: ['Month', 'Country', 'Revenue', 'Cost'], data: [
+      {Month: 'Jan', Country: 'DE', Revenue: 10, Cost: 4},
+      {Month: 'Jan', Country: 'FR', Revenue: 20, Cost: 6},
+    ]};
+  const changed = explorer.apply(spec, {metric: 'Cost', metrics: ['Cost'], palette: 'ocean'});
+  assert.equal(changed.y, 'Cost');
+  assert.equal(changed.display_palette, 'ocean');
+  assert.equal(changed.data.length, 2);
+  assert.equal(explorer.apply(spec, {series: ''}), null);
 });
 test('query filter utilities remain available without a visible filter bar', () => {
   const body = {
@@ -106,6 +138,8 @@ test('success badge is hidden and plot choices are centered inside the answer', 
   assert.ok(source.includes('if (accepted && status !== "CHART UNAVAILABLE") { pill.hidden = true;'));
   const section = markup.split('<div class="chart-section"')[1].split('<div class="chart-slot"')[0];
   assert.ok(section.includes('class="recommended-plots"'));
+  assert.ok(!section.includes('class="chart-palette"'));
+  assert.ok(!section.includes('class="chart-colors"'));
   assert.ok(section.indexOf('class="recommended-plots"') > section.indexOf('</header>'));
   assert.ok(styles.includes('.recommended-plots { display: flex; align-items: center; justify-content: center;'));
   assert.ok(source.includes('body.chart_recommendations'));
@@ -117,7 +151,7 @@ test('database is configured privately and the header hides the session ID', () 
     assert.ok(header.includes(`id="${id}"`), `${id} is missing from the header`);
     assert.ok(!composer.includes(`id="${id}"`), `${id} should not remain in the composer`);
   }
-  assert.ok(header.includes('class="header-database"'));
+  assert.ok(header.includes('id="databaseSelect" hidden'));
   assert.ok(!markup.includes('id="sessionId"'));
   assert.ok(source.includes('item.db_id === uiConfig.default_db_id'));
   for (const id of ['voiceButton', 'sendButton']) {
@@ -149,7 +183,7 @@ test('empty success responses clear history and Clear resets the visible convers
 });
 test('display row filters share chart state and zero matches stay empty', () => {
   assert.ok(source.includes('article._setChartViewRowFilters = filters => article._chartViewState.setRowFilters(filters)'));
-  assert.ok(source.includes('return filtered;'));
+  assert.ok(source.includes('article._setClientFilters = filters => article._setChartViewRowFilters?.(filters)'));
   assert.ok(!source.includes('return filtered.length ? filtered : rows;'));
   assert.ok(!source.includes('renderBackendSuggestions('));
 });
@@ -165,10 +199,10 @@ test('browser checks exact environment model pair and sends no model overrides',
   assert.ok(!sender.includes('context_provider:'));
   assert.ok(!sender.includes('context_model:'));
 });
-test('conversation history has no heading or search control', () => {
+test('conversation history has accessible local search', () => {
   assert.ok(!markup.includes('YOUR CONVERSATIONS'));
-  assert.ok(!markup.includes('id="historySearch"'));
-  assert.ok(!source.includes('$("#historySearch")'));
+  assert.ok(markup.includes('id="historySearch"'));
+  assert.ok(source.includes('$("#historySearch")?.addEventListener("input", () => renderHistory())'));
   assert.ok(markup.includes('id="conversationHistory"'));
 });
 test('semantic chips edit through the live query path without a branch action', () => {
@@ -177,6 +211,16 @@ test('semantic chips edit through the live query path without a branch action', 
   assert.ok(!source.includes('state.pendingBranch'));
   assert.ok(!source.includes('branch_from_parent:'));
   assert.ok(!markup.includes('Schema explorer'));
+});
+test('ordinary plot follow-ups do not branch through a bounded history preview', () => {
+  const sendPath = source.slice(source.indexOf('async function send('),
+    source.indexOf('async function sendFromAnswer('));
+  assert.ok(sendPath.includes('parent_run_id: state.branchFromRunId'));
+  assert.ok(!sendPath.includes('parent_run_id: state.activeRunId'));
+  assert.ok(sendPath.includes('state.branchFromRunId = null;'));
+  const historyPath = source.slice(source.indexOf('async function continueRun('),
+    source.indexOf('async function rerunSaved('));
+  assert.ok(historyPath.includes('state.branchFromRunId = runId;'));
 });
 test('correctness and optimization actions live in the SQL panel only', () => {
   const sqlPane = markup.split('<section class="panel-card sql-panel-pane"')[1].split('</section>')[0];
@@ -197,13 +241,44 @@ test('single-value answer uses a readable label and exact grouped number', () =>
   const display = vm.runInNewContext(`${helpers}; ({readableResultLabel, formatKpiValue})`);
   assert.equal(display.readableResultLabel('total_monthly_consumption'), 'Total monthly consumption');
   assert.equal(display.readableResultLabel('CustomerID'), 'Customer ID');
-  assert.equal(display.formatKpiValue(3415480125.73), '3,415,480,125.73');
+  assert.equal(display.formatKpiValue(3415480125.73), '3.42B');
   assert.equal(display.formatKpiValue('1234567890.123456789'), '1,234,567,890.123456789');
   assert.equal(display.formatKpiValue('001234'), '001234');
-  assert.equal(display.formatKpiValue(null), 'NULL');
+  assert.equal(display.formatKpiValue(null), '—');
   const preview = source.slice(source.indexOf('function renderAnswerPreview('), source.indexOf('async function appendAssistant('));
-  assert.ok(preview.includes('readableResultLabel(columns[0])'));
-  assert.ok(preview.includes('formatKpiValue(rows[0][0])'));
+  assert.ok(preview.includes('readableResultLabel(column)'));
+  assert.ok(preview.includes('formatKpiValue(rows[0][columns.indexOf(column)])'));
+});
+test('multi-metric KPI cards preserve exact values and retain currency context', () => {
+  const node = () => ({children: [], classList: {add() {}}, append(...items) {
+    this.children.push(...items);
+  }});
+  const render = vm.runInNewContext(`${source.slice(source.indexOf('function readableResultLabel('),
+    source.indexOf('function chartMatchesResultIdentity('))}; renderAnswerPreview`,
+  {document: {createElement: node}});
+  const preview = node();
+  render({querySelector: () => preview}, {generation: {accepted: true, truncated: false,
+    columns: ['CustomerID', 'total_spending', 'average_price', 'Currency'],
+    rows: [[123, 1234567.89, null, 'EUR']]}}, 'sql');
+  assert.equal(preview.children.length, 2);
+  assert.equal(preview.children[0].children[1].textContent, '1.23M');
+  assert.equal(preview.children[1].children[1].textContent, '—');
+  assert.ok(preview.children[0].children[2].textContent.includes('Currency: EUR'));
+  const partial = node();
+  render({querySelector: () => partial}, {generation: {accepted: true, truncated: true,
+    columns: ['total'], rows: [[1]]}}, 'sql');
+  assert.equal(partial.children.length, 0);
+});
+test('series chart choices expose heatmaps and treemaps only with usable measures', () => {
+  const spec = {chart_type: 'multi_line', x: 'Month', y: 'Revenue', series: 'Country',
+    time_format: 'month', data: [{Month: '202601', Country: 'DE', Revenue: 2},
+      {Month: '202601', Country: 'FR', Revenue: 3}]};
+  assert.ok(explorer.choices(spec).includes('heatmap'));
+  assert.ok(explorer.choices(spec).includes('treemap'));
+  assert.ok(explorer.choices(spec).includes('grouped_bar'));
+  const missing = {...spec, data: [{Month: '202601', Country: 'DE', Revenue: null}]};
+  assert.ok(!explorer.choices(missing).includes('heatmap'));
+  assert.ok(!explorer.choices(missing).includes('treemap'));
 });
 test('inspector has separate context, schema, recovery, pipeline and tokens tabs', () => {
   for (const tab of ['understanding', 'schema', 'recovery', 'pipeline', 'tokens']) {
@@ -214,7 +289,7 @@ test('inspector has separate context, schema, recovery, pipeline and tokens tabs
   assert.ok(markup.includes('id="tokensContent"'));
   assert.ok(source.includes('renderPipelineDetails(pipelineTarget'));
   assert.ok(source.includes('renderTokenAccounting(tech'));
-  assert.ok(source.includes('pipelineTarget.append(attemptsCard)'));
+  assert.ok(!source.includes('pipelineTarget.append(attemptsCard)'));
   assert.ok(styles.includes('.pipeline-bar-fill'));
   assert.ok(markup.includes('id="inspectorBackdrop"'));
 });
@@ -232,16 +307,30 @@ test('pipeline bars represent measured stage time and leave missing stages unmea
   });
   pipeline(fragment, {total: 2000, routing: 500}, {}, {});
   assert.equal(container.children[0].children[1].textContent, '2.0 s');
-  const assistant = container.children.find(row => row.children[0]?.textContent === 'Assistant model');
-  assert.equal(assistant.children[1].textContent, 'qwen/qwen3.8-27b');
-  const context = container.children.find(row => row.children[0]?.textContent === 'Context');
-  assert.equal(context.children[1].textContent, 'Retrieval');
-  assert.ok(container.children.every(row => !row.children[1]?.textContent?.includes('groq ·')));
+  const assistant = container.children.find(row => row.children[0]?.textContent === 'Assistant configured');
+  assert.equal(assistant, undefined);
+  assert.ok(!source.includes('Configured models'));
   const routing = container.children.find(row => row.children[0]?.textContent === 'Routing');
   assert.equal(routing.children[2].children[0].style.width, '25%');
   const unknown = container.children.find(row => row.children[0]?.textContent === 'Context planning');
   assert.equal(unknown.children[1].textContent, 'Not reported');
   assert.equal(unknown.children[2].children[0].style.width, '0%');
+  pipeline(fragment, {total: 1000, top_decisions: 200, result_explanation: 30}, {
+    call_ledger: [{kind: 'MODEL', component: 'conversational_agent', task: 'decision',
+      provider: 'groq', effective_model: 'qwen', input_tokens: 10, output_tokens: 5,
+      latency_ms: 200, retry_count: 1, status: 'SUCCEEDED'}],
+  }, {});
+  assert.equal(container.children.some(row => row.children[0]?.textContent === 'SQL generation and repair'), false);
+  assert.equal(container.children.find(row => row.children[0]?.textContent === 'Top-layer decisions')
+    .children[1].textContent, '200 ms');
+  const call = container.children.find(row => row.children[0]?.textContent === 'conversational_agent · decision');
+  assert.ok(call.children[1].textContent.includes('15 tokens'));
+  assert.ok(call.children[1].textContent.includes('retry 1'));
+  const labels = container.children.map(row => row.textContent || row.children[0]?.textContent);
+  assert.ok(labels.indexOf('Stage timing') < labels.indexOf('Model calls'));
+  assert.ok(labels.includes('Model calls'));
+  assert.ok(!labels.includes('Configured models'));
+  assert.equal(call.className, 'pipeline-run pipeline-model-call');
 });
 test('context inspector follows the flat prototype layout using live response facts', () => {
   assert.ok(markup.includes('<span>Context inspector</span>'));
@@ -267,10 +356,13 @@ test('inspector context cards are built from response rows, not prototype values
   assert.ok(styles.includes('.inspect-tile-value'));
   assert.ok(!source.includes('Example reference · Check actual schema'));
 });
-test('successful response template orders Answer, Data and SQL', () => {
+test('successful response offers exclusive Visualization Data SQL views', () => {
   const template = markup.split('<template id="assistantTemplate">')[1].split('</template>')[0];
-  for (const tab of ['answer', 'sql', 'data']) assert.ok(template.includes(`data-response-tab="${tab}"`));
-  assert.ok(template.indexOf('data-response-tab="answer"') < template.indexOf('data-response-tab="data"'));
+  assert.ok(template.indexOf('class="response-note"') < template.indexOf('class="response-tabs"'),
+    'Chart limitations must remain readable when Data is the selected tab');
+  for (const tab of ['sql', 'data']) assert.ok(template.includes(`data-response-tab="${tab}"`));
+  assert.ok(template.includes('data-response-tab="answer"'));
+  assert.ok(template.indexOf('class="response-tabs"') < template.indexOf('class="answer-tab-panel"'));
   assert.ok(template.indexOf('data-response-tab="data"') < template.indexOf('data-response-tab="sql"'));
   assert.ok(template.includes('class="answer-tab-panel"'));
   assert.ok(template.includes('class="sql-result-split" hidden'));
@@ -278,7 +370,7 @@ test('successful response template orders Answer, Data and SQL', () => {
   assert.ok(template.includes('class="panel-card result-panel-pane" role="tabpanel" hidden'));
   assert.ok(template.indexOf('class="chart-section"') > template.indexOf('class="answer-tab-panel"'));
   const answerRenderer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function actionButton('));
-  assert.ok(answerRenderer.includes('wireResponseTabs(article, {sql: Boolean(sqlText), data: Boolean(generation.columns?.length)})'));
+  assert.ok(answerRenderer.includes('wireResponseTabs(article, {answer:mode === "chart" && chartDataComplete,'));
   assert.ok(!answerRenderer.includes('options.restored ? "sql"'));
 });
 test('a chart is not rendered against a different SQL result identity', () => {
@@ -292,6 +384,22 @@ test('a chart is not rendered against a different SQL result identity', () => {
   assert.equal(matches({result_id: 'legacy', presentation_state: {}}), true);
   assert.ok(source.includes('const chartDataComplete = chartMatchesResultIdentity(body)'));
   assert.ok(source.includes('article.dataset.resultId = body.result_id || ""'));
+});
+test('plot-only follow-ups hide Data and SQL without hiding same-turn SQL plus plot', () => {
+  const helper = source.slice(source.indexOf('function isPlotOnlyTurn('),
+    source.indexOf('async function appendAssistant('));
+  const plotContext = vm.createContext({});
+  vm.runInContext(helper, plotContext);
+  assert.equal(plotContext.isPlotOnlyTurn({operation: 'VISUALIZE', call_ledger: [
+    {component: 'result_cache_reuse'}]}), true);
+  assert.equal(plotContext.isPlotOnlyTurn({operation: 'VISUALIZE', call_ledger: [
+    {component: 'sql_generation'}, {component: 'sql_execution'}]}), false);
+  assert.equal(plotContext.isPlotOnlyTurn({operation: 'NEW_QUERY', call_ledger: []}), false);
+  const renderer = source.slice(source.indexOf('async function appendAssistant('),
+    source.indexOf('function actionButton('));
+  assert.ok(renderer.includes('wireResponseTabs(article'));
+  assert.ok(renderer.includes('sqlNotAvailable || plotOnly'));
+  assert.ok(renderer.includes('sqlNotAvailable || explanatory || plotOnly'));
 });
 const tabsContext = vm.createContext({window: {requestAnimationFrame: callback => callback()}});
 vm.runInContext(source.slice(source.indexOf('/* Response views are local'), source.indexOf('function wireChartSection(')), tabsContext);
@@ -338,10 +446,35 @@ test('response tabs are independent, keep the chart and never execute a query', 
   first.buttons.data.listeners.click();
   assert.equal(first.data.hidden, false);
   assert.equal(first.sql.hidden, true);
+  assert.equal(first.answer.hidden, true);
+  assert.equal(first.split.hidden, false);
   first.buttons.answer.listeners.click();
   assert.equal(first.answer.hidden, false);
   assert.equal(first.split.hidden, true);
-  assert.ok(resized >= 3);
+  const noChart=makeArticle();
+  tabsContext.wireResponseTabs(noChart.article,{answer:false,data:true,sql:true,map:false});
+  assert.equal(noChart.article.dataset.activeResponseTab,'data');
+  assert.equal(noChart.buttons.answer.hidden,true);
+  assert.equal(noChart.buttons.answer.disabled,true);
+  assert.equal(noChart.answer.hidden,true);
+  assert.ok(resized >= 2);
+});
+test('Clear cancellation makes no reset or history deletion requests', async () => {
+  let handler, calls=0, confirmations=0;
+  const script=source.slice(source.indexOf('$("#clearHistory").addEventListener'),source.indexOf('$("#resetButton").addEventListener'));
+  vm.runInNewContext(script,{$:()=>({addEventListener:(name,callback)=>{handler=callback;}}),
+    state:{busy:false},window:{confirm:()=>{confirmations++;return false;}},
+    api:()=>{calls++;throw Error('Cancelled clear must not call API');}});
+  await handler(); assert.equal(confirmations,1);assert.equal(calls,0);
+});
+test('visual refinements preserve accessible avatar and confirmation styling', () => {
+  assert.ok(styles.includes('border:1px solid #b7dfc5'));
+  assert.ok(styles.includes('font-size:14px; font-weight:500; color:#fca5a5'));
+  assert.ok(markup.includes('data-icon="trash"></span>Clear'));
+  assert.equal(markup.split('class="speaker ai"').length-1,markup.split('class="speaker ai"><span class="avatar"><img src="/static/queryflow_leaf_avatar.svg"').length-1);
+  const plotly=fs.readFileSync('web/plotly_view.js','utf8');
+  assert.ok(plotly.includes('rangeslider: {visible: false}'));
+  assert.ok(plotly.includes('color:"#ffffff",width:2'));
 });
 test('a running question does not auto-scroll progress or the final answer', () => {
   const progress = source.slice(source.indexOf('function appendProgress('), source.indexOf('function wait('));
@@ -350,27 +483,66 @@ test('a running question does not auto-scroll progress or the final answer', () 
   assert.ok(!answer.includes('scrollIntoView'));
   assert.ok(!styles.includes('.thread-scroll { flex: 1; overflow-y: auto; overscroll-behavior: contain; scroll-behavior: smooth; }'));
 });
+test('retained-result search and sorting preserve original rows and zero matches', () => {
+  const context = vm.createContext({});
+  vm.runInContext(source.slice(source.indexOf('function filterAndSortResultRows('),
+    source.indexOf('function renderTable(')), context);
+  const rows = [['Germany', 10], ['France', null], ['Germany', 2]];
+  const before = JSON.stringify(rows);
+  assert.equal(JSON.stringify(context.filterAndSortResultRows(rows, 'GERMANY', 1)),
+    JSON.stringify([['Germany', 2], ['Germany', 10]]));
+  assert.equal(JSON.stringify(context.filterAndSortResultRows(rows, 'absent')), '[]');
+  assert.equal(JSON.stringify(rows), before);
+  assert.ok(source.includes('localView && Boolean(options.truncated && options.loadPage)'));
+});
+test('QueryFlow branding has leaf and hides database and Home navigation', () => {
+  assert.ok(markup.includes('class="brand-title">QueryFlow'));
+  assert.ok(markup.includes('class="brand-mark" data-icon="leaf"'));
+  assert.ok(!markup.includes('id="homeNavigation"'));
+  assert.ok(!markup.includes('id="dataNavigation"'));
+  assert.ok(markup.includes('id="historySearchToggle"'));
+});
+test('SQL metadata sits beside SQL and inspector stays closed until requested', () => {
+  assert.ok(markup.includes('class="sql-workspace"'));
+  assert.ok(markup.includes('class="sql-info-card" aria-label="Query information"'));
+  const sqlTemplate = markup.split('class="panel-card sql-panel-pane"')[1].split('class="panel-card result-panel-pane"')[0];
+  assert.ok(!sqlTemplate.includes('expand-button'));
+  assert.ok(!sqlTemplate.includes('sql-download'));
+  assert.ok(sqlTemplate.includes('copy-button'));
+  assert.ok(sqlTemplate.indexOf('copy-button') < sqlTemplate.indexOf('class="sql-workspace"'));
+  assert.ok(styles.includes('grid-template-columns:minmax(0,1fr) minmax(220px,280px)'));
+  const init = source.slice(source.indexOf('async function initialize('), source.indexOf('function setHealth('));
+  assert.ok(!init.includes('setInspectorOpen(true)'));
+  assert.ok(source.includes('No execution plan was recorded.'));
+});
 test('Queryflow colors follow the supplied light and dark reference palettes', () => {
   for (const color of [
-    '--bg: #f0fdf4', '--surface: #ffffff', '--text: #0f172a',
-    '--accent: #16a34a', '--nav: #064e3b', '--sql-bg: #1d2130',
-    '--success: #20946c', '--danger: #d45d65', '--warning: #c1803a',
+    '--bg: #f8faf9', '--surface: #ffffff', '--text: #0f172a',
+    '--accent: #168447', '--nav: #103d32', '--sql-bg: #f8fafc',
+    '--success: #16a34a', '--danger: #dc2626', '--warning: #c1803a',
     '--surface: #242633', '--border: #363747',
   ]) assert.ok(styles.includes(color), `Missing reference token ${color}`);
 });
 class Element {
-  constructor() { this.children = []; }
+  constructor() { this.children = []; this.style = {}; this.dataset = {}; }
   append(...children) { this.children.push(...children); }
+  prepend(...children) { this.children.unshift(...children); }
+  replaceChildren(...children) { this.children = [...children]; }
+  remove() {}
+  get firstChild() { return this.children[0]; }
   createTHead() { const child = new Element(); this.append(child); return child; }
   createTBody() { return this.createTHead(); }
   insertRow() { return this.createTHead(); }
   insertCell() { return this.createTHead(); }
-  classList = { add() {} };
+  classList = { add() {}, toggle() {}, contains: () => false };
   setAttribute(name, value) { this[name] = value; }
   addEventListener(name, callback) { this.listeners ||= {}; this.listeners[name] = callback; }
 }
 const context = vm.createContext({
-  document: { createElement: () => new Element() },
+  document: {
+    createElement: () => new Element(),
+    createTextNode: value => Object.assign(new Element(), {textContent: String(value)}),
+  },
   window: { matchMedia: () => ({ matches: false }) },
 });
 context.document.createElementNS = () => new Element();
@@ -382,6 +554,18 @@ test('ECharts adapter reads the validated data and preserves negative values', (
   assert.equal(option.series[0].data[0], -2);
   assert.equal(option.series[0].data[1], 4);
   assert.equal(option.xAxis.data[0], 'A');
+});
+test('approved display colors change palette without changing chart data', () => {
+  const spec = {chart_type: 'bar', x: 'Category', y: 'Value',
+    data: [{Category: 'A', Value: 2}, {Category: 'B', Value: 4}]};
+  const violet = context.window.QueryflowECharts.buildOption({...spec, display_palette: 'violet'});
+  const ocean = context.window.QueryflowECharts.buildOption({...spec, display_palette: 'ocean'});
+  assert.notEqual(violet.color[0], ocean.color[0]);
+  assert.equal(JSON.stringify(violet.series[0].data), JSON.stringify(ocean.series[0].data));
+  const plotlyContext = vm.createContext({window: {}});
+  vm.runInContext(fs.readFileSync(`${__dirname}/../web/plotly_view.js`, 'utf8'), plotlyContext);
+  const figure = plotlyContext.window.QueryflowPlotly.buildFigure({...spec, display_palette: 'forest'});
+  assert.equal(figure.data[0].marker.color, '#27845c');
 });
 test('ECharts adapter renders separate named series without inventing zeros', () => {
   const spec = {chart_type: 'stacked_bar', x: 'Month', y: 'Revenue', series: 'Country',
@@ -411,7 +595,8 @@ test('ECharts preserves all 50 points in chronological order and exposes zoom', 
   assert.equal(option.series[0].data.length, 50);
   assert.equal(option.series[0].data[0], 0);
   assert.equal(option.series[0].data[49], 49);
-  assert.equal(option.dataZoom.length, 2);
+  assert.equal(option.dataZoom.length, 1);
+  assert.equal(option.dataZoom[0].type, 'inside');
 });
 test('ECharts renders missing points as gaps, keeps zero and negative values, and rejects unsafe stacks', () => {
   const base = {x: 'Month', y: 'Revenue', time_format: 'month', data: [
@@ -542,14 +727,14 @@ test('zoom counts unique positions and also handles dense ordinary categories', 
     }))});
   assert.equal(context.window.QueryflowECharts.buildOption(make(2, true)).dataZoom.length, 0);
   assert.equal(context.window.QueryflowECharts.buildOption(make(25, true)).dataZoom.length, 1);
-  assert.equal(context.window.QueryflowECharts.buildOption(make(26, true)).dataZoom.length, 2);
-  assert.equal(context.window.QueryflowECharts.buildOption(make(30, false)).dataZoom.length, 2);
-  assert.equal(context.window.QueryflowECharts.buildOption({...make(30, false), chart_type: 'horizontal_bar'}).dataZoom.length, 2);
+  assert.equal(context.window.QueryflowECharts.buildOption(make(26, true)).dataZoom.length, 1);
+  assert.equal(context.window.QueryflowECharts.buildOption(make(30, false)).dataZoom.length, 1);
+  assert.equal(context.window.QueryflowECharts.buildOption({...make(30, false), chart_type: 'horizontal_bar'}).dataZoom.length, 1);
   assert.ok(!fs.readFileSync(`${__dirname}/../web/echarts_view.js`, 'utf8').includes('spec.chart_type !== "horizontal_bar"'));
   const multi = make(26, true);
   multi.chart_type = 'multi_line'; multi.series = 'Country';
   multi.data = multi.data.flatMap(row => [{...row, Country: 'DE'}, {...row, Country: 'FR'}]);
-  assert.equal(context.window.QueryflowECharts.buildOption(multi).dataZoom.length, 2);
+  assert.equal(context.window.QueryflowECharts.buildOption(multi).dataZoom.length, 1);
   const zoomed = explorer.apply(make(26, true), {start: '2026-01-10', end: '2026-01-20'});
   assert.equal(zoomed.data.length, 11);
 });
@@ -613,7 +798,13 @@ test('conversation spacing is compact and chart switching stays in the header', 
   assert.ok(styles.includes('.user-message { margin-bottom: 12px; }'));
   assert.ok(styles.includes('margin-top: 8px; padding: 4px'));
   const wiring = source.slice(source.indexOf('function wireChartSection('), source.indexOf('function toast('));
-  assert.ok(wiring.includes('kinds.append(button)'));
+  assert.ok(wiring.includes('menu.append(button)'));
+  assert.ok(wiring.includes('picker.className = "chart-choice"'));
+  assert.ok(wiring.includes('summary.setAttribute("aria-label", "Choose chart type")'));
+  assert.ok(styles.includes('.chart-kinds { overflow:visible;'));
+  assert.ok(wiring.includes('icon(chartSymbol(next.chart_type), 19)'));
+  assert.ok(markup.includes('data-icon="code"></span>SQL'));
+  assert.ok(markup.includes('data-icon="table"></span><strong>Data</strong>'));
   assert.ok(!wiring.includes('section.querySelector(".chart-suggestions")'));
   const answer = source.slice(source.indexOf('async function appendAssistant('), source.indexOf('function actionButton('));
   assert.ok(!answer.includes('renderBackendSuggestions('));
@@ -626,15 +817,227 @@ test('chart filter and parameter controls are removed while zoom remains', () =>
   assert.ok(source.includes('article._echart?.resetZoom?.()'));
 });
 
+const formatContext = vm.createContext({window: {}});
+vm.runInContext(fs.readFileSync(`${__dirname}/../web/formatters.js`, 'utf8'), formatContext);
 vm.runInContext(source.slice(source.indexOf('function renderTable('), source.indexOf('function downloadCsv(')), context);
-test('result table renders headers, rows and NULL explicitly', () => {
+test('result table renders headers with sorting, rows and NULL explicitly', () => {
   const container = new Element();
   context.renderTable(container, ['customer', 'amount'], [['Alice', null]]);
   const table = container.children[0];
-  assert.equal(table.children[0].children[0].children[0].textContent, 'customer');
-  const cells = table.children[1].children[0].children;
+  assert.ok(table.children[1].children[0].children[0].textContent.includes('customer'));
+  const cells = table.children[2].children[0].children;
   assert.equal(cells[0].textContent, 'Alice');
-  assert.equal(cells[1].children[0].textContent, 'NULL');
+  assert.equal(cells[1].children[0].textContent, '—');
+});
+
+vm.runInContext(`${fs.readFileSync(`${__dirname}/../web/formatters.js`, 'utf8')}\nglobalThis.QueryflowFormat = window.QueryflowFormat;`, context);
+test('metadata-aware formatter groups integers, compacts big numbers, and formats verified periods only', () => {
+  const {formatCellValue, formatNumber} = formatContext.window.QueryflowFormat;
+  assert.equal(formatCellValue(1234567), '1,234,567');
+  assert.equal(formatNumber(44080000), '44.08M');
+  assert.equal(formatCellValue(44080000), '44.08M');
+  assert.equal(formatCellValue(1234567, {unit: 'EUR'}),
+    new Intl.NumberFormat('en', {style: 'currency', currency: 'EUR', maximumFractionDigits: 2}).format(1234567));
+  assert.equal(formatCellValue(1234567, {unit: 'ratio'}), '123,456,700%');
+  assert.equal(formatCellValue(1234567, {unit: '%'}), '1,234,567%');
+  assert.equal(formatCellValue(-1234567), '-1,234,567', 'signs are preserved');
+  assert.equal(formatCellValue(12.3456), '12.3456', 'precision is preserved for plain decimals');
+  // 201201 is only formatted as Jan 2012 with verified month evidence.
+  assert.equal(formatCellValue('201201', {timeFormat: 'month', timeColumn: 'month', column: 'month'}), 'Jan 2012');
+  assert.equal(formatCellValue('201201', {timeFormat: 'month', timeColumn: 'other', column: 'month'}), '201201');
+  assert.equal(formatCellValue('201201'), '201201');
+  assert.equal(formatCellValue(2012, {timeFormat: 'year', timeColumn: 'year', column: 'year'}), '2012');
+  // NULL cells are handled by renderTable's explicit badge; unknown inputs pass through.
+  assert.equal(formatCellValue('plain text'), 'plain text');
+});
+
+test('result table applies display formatting while keeping raw hover values', () => {
+  const container = new Element();
+  context.renderTable(container, ['month', 'amount'],
+    [['201201', 44080000], ['201202', 1234567]]);
+  const first = container.children[0].children[2].children[0].children;
+  assert.equal(first[0].title, '201201', 'raw value stays on hover');
+  const second = container.children[0].children[2].children[1].children;
+  assert.equal(second[1].textContent, '1,234,567');
+  // Without verified temporal evidence the raw period text is preserved.
+  assert.equal(first[0].textContent, '201201');
+  assert.equal(second[1].title, '1234567', 'raw values stay on hover for formatted cells');
+});
+
+test('verified temporal metadata formats period keys and keeps raw values on hover', () => {
+  const container = new Element();
+  context.renderTable(container, ['month', 'amount'], [['201201', 44080000]],
+    {temporal: {column: 'month', time_format: 'month'}});
+  const first = container.children[0].children[2].children[0].children;
+  assert.equal(first[0].textContent, 'Jan 2012');
+  assert.equal(first[0].title, '201201');
+});
+
+test('result table stays at 5 rows per page with footer page controls', async () => {
+  const container = new Element();
+  const controls = new Element();
+  container.parentElement = {querySelector: () => controls};
+  const rows = Array.from({length: 120}, (_, index) => [index, `Customer ${index}`]);
+  const grid = context.renderTable(container, ['ID', 'Customer'], rows);
+  const table = container.children[0], body = table.children[2];
+  assert.equal(body.children.length, 5);
+  assert.equal(rows.length, 120);
+  assert.ok(!controls.children.some(child => child.className && String(child.className).includes('table-page-size')),
+    'the rows-per-page select is gone; 5 rows per page is fixed');
+  await grid.goToPage(1);
+  assert.equal(body.children.length, 5);
+  assert.equal(body.children[0].children[0].textContent, '5');
+  assert.ok(controls.children.some(child => child.className === 'table-pages'),
+    'page controls render in a bottom-right group');
+  const next = controls.children.find(child => child.className === 'table-pages')
+    .children.find(button => button.textContent === 'Next');
+  next.listeners.click();
+  await Promise.resolve();
+  assert.equal(body.children.length, 5);
+  assert.equal(body.children[0].children[0].textContent, '10');
+  assert.equal(rows[119][0], 119, 'source rows are never mutated');
+});
+
+test('table width follows measured content and the card stays full-width', () => {
+  const container = new Element();
+  const pane = {style: {}, classList: {contains: name => name === 'result-panel-pane'}, querySelector: () => null};
+  container.parentElement = pane;
+  const columns = ['ID', 'Description', ...Array.from({length: 6}, (_, index) => `C${index}`)];
+  const rows = Array.from({length: 200}, (_, index) =>
+    [index, index === 199 ? 'a'.repeat(90) : 'short', ...Array(6).fill(3)]);
+  context.renderTable(container, columns, rows);
+  const table = container.children[0];
+  const columnWidths = table.children[0].children.map(col => Number.parseInt(col.style.width));
+  assert.ok(columnWidths[1] > columnWidths[0]);
+  assert.equal(columnWidths[1], 420, 'very long values are capped');
+  assert.equal(Number.parseInt(table.style.width), columnWidths.reduce((a, b) => a + b, 0),
+    'the table is content-sized, never stretched across the chat');
+  assert.equal(pane.style.width, '100%', 'the surrounding response card stays full-width');
+  assert.ok(!table.style.minWidth, 'table is not forced to fill its parent');
+  assert.ok(styles.includes('max-height: min(58vh, 640px)'));
+  assert.ok(styles.includes('width: max-content; table-layout: fixed'));
+  assert.ok(styles.includes('.result-panel-pane.table-fullscreen'));
+  assert.ok(styles.includes('position: sticky; top: 0'));
+  assert.ok(styles.includes('.result-grid td.numeric'));
+});
+
+test('hiding a column leaves no reserved gap inside the table borders', () => {
+  const container = new Element();
+  const tools = new Element();
+  const header = {querySelector: selector => selector === '.data-header-tools' ? tools : null};
+  const pane = {
+    style: {},
+    classList: {contains: name => name === 'result-panel-pane'},
+    querySelector: selector => selector === '.data-header' ? header : null,
+  };
+  container.parentElement = pane;
+  context.renderTable(container, ['ID', 'Detail'], [[1, 'x'], [2, 'y']]);
+  const table = container.children[0];
+  const filters = tools.children.find(el => el.className === 'data-column-controls');
+  // summary and hint first, then one label with its checkbox per column
+  const detailCheck = filters.children[3].children[0];
+  detailCheck.checked = false;
+  detailCheck.listeners.change();
+  const widths = table.children[0].children.map(col => Number.parseInt(col.style.width));
+  assert.equal(widths[1], 0, 'hidden columns collapse to zero width');
+  assert.equal(Number.parseInt(table.style.width), widths[0],
+    'table width excludes hidden columns');
+});
+
+test('search, filters and export sit in the Data header; no toolbar under the table', () => {
+  const dataSection = markup.split('class="data-header"')[1].split('class="table-wrap"')[0];
+  assert.ok(dataSection.includes('data-header-tools"'));
+  assert.ok(dataSection.includes('csv-button"'));
+  assert.ok(dataSection.includes('Export CSV'));
+  assert.ok(!markup.includes('class="data-toolbar"'));
+  assert.ok(!source.includes('toolbar.className = "data-toolbar"'));
+  const css = fs.readFileSync(`${__dirname}/../web/styles.css`, 'utf8');
+  assert.ok(css.includes('.data-header { display: flex;'));
+  assert.ok(css.includes('justify-content: space-between'));
+});
+
+test('exporting data posts a chat bubble with the Queryflow AI avatar', () => {
+  // Exactly one Data handler announces the exported retained view.
+  assert.ok(source.includes('appendExportBubble(exportColumns, exportRows'),
+    'the Data tab export must add a bubble for the exported view');
+  assert.ok(!source.includes('appendExportBubble(generation.columns || [], generation.rows || []'));
+  assert.ok(source.includes('truncated: Boolean(options.truncated)'));
+  // The bubble is a real assistant message with the same leaf avatar as answers.
+  const template = markup.split('<template id="exportTemplate">')[1].split('</template>')[0];
+  assert.ok(template.includes('class="speaker ai"'));
+  assert.ok(template.includes('queryflow_leaf_avatar.svg'));
+  assert.ok(template.includes('class="export-bubble" role="status"'));
+  assert.ok(template.includes('class="export-note"'));
+  assert.ok(template.includes('class="export-again"'));
+  // Records retained vs truncated scope without re-running SQL or models.
+  const bubble = source.slice(source.indexOf('function appendExportBubble('),
+    source.indexOf('function downloadCsv('));
+  assert.ok(bubble.includes('truncated'));
+  assert.ok(bubble.includes('#exportTemplate"'));
+  assert.ok(bubble.includes('downloadCsv(columns, rows)'), 'Download again re-exports raw values');
+  assert.ok(!bubble.includes('await api('));
+  // The Data tab button exports the retained view with raw values only.
+  assert.ok(source.includes('exportButton._exportWired'));
+  assert.ok(source.includes("const exportColumns = columns.filter((_, index) => visibleColumns[index]);"));
+  assert.ok(source.includes("viewRows.map(row => columns.map((_, index) => row[index])"));
+  // Styling matches Queryflow's green visual language, including dark theme.
+  assert.ok(styles.includes('.export-bubble-icon'));
+  assert.ok(styles.includes('[data-theme="dark"] .export-bubble'));
+});
+
+test('narrow results stay content-sized without stretching columns', () => {
+  const container = new Element();
+  const pane = {style: {}, classList: {contains: name => name === 'result-panel-pane'}, querySelector: () => null};
+  container.parentElement = pane;
+  context.renderTable(container, ['ID'], [[1], [2]]);
+  assert.equal(container.children[0].style.width, '84px');
+  assert.equal(pane.style.width, '100%', 'two-column results never fill the chat width with column stretch');
+  assert.ok(styles.includes('.result-panel-pane { border-radius: 10px; }'));
+  assert.ok(styles.includes('width: auto !important; z-index: 90'));
+  assert.ok(!styles.includes('justify-self: start; max-width: 100%;'));
+});
+
+test('Canvas measurement distinguishes glyph widths and manual resize is retained', () => {
+  const createElement = context.document.createElement;
+  context.document.createElement = tag => tag === 'canvas'
+    ? {getContext: () => ({font: '', measureText: value => ({width: [...value].reduce(
+      (sum, character) => sum + (character === 'W' ? 14 : 4), 0)})})}
+    : new Element();
+  try {
+    const container = new Element();
+    const grid = context.renderTable(container, ['first', 'second'], [['iiiiiiii', 'WWWWWWWW']]);
+    const table = container.children[0];
+    const cols = table.children[0].children;
+    assert.ok(Number.parseInt(cols[1].style.width) > Number.parseInt(cols[0].style.width));
+    const handle = table.children[1].children[0].children[0].children[1];
+  // the sort button is prepended, so the resize handle is the second child
+    handle.listeners.pointerdown({preventDefault() {}, clientX: 0, pointerId: 1});
+    handle.listeners.pointermove({clientX: 90});
+    const resizedWidth = cols[0].style.width;
+    return grid.goToPage(0).then(() => assert.equal(cols[0].style.width, resizedWidth));
+  } finally {
+    context.document.createElement = createElement;
+  }
+});
+
+test('answer hides redundant verification and chart-type labels', () => {
+  assert.ok(!markup.includes('REQUESTED VISUALIZATION'));
+  assert.ok(!markup.includes('class="presentation-note"'));
+  assert.ok(!source.includes('body.presentation?.note'));
+  assert.ok(!source.includes('next.chart_type.replaceAll("_", " ")'));
+});
+
+test('Map tab requires a map request and complete valid coordinates', () => {
+  const mapContext = vm.createContext({});
+  vm.runInContext(source.slice(source.indexOf('function mapCoordinates('),
+    source.indexOf('function wireChartSection(')), mapContext);
+  const coordinates = mapContext.mapCoordinates;
+  assert.equal(coordinates(['Latitude', 'Longitude'], [[52.5, 13.4]], false, false), null);
+  assert.equal(coordinates(['Latitude', 'Longitude'], [[52.5, 13.4]], true, true), null);
+  assert.equal(coordinates(['Latitude', 'Longitude'], [[152.5, 13.4]], true, false), null);
+  assert.equal(JSON.stringify(coordinates(['Latitude', 'Longitude'], [[52.5, 13.4]], true, false)),
+    JSON.stringify({lat: [52.5], lon: [13.4]}));
+  assert.ok(markup.includes('data-response-tab="map" aria-selected="false" hidden'));
 });
 
 vm.runInContext(source.slice(source.indexOf('function visiblePipelineStage('), source.indexOf('async function send(')), context);
@@ -679,7 +1082,8 @@ test('successful result colors review and marks unused recovery as not needed', 
   context.updatePipeline(progress, 'completed', 'completed', [
     { stage: 'execution' },
   ], { generation: { accepted: true } });
-  assert.equal(classes.get('result_review:complete'), true);
+  assert.equal(classes.get('result_review:complete'), false);
+  assert.equal(classes.get('result_review:skipped'), true);
   assert.equal(classes.get('recovery:skipped'), true);
   assert.equal(classes.get('recovery:complete'), false);
 });
@@ -731,13 +1135,11 @@ test('query understanding chips show only fields from the confirmed semantic con
   context.renderSemanticChips({querySelector: () => empty}, {state:null});
   assert.equal(empty.hidden, true);
 });
-test('Understood as matches the v4 position and compact chip treatment', () => {
+test('Understood as is absent from response UI', () => {
   const template = markup.split('<template id="assistantTemplate">')[1].split('</template>')[0];
-  assert.ok(template.indexOf('class="result-head"') < template.indexOf('class="query-semantic-strip"'));
-  assert.ok(template.indexOf('class="query-semantic-strip"') < template.indexOf('class="response-tabs"'));
-  assert.ok(styles.includes('.query-semantic-chip { border:1px solid #e6e4ef; border-radius:8px'));
-  assert.ok(styles.includes('max-width:210px'));
-  assert.ok(styles.includes('.query-semantic-strip[hidden] { display:none; }'));
+  assert.ok(!template.includes('class="query-semantic-strip"'));
+  const render=source.slice(source.indexOf('async function appendAssistant('),source.indexOf('function actionButton('));
+  assert.ok(!render.includes('renderSemanticChips(fragment, body)'));
   const strip = new Element(); strip.hidden = true;
   context.renderSemanticChips({querySelector: () => strip}, {
     generation: {accepted: false}, state: {semantic_contract: {measures: ['revenue']}},
@@ -758,7 +1160,7 @@ test('Answer keeps a single KPI but never duplicates a result table', () => {
   }}, 'sql');
   assert.equal(scalar.hidden, false);
   assert.equal(scalar.children[0].textContent, 'Total monthly consumption');
-  assert.equal(scalar.children[1].textContent, '3,415,480,125.73');
+  assert.equal(scalar.children[1].textContent, '3.42B');
 });
 test('recovery diagnosis is shown once when it matches the answer text', () => {
   const helper = source.slice(source.indexOf('function sameDisplayText('), source.indexOf('function updateStatusPill('));
@@ -825,12 +1227,12 @@ test('grouped chart click keeps the raw date and series after display filtering'
   mounted.dispose();
 });
 test('data scope and tab switching do not expose query parameters', () => {
-  assert.ok(markup.includes('class="data-source-tab"'));
-  assert.ok(markup.includes('class="data-visible-tab"'));
+  assert.ok(!markup.includes('class="data-visible-tab"'));
+  assert.ok(markup.includes('class="table-controls"'));
   assert.ok(!markup.includes('class="chart-apply-query"'));
   const scope = source.slice(source.indexOf('function wireDataScope('), source.indexOf('function wireChartSection('));
   assert.ok(!scope.includes('sendFromAnswer('));
-  assert.ok(!scope.includes('api('));
+  assert.ok(scope.includes('"/api/results/page"'));
   const chart = source.slice(source.indexOf('function wireChartSection('), source.indexOf('function toast('));
   assert.ok(!chart.includes('await sendFromAnswer(runId,'));
 });

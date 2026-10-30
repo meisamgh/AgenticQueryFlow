@@ -566,8 +566,15 @@ async def refine_plan_with_model(  # noqa: ANN201 - explicit tuple return below
         message=message,
     )
     try:
+        task_completion = getattr(completer, "complete_task", None)
         complete = getattr(completer, "complete_detailed", None)
-        if callable(complete):
+        if callable(task_completion):
+            operation = task_completion(model, prompt, "decision", json_mode=True)
+            raw, usage = await asyncio.wait_for(
+                budget.wait(operation, kind="model") if budget else operation,
+                timeout=timeout_seconds,
+            )
+        elif callable(complete):
             operation = complete(model=model, prompt=prompt)
             raw, usage = await asyncio.wait_for(
                 budget.wait(operation, kind="model") if budget else operation,

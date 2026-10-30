@@ -250,6 +250,41 @@ def test_model_chart_prompt_receives_only_a_bounded_row_sample() -> None:
     assert recommendation is None
 
 
+def test_five_column_prompt_selects_relevant_candidates_without_extra_measures() -> None:
+    class SelectingModel:
+        calls = 0
+
+        async def complete_detailed(self, *, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            self.calls += 1
+            for guidance in (
+                "candidate for X-axis, Y-axis, series",
+                "smallest useful combination", "Exclude identifiers",
+                "Never change aggregation or grain", "preserve accepted encodings",
+            ):
+                assert guidance in prompt
+            return json.dumps({"primary_chart": {
+                "chart_type": "multi_line", "x": "Month", "y": "Revenue",
+                "series": "Country", "reason": "Compare revenue trends by country.",
+            }, "alternative_charts": []}), TokenUsage()
+
+    model = SelectingModel()
+    result, _, _ = asyncio.run(refine_charts_with_model(
+        model, provider="agentrouter", model="test",
+        question="Plot Month, Revenue and Country",
+        columns=["Month", "Revenue", "Country", "CustomerID", "Profit"],
+        rows=[["202601", 100.0, "Germany", 6, 20.0],
+              ["202602", 120.0, "Germany", 7, 25.0],
+              ["202601", 90.0, "France", 8, 15.0],
+              ["202602", 95.0, "France", 9, 16.0]],
+    ))
+    assert model.calls == 1
+    assert result is not None
+    assert result.primary_chart.x == "Month"
+    assert result.primary_chart.y == "Revenue"
+    assert result.primary_chart.series == "Country"
+    assert "Profit" not in result.primary_chart.y_measures
+
+
 def test_chart_type_only_followup_preserves_accepted_axes_and_metric() -> None:
     columns = ["country", "revenue", "cost"]
     rows = [["Germany", 100.0, 60.0], ["France", 80.0, 40.0]]
@@ -325,16 +360,19 @@ def test_plotting_fallback_keeps_previous_measure_and_requeries_period_change() 
             }, "alternative_charts": []}), TokenUsage()
 
     model = WrongMetricModel()
+    budget = RequestBudget(timeout_seconds=10, max_model_calls=0)
     outcome = asyncio.run(design_chart(
         result=result, objective="Change the chart to a horizontal bar",
         completer=model, provider="agentrouter", model="test",
-        budget=RequestBudget(timeout_seconds=10, max_model_calls=3),
+        budget=budget,
     ))
     assert outcome.status == "CHART_READY"
     assert outcome.spec is not None
     assert outcome.spec.x == prior.x and outcome.spec.y == prior.y
     assert outcome.spec.data == prior.data
-    assert model.calls == 1
+    assert model.calls == 0
+    assert budget.model_calls == 0
+    assert outcome.ledger == ()
     blocked = asyncio.run(design_chart(
         result=result, objective="Change to a horizontal bar for 2026",
         completer=model, provider="agentrouter", model="test",
@@ -342,7 +380,7 @@ def test_plotting_fallback_keeps_previous_measure_and_requeries_period_change() 
         changes=[RequestedChange(operation="CHANGE_PERIOD", target="year", new_value="2026")],
     ))
     assert blocked.status == "REQUERY_REQUIRED"
-    assert model.calls == 1
+    assert model.calls == 0
 
 
 def test_type_only_detection_excludes_new_analysis() -> None:

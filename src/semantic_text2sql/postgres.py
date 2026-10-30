@@ -12,6 +12,7 @@ import psycopg
 from psycopg import Connection
 
 from semantic_text2sql.database import DatabaseError
+from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.models import (
     ColumnInfo,
     ForeignKeyInfo,
@@ -27,6 +28,10 @@ class PostgresRegistry:
 
     def configured_ids(self) -> list[str]:
         return sorted(self.databases)
+
+    def dialect_for(self, db_id: str) -> DatabaseDialect:
+        self._dsn(db_id)
+        return "postgres"
 
     def _dsn(self, db_id: str) -> str:
         dsn = self.databases.get(db_id)

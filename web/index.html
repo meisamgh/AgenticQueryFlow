@@ -4,14 +4,14 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta name="description" content="Queryflow — intent-adaptive Text-to-SQL workspace" />
-    <title>Queryflow · Adaptive SQL Studio</title>
+    <title>QueryFlow · Conversational Analytics</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=qf4-12" />
+    <link rel="stylesheet" href="/static/styles.css?v=qf-chart-premium-3" />
     <script>
       // Apply the stored theme before first paint to avoid a flash.
       try {
@@ -27,9 +27,9 @@
     <div class="shell" id="appShell">
       <aside class="sidebar" aria-label="Navigation, history and settings">
         <div class="brand">
-          <div class="brand-mark" data-icon="zap"></div>
+          <div class="brand-mark" data-icon="leaf"></div>
           <div>
-            <div class="brand-title">queryflow<span>.</span></div>
+            <div class="brand-title">QueryFlow</div>
             <div class="brand-sub">ADAPTIVE SQL STUDIO</div>
           </div>
         </div>
@@ -41,14 +41,17 @@
         <div class="side-label">WORKSPACE</div>
         <nav class="side-nav" aria-label="Views">
           <a class="active" href="#composerZone" data-view="workspace"><span data-icon="message"></span><span>Conversations</span></a>
+          <a href="#themeToggle" id="settingsNavigation"><span data-icon="settings"></span><span>Appearance</span></a>
         </nav>
 
         <section class="side-section" aria-label="Conversation history">
           <div class="section-head">
             <span>Recent</span>
-            <button id="clearHistory" class="link-button" type="button">Clear</button>
+            <button id="historySearchToggle" class="link-button" type="button" aria-label="Search conversations" aria-expanded="false" aria-controls="historySearch"><span data-icon="search"></span></button>
+            <button id="clearHistory" class="link-button" type="button"><span data-icon="trash"></span>Clear</button>
           </div>
           <div class="run-list" id="conversationHistory" role="list"></div>
+          <input id="historySearch" class="history-search" type="search" placeholder="Search conversations…" aria-label="Search conversation history" hidden />
         </section>
 
         <div class="side-footer">
@@ -60,15 +63,13 @@
 
       <main class="workspace">
         <header class="topbar">
+          <button class="headbtn" id="sidebarToggle" type="button" aria-label="Toggle navigation" aria-expanded="true"><span data-icon="menu"></span></button>
           <div class="breadcrumbs">
             <span>Workspace</span><span class="crumb-sep">›</span>
             <strong id="threadBreadcrumb">Live database</strong>
           </div>
           <div class="top-actions">
-            <label class="header-database" for="databaseSelect">
-              <span>Data source</span>
-              <select id="databaseSelect" aria-label="Select data source"></select>
-            </label>
+            <select id="databaseSelect" hidden aria-hidden="true" tabindex="-1"></select>
             <section class="connection-card header-connection" id="connectionCard" aria-label="Connection status">
               <div class="connection-heading">
                 <span class="health-pill" id="healthStatus"><i></i><strong>Connection</strong><span>Connecting</span></span>
@@ -86,14 +87,12 @@
             <div class="intro" id="threadIntro" hidden>
               <div class="intro-eyebrow">INTENT-ADAPTIVE WORKSPACE</div>
               <h1 id="threadIntroTitle">Your workspace</h1>
-              <p>Grounded retrieval, read-only execution, verified recovery. Charts only when you ask for one.</p>
             </div>
 
             <section class="welcome" id="emptyState">
               <div class="welcome-mark" data-icon="sparkles"></div>
               <div class="intro-eyebrow">WELCOME TO QUERYFLOW</div>
               <h2>What would you like to know?</h2>
-              <p>Ask in plain language. Queryflow will show the SQL and results, or a chart when you request one.</p>
             </section>
 
             <section id="messages" class="messages"></section>
@@ -166,27 +165,26 @@
 
     <template id="assistantTemplate">
       <article class="message assistant-message">
-        <div class="speaker ai"><span class="avatar"><span data-icon="sparkles"></span></span>Queryflow <time>just now</time></div>
+        <div class="speaker ai"><span class="avatar"><img src="/static/queryflow_leaf_avatar.svg" alt="Queryflow AI" width="36" height="36"></span>QueryFlow <time>just now</time></div>
         <div class="answer">
           <section class="response-card">
             <header class="result-head">
               <span class="status-pill"><span data-icon="check"></span> <span class="status-pill-label">Ready</span></span>
             </header>
-            <div class="query-semantic-strip" hidden aria-label="Interpreted query constraints"></div>
+            <p class="response-note"></p>
             <nav class="response-tabs" role="tablist" aria-label="Response views" hidden>
-              <button type="button" role="tab" data-response-tab="answer" aria-selected="true">Answer</button>
-              <button type="button" role="tab" data-response-tab="data" aria-selected="false">Data</button>
-              <button type="button" role="tab" data-response-tab="sql" aria-selected="false">SQL</button>
+              <button type="button" role="tab" data-response-tab="answer" aria-selected="true"><span data-icon="chart-line"></span>Visualization</button>
+              <button type="button" role="tab" data-response-tab="data" aria-selected="false"><span data-icon="table"></span>Data</button>
+              <button type="button" role="tab" data-response-tab="sql" aria-selected="false"><span data-icon="code"></span>SQL</button>
+              <button type="button" role="tab" data-response-tab="map" aria-selected="false" hidden>Map</button>
             </nav>
-            <div class="answer-tab-panel" role="tabpanel">
-              <p class="response-note"></p>
-              <p class="presentation-note" hidden></p>
+            <div class="answer-tab-panel">
               <div class="chart-section" hidden>
               <header class="chart-head">
                 <div class="chart-head-left">
-                  <div class="chart-kicker">REQUESTED VISUALIZATION</div>
                   <div class="chart-heading">
                     <strong class="chart-title">Chart</strong>
+                    <span class="chart-change-badge" hidden></span>
                     <small class="chart-sub"></small>
                   </div>
                 </div>
@@ -205,6 +203,7 @@
               </header>
               <div class="recommended-plots"><span>Recommended plots</span><div class="chart-kinds" hidden></div></div>
               <div class="chart-slot"></div>
+              <div class="chart-kpi-row" aria-label="Result highlights" hidden></div>
               <div class="chart-zoom-guide" hidden>Time navigator · drag to zoom, pinch on touch, or use the range slider below the plot.</div>
               <div class="chart-zoom-actions" hidden><button type="button" class="chart-reset-zoom">Reset zoom</button></div>
               </div>
@@ -213,28 +212,40 @@
               <div class="answer-preview" hidden></div>
             </div>
 
+
             <div class="sql-result-split" hidden>
               <section class="panel-card sql-panel-pane" role="tabpanel" hidden>
                 <header>
                   <span data-icon="zap"></span><strong>Generated SQL</strong><small class="sql-validity"></small>
                   <div class="panel-actions">
                     <button class="icon-button copy-button" type="button" title="Copy SQL" data-icon="copy"></button>
-                    <button class="icon-button expand-button" type="button" title="Expand SQL" data-icon="maximize"></button>
                   </div>
                 </header>
+                <div class="sql-workspace">
                 <div class="sql-editor"><pre><code class="language-sql"></code></pre></div>
-                <div class="sql-actions" role="group" aria-label="SQL actions"></div>
+                <aside class="sql-info-card" aria-label="Query information">
+                  <div class="sql-metadata"></div>
+                  <div class="sql-actions" role="group" aria-label="SQL actions"></div>
+                </aside>
+                </div>
               </section>
               <section class="panel-card result-panel-pane" role="tabpanel" hidden>
-                <header>
-                  <span data-icon="table"></span><strong>Data</strong><small class="row-count"></small>
-                  <div class="panel-actions">
-                    <button class="icon-button csv-button" type="button" title="Download CSV" data-icon="download"></button>
+                <header class="data-header">
+                  <div class="data-header-left">
+                    <span data-icon="table"></span><strong>Data</strong>
+                    <small class="row-count"></small>
+                  </div>
+                  <div class="data-header-right">
+                    <div class="data-header-tools" aria-label="Data table tools"></div>
+                    <button class="icon-button csv-button" type="button" title="Download CSV" data-icon="download">Export CSV</button>
                   </div>
                 </header>
-                <nav class="data-view-tabs" role="tablist" aria-label="Data scope"><button type="button" class="data-source-tab" aria-selected="true">Source result</button><button type="button" class="data-visible-tab" aria-selected="false">Visible chart data</button></nav>
-                <p class="data-scope-note"></p>
                 <div class="table-wrap"></div>
+                <div class="table-controls"></div>
+              </section>
+              <section class="panel-card map-panel-pane" role="tabpanel" hidden>
+                <header><span data-icon="map"></span><strong>Map</strong></header>
+                <div class="map-slot"></div>
               </section>
             </div>
 
@@ -268,9 +279,25 @@
       </article>
     </template>
 
+    <template id="exportTemplate">
+      <article class="message assistant-message export-message">
+        <div class="speaker ai"><span class="avatar"><img src="/static/queryflow_leaf_avatar.svg" alt="Queryflow AI" width="36" height="36"></span>QueryFlow <time>just now</time></div>
+        <div class="answer">
+          <section class="export-bubble" role="status" aria-live="polite">
+            <span class="export-bubble-icon" data-icon="download" aria-hidden="true"></span>
+            <div class="export-bubble-body">
+              <p class="export-note"></p>
+              <p class="export-meta"></p>
+              <button type="button" class="export-again"><span data-icon="download"></span> Download again</button>
+            </div>
+          </section>
+        </div>
+      </article>
+    </template>
+
     <template id="progressTemplate">
       <article class="message assistant-message">
-        <div class="speaker ai"><span class="avatar"><span data-icon="sparkles"></span></span>Queryflow <time>thinking</time></div>
+        <div class="speaker ai"><span class="avatar"><img src="/static/queryflow_leaf_avatar.svg" alt="Queryflow AI" width="36" height="36"></span>QueryFlow <time>thinking</time></div>
         <div class="answer">
           <section class="waiting" role="status" aria-live="polite">
             <span class="spinner" aria-hidden="true"></span>
@@ -287,10 +314,14 @@
 
     <script src="https://cdn.plot.ly/plotly-4.1.1.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
-    <script src="/static/icons.js?v=3"></script>
-    <script src="/static/echarts_view.js?v=12"></script>
-    <script src="/static/plotly_view.js?v=1"></script>
-    <script src="/static/chart_explorer.js?v=2"></script>
-    <script src="/static/app.js?v=qf4-21"></script>
+    <script src="/static/icons.js?v=qf-icons-4"></script>
+    <script src="/static/chart_theme.js?v=5"></script>
+    <script src="/static/echarts_view.js?v=26"></script>
+    <script src="/static/plotly_view.js?v=16"></script>
+    <script src="/static/chart_explorer.js?v=8"></script>
+    <script src="/static/kpi_cards.js?v=13"></script>
+    <script src="/static/chart_change_bubble.js?v=3"></script>
+    <script src="/static/formatters.js?v=2"></script>
+    <script src="/static/app.js?v=qf-chart-restore-3"></script>
   </body>
 </html>

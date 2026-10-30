@@ -8,13 +8,15 @@ import os
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from time import monotonic, perf_counter
+from time import monotonic, perf_counter, time
 from typing import Any, cast
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import Field
+from sqlglot import parse_one
 from starlette.middleware.gzip import GZipMiddleware
 
 from semantic_text2sql.agent import TextToSQLAgent
@@ -46,6 +48,7 @@ from semantic_text2sql.conversational_bridge import ConversationalAnalyticsBridg
 from semantic_text2sql.data_requirement_validator import validate_reusability
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.explanation import deterministic_explanation, explain_turn_detailed
+from semantic_text2sql.external_connections import external_connections_from_environment
 from semantic_text2sql.filter_discovery import (
     _SENSITIVE_TYPES as _FILTER_FORBIDDEN_SEMANTIC_TYPES,
 )
@@ -68,6 +71,8 @@ from semantic_text2sql.llm import (
     GroqSQLModel,
     JustDoWorkSQLModel,
     ModelError,
+    OllamaCompleter,
+    OpenRouterSQLModel,
     RoutingSQLModel,
     TrueSotaSQLModel,
 )
@@ -88,6 +93,7 @@ from semantic_text2sql.models import (
     ModelProvider,
     PresentationState,
     ResultPresentation,
+    StrictModel,
     TokenUsage,
     TurnInterpretation,
     ValidationResult,
@@ -97,6 +103,7 @@ from semantic_text2sql.presentation import present_result
 from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.provider_registry import configured_model_options, supports_model
 from semantic_text2sql.recovery_events import recovery_events
+from semantic_text2sql.remote_databases import RemoteDatabaseRegistry
 from semantic_text2sql.result_cache import RecentResult
 from semantic_text2sql.run_history import RunHistoryStore, RunRecord, build_run_record
 from semantic_text2sql.runtime import (
@@ -143,6 +150,14 @@ from semantic_text2sql.voice import (
 logger = logging.getLogger(__name__)
 
 
+class ResultPageRequest(StrictModel):
+    session_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    result_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    offset: int = Field(ge=0, le=9_900)
+    page_size: int = Field(default=20, ge=1, le=100)
+
+
 def _planner_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
@@ -165,8 +180,15 @@ def create_app(
         )
     runs = run_history or RunHistoryStore.from_environment()
     postgres_databases = postgres_databases_from_environment()
-    postgres = PostgresRegistry(postgres_databases) if postgres_databases else None
+    external_connections = external_connections_from_environment()
+    postgres = (
+        RemoteDatabaseRegistry(postgres_databases, external_connections)
+        if external_connections
+        else PostgresRegistry(postgres_databases) if postgres_databases else None
+    )
     sqlite = DatabaseRegistry(Path(os.environ.get("TEXT2SQL_DATABASE_ROOT", "data")))
+    if set(sqlite.list_ids()) & set(external_connections):
+        raise ValueError("Database IDs must be unique across SQLite and remote connections.")
     profiles = ProfileStore(Path(os.environ.get("TEXT2SQL_PROFILE_ROOT", "profiles")))
     glossaries = GlossaryStore(
         Path(os.environ.get("TEXT2SQL_GLOSSARY_ROOT", "data/business_glossaries"))
@@ -213,9 +235,14 @@ def create_app(
         os.environ.get("TRUE_SOTA_BASE_URL", "https://true-sota.com"),
         float(os.environ.get("TRUE_SOTA_TIMEOUT_SECONDS", "180")),
     )
+    openrouter = OpenRouterSQLModel(
+        os.environ.get("OPENROUTER_API_KEY"),
+        os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        float(os.environ.get("OPENROUTER_TIMEOUT_SECONDS", "180")),
+    )
     active_agent = agent or TextToSQLAgent(
         sqlite,
-        RoutingSQLModel(agentrouter, groq, justdowork, codecraft, true_sota),
+        RoutingSQLModel(agentrouter, groq, justdowork, codecraft, true_sota, openrouter),
         postgres,
         profiles,
     )
@@ -225,6 +252,11 @@ def create_app(
         "justdowork": justdowork,
         "codecraft": codecraft,
         "true_sota": true_sota,
+        "openrouter": openrouter,
+        "ollama": OllamaCompleter(
+            os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+            float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "180")),
+        ),
     }
     def conversational_agent_enabled() -> bool:
         return (
@@ -239,6 +271,23 @@ def create_app(
             "safety-first validation, and read-only execution."
         ),
     )
+    if isinstance(postgres, RemoteDatabaseRegistry):
+        app.router.add_event_handler("shutdown", postgres.close)
+
+    @app.exception_handler(DatabaseError)
+    async def database_error_response(request: Request, exc: DatabaseError) -> JSONResponse:
+        del request
+        safe_messages = {
+            "DATABASE_DRIVER_MISSING": "Install the selected database extra and its system driver.",
+            "READ_ONLY_ROLE_REQUIRED": "Provision and confirm a read-only database role first.",
+            "DATABASE_CONNECTION_FAILED": "Check the local connection settings and credentials.",
+            "DATABASE_INSPECTION_FAILED": "Check schema access and table permissions.",
+            "CONNECTION_NOT_CONFIGURED": "Set the configured connection environment variable.",
+        }
+        return JSONResponse(status_code=503, content={
+            "code": exc.code,
+            "detail": safe_messages.get(exc.code, "The database operation could not be completed."),
+        })
     if os.environ.get("TEXT2SQL_GZIP_ENABLED", "true").casefold() == "true":
         app.add_middleware(
             GZipMiddleware,
@@ -296,11 +345,21 @@ def create_app(
     # Complete bounded results are kept only for the active process. Persisted
     # history retains a smaller preview and is reused only when it is complete.
     recent_results: dict[tuple[str, str], RecentResult] = {}
+    # Display-only index of the same typed snapshots, never agent memory.
+    # Allows reopening earlier chart turns after the active result changes.
+    chart_snapshots: dict[tuple[str, str, str], RecentResult] = {}
     branch_context: ContextVar[
         tuple[str, ConversationState, RecentResult | None, int | None] | None
     ] = ContextVar("queryflow_branch_context", default=None)
+    provisional_context: ContextVar[tuple[str, ConversationState] | None] = ContextVar(
+        "queryflow_provisional_context", default=None
+    )
+    history_anchor: ContextVar[str | None] = ContextVar("queryflow_history_anchor", default=None)
 
     def accepted_state(session_id: str) -> ConversationState | None:
+        provisional = provisional_context.get()
+        if provisional and provisional[0] == session_id:
+            return provisional[1]
         branch = branch_context.get()
         return branch[1] if branch and branch[0] == session_id else conversations.get(session_id)
 
@@ -308,7 +367,92 @@ def create_app(
         branch = branch_context.get()
         if branch and branch[0] == session_id:
             return branch[2] if branch[1].db_id == db_id else None
-        return recent_results.get((session_id, db_id))
+        key = (session_id, db_id)
+        cached = recent_results.get(key)
+        if cached is not None:
+            return cached
+        # The bounded in-process cache is lost on restart. Reuse history only
+        # when it contains every executed row for the currently accepted SQL;
+        # a preview or a run from another branch must never stand in for data.
+        state = accepted_state(session_id)
+        if state is None or state.db_id != db_id or not state.last_sql:
+            return None
+        for record in runs.list_sessions(session_id):
+            if record.db_id != db_id or record.sql != state.last_sql:
+                continue
+            if (
+                record.state_snapshot is None
+                or record.state_snapshot.resolved_question != state.resolved_question
+            ):
+                continue
+            restored = result_from_history(record)
+            if restored is not None:
+                recent_results[key] = restored
+                return restored
+            break
+        return None
+
+    @app.post("/api/results/page")
+    async def result_page(request: ResultPageRequest) -> dict[str, Any]:
+        """Page an accepted result without accepting SQL from the browser.
+
+        The first 500 rows come from the exact in-process accepted snapshot. A
+        later page re-executes that SQL only when it has an outer ORDER BY and
+        the saved prefix still matches, avoiding silent unstable page changes.
+        """
+        source = accepted_result(request.session_id, request.db_id)
+        if source is None or source.result_id != request.result_id:
+            raise HTTPException(404, "The accepted result is unavailable or has changed.")
+        end = request.offset + request.page_size
+        if end <= len(source.rows):
+            page_rows = source.rows[request.offset:end]
+            has_more = source.truncated or end < len(source.rows)
+        else:
+            if not source.truncated:
+                page_rows = source.rows[request.offset:end]
+                has_more = False
+            else:
+                try:
+                    statement = parse_one(source.sql, read=source.dialect)
+                except Exception as exc:
+                    raise HTTPException(409, "Saved SQL cannot be paged safely.") from exc
+                if statement is None or statement.args.get("order") is None:
+                    raise HTTPException(
+                        409, "More rows require an explicit outer ORDER BY for stable paging."
+                    )
+                if end > 10_000:
+                    raise HTTPException(422, "Paging is limited to the first 10,000 rows.")
+                database = (
+                    sqlite if source.dialect == "sqlite" and request.db_id in sqlite.list_ids()
+                    else postgres if postgres is not None
+                    and request.db_id in postgres.configured_ids() else None
+                )
+                if database is None:
+                    raise HTTPException(404, "The selected database is unavailable.")
+                try:
+                    columns, fetched, has_more = await asyncio.to_thread(
+                        database.execute, request.db_id, source.sql,
+                        max_rows=end, timeout_seconds=5.0,
+                    )
+                except DatabaseError as exc:
+                    raise HTTPException(409, "The saved result could not be paged.") from exc
+                if columns != source.columns or fetched[:len(source.rows)] != source.rows:
+                    raise HTTPException(
+                        409, "The result changed since the first page. Run the question again."
+                    )
+                page_rows = fetched[request.offset:end]
+        limit_reached = end >= 10_000 and has_more
+        return {
+            "result_id": source.result_id,
+            "columns": source.columns,
+            "rows": page_rows,
+            "offset": request.offset,
+            "displayed_count": len(page_rows),
+            "returned_count": source.row_count,
+            "total_available": None if source.truncated else source.row_count,
+            "has_more": has_more and not limit_reached,
+            "limit_reached": limit_reached,
+        }
 
     def result_from_history(record: RunRecord) -> RecentResult | None:
         if not record.accepted or record.preview_truncated or record.truncated:
@@ -466,12 +610,58 @@ def create_app(
             raise HTTPException(status_code=404, detail="Run not found.")
         return record
 
+    @app.post("/api/results/inspect")
+    async def inspect_historical_result(
+        request: ResultPageRequest, response: Response,
+    ) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        current = accepted_state(request.session_id)
+        configured = request.db_id in sqlite.list_ids() or (
+            postgres is not None and request.db_id in postgres.configured_ids()
+        )
+        if not configured:
+            raise HTTPException(404, "Database is unavailable.")
+        if current is None or current.db_id != request.db_id:
+            raise HTTPException(404, "No active analytical context for this historical result.")
+        data = await asyncio.to_thread(
+            runs.inspect_result, request.session_id, request.db_id, request.result_id,
+            offset=request.offset, page_size=request.page_size,
+        )
+        if data is None:
+            raise HTTPException(404, "Historical result is unavailable in this context.")
+        return data
+
     @app.get("/api/history/{run_id}/turns", response_model=list[RunRecord])
     async def history_turns(response: Response, run_id: str, session_id: str) -> list[RunRecord]:
         response.headers["Cache-Control"] = "no-store"
         if runs.get(run_id, session_id) is None:
             raise HTTPException(status_code=404, detail="Conversation turn not found.")
-        return runs.lineage(session_id, run_id)
+        records = runs.lineage(session_id, run_id)
+        configured = set(sqlite.list_ids())
+        if postgres is not None:
+            configured.update(postgres.configured_ids())
+        restored = []
+        for record in records:
+            cached = chart_snapshots.get((session_id, record.db_id, record.run_id))
+            payload = record.response_payload
+            if (
+                cached is not None and record.db_id in configured and record.accepted
+                and cached.result_id == payload.get("result_id")
+                and cached.chart_id == payload.get("chart_id")
+                and cached.sql == record.sql and not cached.truncated
+                and cached.row_count == len(cached.rows) and cached.chart_spec is not None
+            ):
+                payload = {
+                    **payload,
+                    "generation": {**(payload.get("generation") or {}), "rows": cached.rows},
+                    "presentation": {
+                        **(payload.get("presentation") or {}),
+                        "chart_spec": cached.chart_spec.model_dump(mode="json"),
+                    },
+                }
+                record = record.model_copy(update={"response_payload": payload})
+            restored.append(record)
+        return restored
 
     @app.post("/api/history/{run_id}/continue", response_model=ConversationState)
     async def continue_history(run_id: str, session_id: str) -> ConversationState:
@@ -496,13 +686,15 @@ def create_app(
     @app.post("/api/sql/diff", response_model=SqlDiffResponse)
     async def sql_diff(payload: SqlDiffRequest, response: Response) -> SqlDiffResponse:
         response.headers["Cache-Control"] = "no-store"
-        dialect = "postgres" if payload.dialect == "postgres" else "sqlite"
+        dialect = payload.dialect
         return sql_changelog(payload.previous_sql, payload.updated_sql, dialect=dialect)
 
     @app.delete("/api/history", status_code=204)
     async def history_clear(response: Response, session_id: str) -> Response:
         response.headers["Cache-Control"] = "no-store"
         runs.drop_session(session_id)
+        for key in [key for key in chart_snapshots if key[0] == session_id]:
+            chart_snapshots.pop(key, None)
         return Response(status_code=204)
 
     @app.post("/api/conversations/{session_id}/reset", status_code=204)
@@ -510,7 +702,7 @@ def create_app(
         """Start a fresh conversation without invoking any model or deleting audit history."""
         response.headers["Cache-Control"] = "no-store"
         conversations.reset(session_id)
-        runs.mark_memory_reset(session_id)
+        await asyncio.to_thread(runs.mark_memory_reset, session_id)
         for key in [key for key in recent_results if key[0] == session_id]:
             recent_results.pop(key, None)
         return Response(status_code=204, headers={"Cache-Control": "no-store"})
@@ -530,7 +722,7 @@ def create_app(
         ]
         if postgres is not None:
             options.extend(
-                DatabaseOption(db_id=db_id, dialect="postgres", configured=True)
+                DatabaseOption(db_id=db_id, dialect=postgres.dialect_for(db_id), configured=True)
                 for db_id in postgres.configured_ids()
             )
         elif not postgres_databases:
@@ -617,7 +809,8 @@ def create_app(
 
     @app.get("/api/databases/{db_id}/filter-values", response_model=FilterValuesResponse)
     async def filter_values(
-        db_id: str, table: str, column: str, search: str | None = None
+        db_id: str, table: str, column: str, search: str | None = None,
+        exact: bool = False,
     ) -> FilterValuesResponse:
         """Bounded, read-only distinct values for one verified filter field.
 
@@ -660,7 +853,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Unknown filter field.")
         physical = column_info.data_type.casefold().split("(", 1)[0]
         if not (
-            physical.startswith(("text", "varchar", "char"))
+            physical.startswith(("text", "varchar", "char", "nvarchar", "nchar", "string"))
             or physical in {"date", "datetime", "timestamp"}
         ):
             raise HTTPException(status_code=400, detail="Only text or date fields support values.")
@@ -684,7 +877,9 @@ def create_app(
                 status_code=403,
                 detail="This field is not available for value discovery.",
             )
-        cache_key = (db_id, table, column, search_term)
+        # Profile/schema changes invalidate domains even inside the cache TTL.
+        version = str(profile.profiled_at) if profile else schema.model_dump_json()
+        cache_key = (db_id, table, column, search_term + "\x00" + str(exact) + version)
         cached = filter_values_cache.get(cache_key)
         if cached is not None and monotonic() - cached[0] < 60:
             _, cached_values, cached_more = cached
@@ -696,6 +891,9 @@ def create_app(
                 values=cached_values,
                 more_available=cached_more,
                 cached=True,
+                expires_in_seconds=max(0, int(60 - (monotonic() - cached[0]))),
+                complete_domain=not search_term and not cached_more,
+                ambiguous=bool(search_term and len(cached_values) > 1),
             )
         if search_term:
             # Treat the user's text literally; it is never SQL or a LIKE pattern.
@@ -705,6 +903,8 @@ def create_app(
                 if schema.dialect == "sqlite"
                 else f'strpos(lower(CAST("{column}" AS TEXT)), lower({placeholder})) > 0'
             )
+            if exact:
+                predicate = f'lower(CAST("{column}" AS TEXT)) = lower({placeholder})'
             sql = (
                 f'SELECT DISTINCT CAST("{column}" AS TEXT) FROM "{table}" '
                 f'WHERE "{column}" IS NOT NULL AND {predicate} ORDER BY 1 LIMIT 101'
@@ -717,14 +917,15 @@ def create_app(
             )
             parameters = ()
         try:
-            _, rows, _ = await asyncio.to_thread(
-                database.execute,
-                db_id,
-                sql,
-                max_rows=101,
-                timeout_seconds=2.0,
-                parameters=parameters,
-            )
+            if isinstance(database, RemoteDatabaseRegistry) and db_id in database.connections:
+                _, rows, _ = await asyncio.to_thread(
+                    database.lookup_values, db_id, table, column, search_term, exact=exact,
+                )
+            else:
+                _, rows, _ = await asyncio.to_thread(
+                    database.execute, db_id, sql, max_rows=101,
+                    timeout_seconds=2.0, parameters=parameters,
+                )
         except DatabaseError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         values: list[str] = [str(row[0]) for row in rows if row and row[0] is not None]
@@ -738,6 +939,8 @@ def create_app(
             column=column,
             search=search_term or None,
             values=values[:100],
+            complete_domain=not search_term and not more_available,
+            ambiguous=bool(search_term and len(values) > 1),
             more_available=more_available,
             cached=False,
         )
@@ -754,7 +957,7 @@ def create_app(
             dialect = "sqlite"
             schema = sqlite.inspect(db_id)
         elif postgres is not None and db_id in postgres.configured_ids():
-            dialect = "postgres"
+            dialect = postgres.dialect_for(db_id)
             schema = postgres.inspect(db_id)
         else:
             raise HTTPException(status_code=404, detail="Database was not found or configured.")
@@ -1320,7 +1523,7 @@ def create_app(
                     latency_ms=conversation_ms,
                 )
             ]
-            if interpretation.source == "model"
+            if interpretation.source == "model" and not assistant_enabled
             else []
         )
         if interpretation.operation in STATE_REQUIRED_OPERATIONS and not has_matching_state:
@@ -1394,6 +1597,7 @@ def create_app(
             pending = pending.model_copy(update={"semantic_contract": updated_contract})
         if operation == "RESET_CONTEXT":
             conversations.reset(request.session_id)
+            await asyncio.to_thread(runs.mark_memory_reset, request.session_id)
             return ChatResponse(
                 session_id=request.session_id,
                 operation="RESET_CONTEXT",
@@ -1457,14 +1661,16 @@ def create_app(
                     operation=operation,
                     client_message=request.message,
                     state=pending,
-                    dialect=("sqlite" if request.db_id in sqlite.list_ids() else "postgres"),
+                    dialect=("sqlite" if request.db_id in sqlite.list_ids()
+                             else postgres.dialect_for(request.db_id) if postgres else "postgres"),
                 )
                 explanation_model_succeeded = True
             except (ModelError, ValueError):
                 explanation = deterministic_explanation(
                     operation,
                     pending,
-                    "sqlite" if request.db_id in sqlite.list_ids() else "postgres",
+                    "sqlite" if request.db_id in sqlite.list_ids()
+                    else postgres.dialect_for(request.db_id) if postgres else "postgres",
                 )
             return ChatResponse(
                 session_id=request.session_id,
@@ -1683,7 +1889,9 @@ def create_app(
                 model=request.model,
                 provider=request.provider,
                 budget=request_budget,
-                visualization=viz_intent,
+                # Top-layer mode owns chart creation through change_visualization.
+                # Keep deterministic chart planning only for the legacy route.
+                visualization=None if assistant_enabled else viz_intent,
             )
             presentation_ledger.extend(presentation_entries)
         chart_recommendations = None
@@ -1695,16 +1903,17 @@ def create_app(
             and operation not in {"CHECK_CORRECTNESS", "OPTIMIZE"}
             and not human_review
         ):
-            try:
-                chart_recommendations = recommend_charts(
-                    pending.resolved_question,
-                    generated.columns,
-                    generated.rows,
-                    truncated=False,
-                )
-            except Exception:
-                logger.warning("Chart recommendation failed", exc_info=True)
-                chart_recommendations = None
+            if not assistant_enabled:
+                try:
+                    chart_recommendations = recommend_charts(
+                        pending.resolved_question,
+                        generated.columns,
+                        generated.rows,
+                        truncated=False,
+                    )
+                except Exception:
+                    logger.warning("Chart recommendation failed", exc_info=True)
+                    chart_recommendations = None
             if (
                 viz_intent.requested
                 and len(generated.columns) > 2
@@ -1750,7 +1959,8 @@ def create_app(
                 except Exception:
                     logger.warning("LLM chart recommendation failed", exc_info=True)
             if (
-                presentation is not None
+                not assistant_enabled
+                and presentation is not None
                 and viz_intent.requested
                 and chart_recommendations is not None
             ):
@@ -1888,7 +2098,14 @@ def create_app(
             return
         key = (request.session_id, request.db_id)
         recent_results.pop(key, None)
-        recent_results[key] = RecentResult.from_response(response)
+        snapshot = RecentResult.from_response(response)
+        recent_results[key] = snapshot
+        if response.run_id and snapshot.chart_spec is not None:
+            chart_key = (request.session_id, request.db_id, response.run_id)
+            chart_snapshots.pop(chart_key, None)
+            chart_snapshots[chart_key] = snapshot
+            if len(chart_snapshots) > 100:
+                chart_snapshots.pop(next(iter(chart_snapshots)))
         if len(recent_results) > 100:
             recent_results.pop(next(iter(recent_results)))
 
@@ -1985,6 +2202,8 @@ def create_app(
             response = await process_chat(
                 request, persist_state=persist and branch_context.get() is None
             )
+            if request.parent_run_id:
+                response = response.model_copy(update={"parent_run_id":request.parent_run_id})
             if previous and previous.db_id == request.db_id and response.operation != "NEW_QUERY":
                 response = response.model_copy(update={"previous_sql": previous.last_sql})
             return await save_response(request, response) if persist else response
@@ -1995,7 +2214,29 @@ def create_app(
     async def assistant_sql_handler(request: ChatRequest) -> ChatResponse:
         # The top model still has to produce its final answer. Save the
         # completed turn once, after that answer has been attached.
-        return await execute_chat(request, persist=False)
+        if request._history_source_run_id and runs.sql_memory(
+            request.session_id, request.db_id, request._history_source_run_id,
+            parent_run_id=history_anchor.get(),
+        ) is None:
+            return ChatResponse(
+                session_id=request.session_id, operation="REFINE",
+                resolved_question=request.message,
+                message="The historical analysis is unavailable in this session and database.",
+            )
+        token = (
+            provisional_context.set((request.session_id, request._turn_state))
+            if request._turn_state is not None else None
+        )
+        try:
+            response = await execute_chat(request, persist=False)
+            if response.state_commit_pending and request._turn_state is not None:
+                response = response.model_copy(update={
+                    "state_expected_version": request._turn_expected_version,
+                })
+            return response
+        finally:
+            if token is not None:
+                provisional_context.reset(token)
 
     async def assistant_investigation_handler(request: ChatRequest) -> ChatResponse:
         # Investigation state is request-local. Never save an intermediate turn
@@ -2021,27 +2262,61 @@ def create_app(
         for key in [key for key in recent_results if key[0] == session_id]:
             recent_results.pop(key, None)
 
+    def inspect_assistant_history(session: str, db: str, reference: str) -> dict[str, Any] | None:
+        if db not in sqlite.list_ids() and (
+            postgres is None or db not in postgres.configured_ids()
+        ):
+            return None
+        if reference.startswith("snapshot:"):
+            memory = runs.sql_memory(
+                session, db, reference.removeprefix("snapshot:"),
+                parent_run_id=history_anchor.get(),
+            )
+            if memory is None:
+                return None
+            snapshot = runs.inspect_result(session, db, str(memory["run_id"]), page_size=100)
+            if snapshot is None or not snapshot["calculation_allowed"]:
+                return {"evidence_kind":"SNAPSHOT_UNAVAILABLE", "run_id":memory["run_id"],
+                        "verified_numerical_evidence":False,
+                        "limitation":"No complete snapshot or time-travel source is available."}
+            return {**snapshot, "evidence_kind":"HISTORICAL_SNAPSHOT",
+                    "execution_timestamp":memory["execution_timestamp"],
+                    "verified_numerical_evidence":True}
+        return runs.sql_memory(session, db, reference, parent_run_id=history_anchor.get())
+
+    async def refresh_assistant_history(request: ChatRequest, reference: str) -> ChatResponse:
+        memory = inspect_assistant_history(request.session_id, request.db_id, reference)
+        if memory is None:
+            return ChatResponse(
+                session_id=request.session_id, operation="REFINE",
+                resolved_question=request.message,
+                message="The historical analysis is unavailable.",
+            )
+        try:
+            current = accepted_state(request.session_id)
+            return await refresh_historical_sql(
+                str(memory["run_id"]), request.session_id, persist=False,
+                budget=active_request_budget(),
+                expected_version=(request._turn_expected_version if request._turn_state else
+                    (current.version if current else None)),
+            )
+        except HTTPException:
+            return ChatResponse(
+                session_id=request.session_id, operation="REFINE",
+                resolved_question=request.message,
+                message="The historical SQL cannot be refreshed safely.",
+            )
+
     conversational_agent = ConversationalAnalyticsAgent(
         bridge=bridge,
         completers=turn_completers,
         get_state=accepted_state,
         get_last_response=accepted_result,
         reset_handler=reset_assistant_context,
-        get_recent_memory=lambda session_id, db_id, parent_run_id: runs.recent_memory(
-            session_id, db_id, parent_run_id=parent_run_id
-        ),
-        search_memory=lambda session_id, db_id, question, parent_run_id: runs.search_memory(
-            session_id, db_id, question, parent_run_id=parent_run_id
-        ),
-        get_historical_result=lambda session_id, db_id, result_id, parent_run_id: (
-            result_from_history(record)
-            if (record := runs.authorized_result_record(
-                session_id, db_id, result_id, parent_run_id=parent_run_id
-            )) is not None
-            else None
-        ),
         sql_handler=assistant_sql_handler,
         investigation_handler=assistant_investigation_handler,
+        history_inspector=inspect_assistant_history,
+        history_refresher=refresh_assistant_history,
     )
 
     @app.post("/api/chat", response_model=ChatResponse)
@@ -2059,6 +2334,7 @@ def create_app(
                     request.session_id, parent.state_snapshot, result_from_history(parent),
                     current.version if current else None,
                 ))
+            anchor_token = history_anchor.set(request.parent_run_id)
             try:
                 response = await conversational_agent.run(request)
                 return (
@@ -2066,6 +2342,7 @@ def create_app(
                     else await save_response(request, response)
                 )
             finally:
+                history_anchor.reset(anchor_token)
                 if token is not None:
                     branch_context.reset(token)
         if os.environ.get("TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED", "false").casefold() != "true":
@@ -2078,13 +2355,17 @@ def create_app(
             return outcome.response
         return await save_response(request, outcome.response)
 
-    @app.post("/api/history/{run_id}/rerun", response_model=ChatResponse)
-    async def rerun_history(run_id: str, session_id: str) -> ChatResponse:
+    async def refresh_historical_sql(
+        run_id: str, session_id: str, *, persist: bool = True,
+        budget: RequestBudget | None = None, expected_version: int | None = None,
+    ) -> ChatResponse:
         record = runs.get(run_id, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Conversation turn not found.")
         if not record.accepted or not record.sql or record.state_snapshot is None:
             raise HTTPException(status_code=409, detail="This turn has no accepted SQL to rerun.")
+        if record.state_snapshot.last_sql != record.sql:
+            raise HTTPException(status_code=409, detail="Historical SQL/state identity mismatch.")
         context = (record.response_payload.get("generation") or {}).get("model_context") or {}
         tables = context.get("tables") or context.get("execution_context", {}).get("tables") or {}
         allowed_tables = set(tables) or set(record.state_snapshot.approved_tables)
@@ -2099,7 +2380,10 @@ def create_app(
         )
         original = record.response_payload.get("generation") or {}
         dialect = original.get("dialect", "sqlite")
-        budget = RequestBudget(15, max_model_calls=0, max_database_calls=2)
+        budget = budget or RequestBudget(15, max_model_calls=0, max_database_calls=2)
+        current = conversations.get(session_id)
+        if persist:
+            expected_version = current.version if current else None
         started = perf_counter()
         try:
             checked = await budget.wait(
@@ -2134,8 +2418,10 @@ def create_app(
             model=record.model,
             strategy=route_question(record.resolved_question),
             sql=record.sql if valid else None,
+            semantic_contract=record.state_snapshot.semantic_contract,
             accepted=valid,
             execution_status="EXECUTABLE" if valid else "NOT_EXECUTED",
+            execution_timestamp=time() if valid else None,
             columns=checked.columns,
             rows=checked.rows,
             row_count=checked.row_count,
@@ -2155,33 +2441,34 @@ def create_app(
         )
         response_state = record.state_snapshot
         if valid:
-            current = conversations.get(session_id)
-            response_state = conversations.put(
-                response_state.model_copy(
+            response_state = response_state.model_copy(
                     update={
                         "last_sql": record.sql,
                         "last_columns": checked.columns,
                         "last_row_count": checked.row_count,
                         "last_truncated": checked.truncated,
                     }
-                ),
-                expected_version=current.version if current else None,
             )
-        return await save_response(
-            ChatRequest(
+        refresh_request = ChatRequest(
                 session_id=session_id,
                 db_id=record.db_id,
                 message="Rerun the saved SQL.",
                 parent_run_id=record.run_id,
                 provider=cast(ModelProvider, record.provider),
                 model=record.model,
-            ),
-            ChatResponse(
+            )
+        response = ChatResponse(
                 session_id=session_id,
                 operation="REFINE",
                 resolved_question=record.resolved_question,
                 state=response_state,
                 generation=generated,
+                parent_run_id=record.run_id,
+                result_id=uuid4().hex if valid else None,
+                state_commit_pending=valid,
+                state_expected_version=expected_version,
+                provenance=[f"historical_sql_source_run:{record.run_id}",
+                            "refreshed_current_data_not_historical_snapshot"],
                 message=(
                     f"Reran the saved SQL against current data: {checked.row_count} rows returned."
                     if valid
@@ -2189,8 +2476,12 @@ def create_app(
                 ),
                 timings_ms={"total": elapsed},
                 token_usage=TokenUsage(input_tokens=0, output_tokens=0),
-            ),
-        )
+            )
+        return await save_response(refresh_request, response) if persist else response
+
+    @app.post("/api/history/{run_id}/rerun", response_model=ChatResponse)
+    async def rerun_history(run_id: str, session_id: str) -> ChatResponse:
+        return await refresh_historical_sql(run_id, session_id)
 
     async def run_chat_job(job_id: str, request: ChatRequest) -> None:
         job = chat_jobs[job_id]

@@ -24,33 +24,14 @@ from semantic_text2sql.models import ConversationState, PresentationState, Recov
 MAX_PREVIEW_ROWS = 20
 DEFAULT_SESSION_HISTORY_LIMIT = 50
 GLOBAL_RETENTION_LIMIT = 500
-_MEMORY_WORD = re.compile(r"[a-z0-9_]+")
-
-
-class SessionMemoryTurn(BaseModel):
-    """Compact historical reference; summaries are not database authority."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    run_id: str
-    result_id: str | None = None
-    chart_id: str | None = None
-    question: str
-    assistant_summary: str
-    operation: str
-    accepted: bool
-    sql_available: bool
-    columns: list[str] = Field(default_factory=list)
-    row_count: int = 0
-    truncated: bool = False
-    contract_summary: dict[str, Any] = Field(default_factory=dict)
-    created_at: float
 
 
 class RunRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run_id: str
+    result_id: str | None = None
+    execution_timestamp: float | None = None
     session_id: str
     conversation_id: str = ""
     turn_id: str = ""
@@ -93,11 +74,15 @@ class RunHistoryStore:
         self.path = path
         self._sessions: list[RunRecord] = []
         self._by_id: dict[str, RunRecord] = {}
-        self._memory_epochs: dict[str, float] = {}
+        self._reset_after: dict[str, float] = {}
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(path) as connection:
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS history_reset_boundaries "
+                "(session_id TEXT PRIMARY KEY, reset_at REAL NOT NULL)"
+            )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS query_runs ("
                 "run_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, "
@@ -113,8 +98,16 @@ class RunHistoryStore:
                 "ON query_runs(session_id, json_extract(record_json, '$.db_id'), created_at)"
             )
             connection.execute(
-                "CREATE TABLE IF NOT EXISTS session_memory_epochs ("
-                "session_id TEXT PRIMARY KEY, reset_at REAL NOT NULL)"
+                "CREATE INDEX IF NOT EXISTS query_runs_sql_memory ON query_runs "
+                "(session_id, json_extract(record_json, '$.db_id'), created_at, version) "
+                "WHERE json_extract(record_json, '$.accepted') = 1 "
+                "AND json_extract(record_json, '$.sql') IS NOT NULL"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS query_runs_result_identity ON query_runs "
+                "(session_id, json_extract(record_json, '$.db_id'), "
+                "COALESCE(json_extract(record_json, '$.result_id'), "
+                "json_extract(record_json, '$.response_payload.result_id')))"
             )
 
     @classmethod
@@ -264,115 +257,6 @@ class RunHistoryStore:
                 continue
         return records
 
-    def mark_memory_reset(self, session_id: str) -> None:
-        """Start a new memory epoch without deleting the audit history."""
-        reset_at = time.time()
-        with self._lock:
-            if self.path is None:
-                self._memory_epochs[session_id] = reset_at
-            else:
-                with self._connect() as connection:
-                    connection.execute(
-                        "INSERT INTO session_memory_epochs(session_id, reset_at) VALUES (?, ?) "
-                        "ON CONFLICT(session_id) DO UPDATE SET reset_at = excluded.reset_at",
-                        (session_id, reset_at),
-                    )
-
-    def recent_memory(
-        self, session_id: str, db_id: str, *, limit: int = 3,
-        parent_run_id: str | None = None,
-    ) -> list[SessionMemoryTurn]:
-        """Return small, same-session/database references, never SQL or result rows."""
-        if parent_run_id:
-            return self._lineage_memory(session_id, db_id, parent_run_id)[:limit]
-        return self._memory_candidates(session_id, db_id, limit=min(max(limit, 0), 5))
-
-    def search_memory(
-        self, session_id: str, db_id: str, question: str, *, limit: int = 3,
-        parent_run_id: str | None = None,
-    ) -> list[SessionMemoryTurn]:
-        """Search historical references only when the Top layer calls the tool."""
-        candidates = (
-            self._lineage_memory(session_id, db_id, parent_run_id)
-            if parent_run_id else self._memory_candidates(session_id, db_id, limit=100)
-        )
-        if not candidates:
-            return []
-        bounded = min(max(limit, 1), 5)
-        query = question.casefold()
-        accepted = [item for item in candidates if item.accepted and item.sql_available]
-        if "first" in query and any(word in query for word in ("query", "analysis", "result")):
-            return accepted[-1:][:bounded]
-        if "previous" in query or "last" in query:
-            return candidates[:1]
-        terms = set(_MEMORY_WORD.findall(query)) - {
-            "the", "this", "that", "with", "from", "show", "compare", "earlier", "result",
-        }
-        ranked = sorted(
-            enumerate(candidates),
-            key=lambda pair: (
-                -len(terms & set(_MEMORY_WORD.findall(pair[1].question.casefold()))),
-                pair[0],
-            ),
-        )
-        return [
-            item for _, item in ranked[:bounded]
-            if terms & set(_MEMORY_WORD.findall(item.question.casefold()))
-        ]
-
-    def _lineage_memory(
-        self, session_id: str, db_id: str, run_id: str
-    ) -> list[SessionMemoryTurn]:
-        root = self.get(run_id, session_id)
-        if root is None or root.db_id != db_id:
-            return []
-        return [
-            _memory_from_record(record)
-            for record in reversed(self.lineage(session_id, run_id))
-            if record.db_id == db_id
-        ]
-
-    def _memory_candidates(
-        self, session_id: str, db_id: str, *, limit: int
-    ) -> list[SessionMemoryTurn]:
-        if limit < 1:
-            return []
-        with self._lock:
-            if self.path is None:
-                cutoff = self._memory_epochs.get(session_id, 0.0)
-                records = [
-                    item for item in self._sessions
-                    if item.session_id == session_id and item.db_id == db_id
-                    and item.created_at > cutoff
-                ][:limit]
-                return [_memory_from_record(item) for item in records]
-            with self._connect() as connection:
-                boundary = connection.execute(
-                    "SELECT reset_at FROM session_memory_epochs WHERE session_id = ?",
-                    (session_id,),
-                ).fetchone()
-                cutoff = float(boundary[0]) if boundary else 0.0
-                rows = connection.execute(
-                    "SELECT run_id, created_at, "
-                    "json_extract(record_json, '$.original_message'), "
-                    "json_extract(record_json, '$.response_payload.message'), "
-                    "json_extract(record_json, '$.operation'), "
-                    "json_extract(record_json, '$.accepted'), "
-                    "json_extract(record_json, '$.sql'), "
-                    "json_extract(record_json, '$.response_payload.result_id'), "
-                    "json_extract(record_json, '$.response_payload.chart_id'), "
-                    "json_extract(record_json, '$.columns'), "
-                    "json_extract(record_json, '$.row_count'), "
-                    "json_extract(record_json, '$.truncated'), "
-                    "json_extract(record_json, '$.preview_truncated'), "
-                    "json_extract(record_json, '$.state_snapshot.semantic_contract') "
-                    "FROM query_runs WHERE session_id = ? "
-                    "AND json_extract(record_json, '$.db_id') = ? AND created_at > ? "
-                    "ORDER BY created_at DESC, rowid DESC LIMIT ?",
-                    (session_id, db_id, cutoff, limit),
-                ).fetchall()
-        return [_memory_from_projection(row) for row in rows]
-
     def get(self, run_id: str, session_id: str | None = None) -> RunRecord | None:
         if self.path is not None:
             with self._lock, self._connect() as connection:
@@ -393,50 +277,228 @@ class RunHistoryStore:
                 else None
             )
 
-    def authorized_result_record(
+    def sql_memory(
         self,
         session_id: str,
         db_id: str,
-        result_id: str,
+        reference: str,
         *,
         parent_run_id: str | None = None,
-    ) -> RunRecord | None:
-        """Return an accepted, bounded historical result in this memory scope.
+    ) -> dict[str, Any] | None:
+        """Indexed SQL/intent lookup. Rows never enter conversational memory.
 
-        ``result_id`` is matched against both the response result identity and
-        the run identity.  This is a read-only history lookup; it never reruns
-        the saved SQL.  Reset epochs and explicit branch lineage are enforced
-        before the record is exposed to the conversational agent.
+        Canonical references are first, latest, analysis:N (1-based; negative
+        from newest), or an exact run/result ID. The LLM selects the reference;
+        this is not a natural-language intent classifier.
         """
-        candidates = (
-            self.lineage(session_id, parent_run_id)
-            if parent_run_id
-            else self.list_sessions(session_id, GLOBAL_RETENTION_LIMIT)
-        )
-        cutoff = self._memory_reset_at(session_id)
-        for record in candidates:
-            saved_result_id = record.response_payload.get("result_id")
-            if (
-                record.db_id == db_id
-                and record.accepted
-                and record.sql
-                and not record.truncated
-                and not record.preview_truncated
-                and record.created_at > cutoff
-                and result_id in {record.run_id, saved_result_id}
-            ):
-                return record
-        return None
+        position = 1 if reference == "first" else -1 if reference == "latest" else None
+        if match := re.fullmatch(r"analysis:(-?[1-9]\d{0,2})", reference):
+            position = int(match[1])
+        if position is None and not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", reference):
+            return None
+        boundary = self._reset_after.get(session_id, 0.0)
+        with self._lock:
+            if self.path is not None:
+                with self._connect() as connection:
+                    reset = connection.execute(
+                        "SELECT reset_at FROM history_reset_boundaries WHERE session_id = ?",
+                        (session_id,),
+                    ).fetchone()
+                    boundary = float(reset[0]) if reset else boundary
+                    scope = (
+                        "session_id = ? AND json_extract(record_json, '$.db_id') = ? "
+                        "AND json_extract(record_json, '$.accepted') = 1 "
+                        "AND json_extract(record_json, '$.sql') IS NOT NULL "
+                        "AND created_at > ? "
+                    )
+                    params: list[Any] = [session_id, db_id, boundary]
+                    if parent_run_id:
+                        # Explicit branches may only reference their ancestry.
+                        lineage = connection.execute(
+                            "WITH RECURSIVE ancestors(id, depth) AS (SELECT ?, 0 UNION ALL "
+                            "SELECT json_extract(q.record_json, '$.parent_run_id'), a.depth+1 "
+                            "FROM query_runs q JOIN ancestors a ON q.run_id=a.id "
+                            "WHERE q.session_id=? AND a.depth<500) "
+                            "SELECT id FROM ancestors WHERE id IS NOT NULL",
+                            (parent_run_id, session_id),
+                        ).fetchall()
+                        ids = [row[0] for row in lineage]
+                        scope += "AND run_id IN (" + ",".join("?" for _ in ids) + ") "
+                        params.extend(ids)
+                    row = None
+                    if position is None:
+                        row = connection.execute(
+                            "SELECT record_json FROM query_runs WHERE " + scope + "AND run_id=?",
+                            (*params, reference),
+                        ).fetchone()
+                        if row is None:
+                            row = connection.execute(
+                                "SELECT record_json FROM query_runs WHERE "
+                                + scope
+                                + "AND COALESCE(json_extract(record_json, '$.result_id'), "
+                                "json_extract(record_json, '$.response_payload.result_id')) = ? "
+                                "ORDER BY created_at, version LIMIT 1",
+                                (*params, reference),
+                            ).fetchone()
+                    else:
+                        direction = "ASC" if position > 0 else "DESC"
+                        row = connection.execute(
+                            "SELECT record_json FROM query_runs WHERE "
+                            + scope
+                            + "AND json_extract(record_json, '$.operation') != 'VISUALIZE' "
+                            f"ORDER BY created_at {direction}, version {direction} "
+                            "LIMIT 1 OFFSET ?",
+                            (*params, abs(position) - 1),
+                        ).fetchone()
+                    record = RunRecord.model_validate_json(row[0]) if row else None
+            else:
+                records = [
+                    item
+                    for item in self._sessions
+                    if item.session_id == session_id
+                    and item.db_id == db_id
+                    and item.accepted
+                    and item.sql
+                    and item.created_at > boundary
+                ]
+                if parent_run_id:
+                    ancestor_ids: set[str] = set()
+                    cursor = self._by_id.get(parent_run_id)
+                    while (
+                        cursor
+                        and cursor.session_id == session_id
+                        and cursor.run_id not in ancestor_ids
+                    ):
+                        ancestor_ids.add(cursor.run_id)
+                        cursor = self._by_id.get(cursor.parent_run_id or "")
+                    records = [item for item in records if item.run_id in ancestor_ids]
+                if position is None:
+                    record = next(
+                        (
+                            item
+                            for item in reversed(records)
+                            if reference
+                            in {
+                                item.run_id,
+                                item.result_id,
+                                item.response_payload.get("result_id"),
+                            }
+                        ),
+                        None,
+                    )
+                else:
+                    records = sorted(
+                        (r for r in records if r.operation != "VISUALIZE"),
+                        key=lambda r: (r.created_at, r.version),
+                    )
+                    index = position - 1 if position > 0 else position
+                    record = records[index] if -len(records) <= index < len(records) else None
+        if record is None:
+            return None
+        return {
+            "run_id": record.run_id,
+            "result_id": record.result_id
+            or record.response_payload.get("result_id")
+            or record.run_id,
+            "db_id": record.db_id,
+            "original_question": record.original_message,
+            "resolved_question": record.resolved_question,
+            "sql": record.sql,
+            "semantic_contract": record.state_snapshot.semantic_contract.model_dump(mode="json")
+            if record.state_snapshot and record.state_snapshot.semantic_contract
+            else None,
+            "execution_timestamp": record.execution_timestamp or record.created_at,
+            "timestamp_source": "execution" if record.execution_timestamp else "legacy_record_time",
+            "evidence_kind": "SQL_DEFINITION_ONLY",
+            "verified_numerical_evidence": False,
+            "snapshot_available": not record.truncated
+            and not record.preview_truncated
+            and record.execution_status not in {"NOT_EXECUTED", "SAFETY_VALIDATED"}
+            and record.row_count == len(record.rows_preview),
+            "provenance": (
+                "Accepted historical SQL; refreshed execution is current data, not old figures."
+            ),
+        }
 
-    def _memory_reset_at(self, session_id: str) -> float:
-        if self.path is None:
-            return self._memory_epochs.get(session_id, 0.0)
-        with self._lock, self._connect() as connection:
-            row = connection.execute(
-                "SELECT reset_at FROM session_memory_epochs WHERE session_id = ?",
-                (session_id,),
-            ).fetchone()
-        return float(row[0]) if row else 0.0
+    def inspect_result(
+        self,
+        session_id: str,
+        db_id: str,
+        reference: str,
+        *,
+        offset: int = 0,
+        page_size: int = 20,
+        conversation_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Read retained evidence only; never restore state or execute saved SQL."""
+        if offset < 0 or not 1 <= page_size <= 100:
+            raise ValueError("Invalid historical page bounds.")
+        records = self._inspection_records(session_id)
+        boundary = self._reset_after.get(session_id, 0.0)
+        if self.path is not None:
+            with self._lock, self._connect() as connection:
+                row = connection.execute(
+                    "SELECT reset_at FROM history_reset_boundaries WHERE session_id = ?",
+                    (session_id,),
+                ).fetchone()
+                boundary = float(row[0]) if row else boundary
+        record = next(
+            (
+                item
+                for item in records
+                if item.db_id == db_id
+                and item.accepted
+                and item.created_at > boundary
+                and (not conversation_id or item.conversation_id == conversation_id)
+                and reference in {item.run_id, item.response_payload.get("result_id")}
+            ),
+            None,
+        )
+        if record is None:
+            return None
+        complete = not record.truncated and record.row_count == len(record.rows_preview)
+        state = record.state_snapshot
+        return {
+            "run_id": record.run_id,
+            "result_id": record.response_payload.get("result_id") or record.run_id,
+            "historical": True,
+            "question": record.original_message,
+            "resolved_question": record.resolved_question,
+            "sql": record.sql,
+            "answer": record.presentation_summary,
+            "columns": record.columns,
+            "rows": record.rows_preview[offset : offset + page_size],
+            "row_count": record.row_count,
+            "retained_row_count": len(record.rows_preview),
+            "complete": complete,
+            "truncated": record.truncated,
+            "calculation_allowed": complete and offset == 0 and page_size >= record.row_count,
+            "offset": offset,
+            "page_complete": complete and offset == 0 and page_size >= record.row_count,
+            "has_more_retained": offset + page_size < len(record.rows_preview),
+            "semantic_contract": state.semantic_contract.model_dump(mode="json")
+            if state and state.semantic_contract
+            else None,
+            "warning": None
+            if complete
+            else ("Retained preview only; do not calculate full-result totals or comparisons."),
+            "created_at": record.created_at,
+        }
+
+    def _inspection_records(self, session_id: str) -> list[RunRecord]:
+        return self.list_sessions(session_id, GLOBAL_RETENTION_LIMIT)
+
+    def mark_memory_reset(self, session_id: str) -> None:
+        """Invalidate inspection references, preserving audit records."""
+        boundary = time.time()
+        with self._lock:
+            self._reset_after[session_id] = boundary
+            if self.path is not None:
+                with self._connect() as connection:
+                    connection.execute(
+                        "INSERT OR REPLACE INTO history_reset_boundaries VALUES (?, ?)",
+                        (session_id, boundary),
+                    )
 
     def conversation(self, session_id: str, conversation_id: str) -> list[RunRecord]:
         return list(
@@ -467,10 +529,6 @@ class RunHistoryStore:
             if self.path is not None:
                 with self._connect() as connection:
                     connection.execute("DELETE FROM query_runs WHERE session_id = ?", (session_id,))
-                    connection.execute(
-                        "DELETE FROM session_memory_epochs WHERE session_id = ?", (session_id,)
-                    )
-            self._memory_epochs.pop(session_id, None)
             self._sessions = [item for item in self._sessions if item.session_id != session_id]
             self._by_id = {
                 key: item for key, item in self._by_id.items() if item.session_id != session_id
@@ -510,62 +568,6 @@ def cast_path(path: Path | None) -> str:
     return str(path) if path is not None else ":memory:"
 
 
-def _contract_summary(raw: Any) -> dict[str, Any]:
-    if isinstance(raw, str):
-        try:
-            raw = json.loads(raw)
-        except ValueError:
-            return {}
-    if not isinstance(raw, dict):
-        return {}
-    return {
-        key: raw[key]
-        for key in ("measures", "filters", "grain", "active_period", "comparison_periods")
-        if raw.get(key)
-    }
-
-
-def _memory_from_record(record: RunRecord) -> SessionMemoryTurn:
-    payload = record.response_payload
-    return SessionMemoryTurn(
-        run_id=record.run_id,
-        result_id=payload.get("result_id"),
-        chart_id=payload.get("chart_id"),
-        question=record.original_message[:300],
-        assistant_summary=str(payload.get("message") or record.presentation_summary or "")[:400],
-        operation=record.operation,
-        accepted=record.accepted,
-        sql_available=bool(record.accepted and record.sql),
-        columns=record.columns[:12],
-        row_count=record.row_count,
-        truncated=record.truncated or record.preview_truncated,
-        contract_summary=_contract_summary(
-            record.state_snapshot.semantic_contract.model_dump(mode="json")
-            if record.state_snapshot and record.state_snapshot.semantic_contract else None
-        ),
-        created_at=record.created_at,
-    )
-
-
-def _memory_from_projection(row: tuple[Any, ...]) -> SessionMemoryTurn:
-    columns = json.loads(row[9]) if isinstance(row[9], str) else []
-    return SessionMemoryTurn(
-        run_id=str(row[0]),
-        created_at=float(row[1]),
-        question=str(row[2] or "")[:300],
-        assistant_summary=str(row[3] or "")[:400],
-        operation=str(row[4] or ""),
-        accepted=bool(row[5]),
-        sql_available=bool(row[5] and row[6]),
-        result_id=str(row[7]) if row[7] else None,
-        chart_id=str(row[8]) if row[8] else None,
-        columns=columns[:12] if isinstance(columns, list) else [],
-        row_count=int(row[10] or 0),
-        truncated=bool(row[11] or row[12]),
-        contract_summary=_contract_summary(row[13]),
-    )
-
-
 def now() -> float:
     return time.time()
 
@@ -595,15 +597,21 @@ def build_run_record(raw: dict[str, Any]) -> RunRecord:
             ),
         )
     payload = response.model_dump(mode="json")
+    preview_limit = max(0, min(int(os.environ.get("TEXT2SQL_HISTORY_PREVIEW_ROWS", "20")), 20))
     if generation:
-        payload["generation"]["rows"] = payload["generation"]["rows"][:MAX_PREVIEW_ROWS]
+        payload["generation"]["rows"] = payload["generation"]["rows"][:preview_limit]
+    chart = (payload.get("presentation") or {}).get("chart_spec")
+    if chart and isinstance(chart.get("data"), list):
+        chart["data"] = chart["data"][:preview_limit]
     # History reopens the real response, including failures, attempts, chart and context.
     # A bounded preview is clearly distinguished from the original returned row count.
     return RunRecord(
         run_id=response.run_id or uuid4().hex,
+        result_id=response.result_id,
+        execution_timestamp=generation.execution_timestamp if generation else None,
         turn_id=response.turn_id or response.run_id or uuid4().hex,
         session_id=response.session_id,
-        parent_run_id=request.parent_run_id if request else None,
+        parent_run_id=response.parent_run_id or (request.parent_run_id if request else None),
         branch_from_parent=request.branch_from_parent if request else False,
         db_id=db_id,
         operation=response.operation,
@@ -624,7 +632,7 @@ def build_run_record(raw: dict[str, Any]) -> RunRecord:
         ),
         sql=generation.sql if generation else None,
         columns=list(generation.columns) if generation else [],
-        rows_preview=list(generation.rows[:MAX_PREVIEW_ROWS]) if generation else [],
+        rows_preview=list(generation.rows[:preview_limit]) if generation else [],
         row_count=generation.row_count if generation else 0,
         truncated=generation.truncated if generation else False,
         latency_ms=int(raw.get("latency_ms", 0)),
@@ -637,5 +645,5 @@ def build_run_record(raw: dict[str, Any]) -> RunRecord:
         presentation_state=response.presentation_state,
         response_payload=payload,
         state_snapshot=state,
-        preview_truncated=bool(generation and len(generation.rows) > MAX_PREVIEW_ROWS),
+        preview_truncated=bool(generation and len(generation.rows) > preview_limit),
     )

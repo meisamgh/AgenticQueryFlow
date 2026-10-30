@@ -12,7 +12,6 @@ import hashlib
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from difflib import SequenceMatcher
 from typing import Literal, TypedDict, cast
 
 from langgraph.graph import END, START, StateGraph
@@ -21,7 +20,7 @@ from pydantic import Field
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.glossary import GlossaryStore
 from semantic_text2sql.hybrid_retrieval import HybridSchemaRetriever
-from semantic_text2sql.models import ChatRequest, ChatResponse, StrictModel, VerifiedSchemaSnapshot
+from semantic_text2sql.models import ChatRequest, ChatResponse, StrictModel
 from semantic_text2sql.postgres import PostgresRegistry
 from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.runtime import RequestBudget
@@ -49,18 +48,6 @@ class MetadataToolInput(StrictModel):
     question: str = Field(min_length=1, max_length=4_000)
 
 
-class BusinessValueCandidate(StrictModel):
-    table: str
-    column: str
-    value: str
-    match: Literal["EXACT", "FUZZY", "APPROVED_ALIAS"]
-    provenance: Literal["PROFILE_COMPLETE", "PROFILE_SAMPLE"]
-    ambiguous: bool = False
-    verified_live: bool = False
-    profile_freshness: str | None = None
-    ambiguity_reason: str | None = None
-
-
 class MetadataToolOutput(StrictModel):
     tool: Literal[
         "list_tables",
@@ -69,12 +56,10 @@ class MetadataToolOutput(StrictModel):
         "get_relationships",
         "get_column_profile",
         "get_business_context",
-        "search_business_context",
     ]
     evidence_id: str
     facts: list[str] = Field(default_factory=list, max_length=30)
     found: bool
-    value_candidates: list[BusinessValueCandidate] = Field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -128,7 +113,6 @@ class ConversationalAnalyticsBridge:
         self.profiles = profiles
         self.glossaries = glossaries
         self.semantic_catalogs = semantic_catalogs
-        self._categorical_index: dict[tuple[str, str, str], dict[tuple[str, str], list[str]]] = {}
         self.retriever = retriever
         self.sql_handler = sql_handler
         graph = StateGraph(_GraphState)
@@ -203,15 +187,10 @@ class ConversationalAnalyticsBridge:
             "get_column_profile",
         ],
         target: str = "",
-        *,
-        snapshot: VerifiedSchemaSnapshot | None = None,
     ) -> MetadataToolOutput:
         """Return facts for the requested metadata capability, not a generic search."""
-        verified = snapshot or await self.load_metadata_snapshot(db_id)
-        if verified.db_id != db_id:
-            raise ValueError("The metadata snapshot belongs to another database.")
-        schema = verified.live_schema
-        profile = verified.profile
+        schema = await asyncio.to_thread(self._registry(db_id).inspect, db_id)
+        profile = self.profiles.load(schema.dialect, db_id)
         tokens = {part.casefold() for part in re.findall(r"[A-Za-z_][A-Za-z_0-9]*", target)}
         selected = [item for item in schema.tables if item.name.casefold() in tokens]
         if tool == "list_tables":
@@ -251,9 +230,7 @@ class ConversationalAnalyticsBridge:
                     if len(facts) >= 8:
                         break
         elif tool == "search_schema":
-            return await self.search_schema(
-                MetadataToolInput(db_id=db_id, question=target), snapshot=verified
-            )
+            return await self.search_schema(MetadataToolInput(db_id=db_id, question=target))
         else:
             raise ValueError(f"Unsupported metadata tool: {tool}")
         if not facts:
@@ -265,38 +242,17 @@ class ConversationalAnalyticsBridge:
             found=not facts[0].startswith("No matching"),
         )
 
-    async def load_metadata_snapshot(self, db_id: str) -> VerifiedSchemaSnapshot:
-        """Inspect an allowlisted database once for one assistant turn."""
-        schema = await asyncio.to_thread(self._registry(db_id).inspect, db_id)
-        return VerifiedSchemaSnapshot(
-            db_id=db_id,
-            dialect=schema.dialect,
-            live_schema=schema,
-            profile=self.profiles.load(schema.dialect, db_id),
-        )
-
-    async def search_schema(
-        self,
-        tool_input: MetadataToolInput,
-        *,
-        snapshot: VerifiedSchemaSnapshot | None = None,
-    ) -> MetadataToolOutput:
+    async def search_schema(self, tool_input: MetadataToolInput) -> MetadataToolOutput:
         """Read allowlisted schema; use the existing retriever for column questions."""
         budget = RequestBudget(timeout_seconds=10, max_model_calls=0, max_database_calls=1)
-        verified: VerifiedSchemaSnapshot
-        if snapshot is None:
-            verified = await budget.wait(
-                self.load_metadata_snapshot(tool_input.db_id), kind="database"
-            )
-        else:
-            verified = snapshot
-        if verified.db_id != tool_input.db_id:
-            raise ValueError("The metadata snapshot belongs to another database.")
-        schema = verified.live_schema
+        schema = await budget.wait(
+            asyncio.to_thread(self._registry(tool_input.db_id).inspect, tool_input.db_id),
+            kind="database",
+        )
         question = tool_input.question
         facts: list[str]
         if re.search(r"\b(?:columns?|relationships?|contain|related)\b", question, re.I):
-            profile = verified.profile
+            profile = self.profiles.load(schema.dialect, tool_input.db_id)
             glossary = self.glossaries.load(tool_input.db_id)
             _, selection, _ = await budget.wait(
                 asyncio.to_thread(
@@ -372,91 +328,4 @@ class ConversationalAnalyticsBridge:
             evidence_id=_evidence_id("get_business_context", tool_input.db_id, facts),
             facts=facts,
             found=not facts[0].startswith("No approved"),
-        )
-
-    def search_business_context(self, tool_input: MetadataToolInput) -> MetadataToolOutput:
-        """Combine approved definitions with bounded, advisory profiled value matches.
-
-        A profile can be stale or sampled. Candidates are never reported as live
-        existence proofs and this tool does not execute DISTINCT scans.
-        """
-        registry = self._registry(tool_input.db_id)
-        definitions = self.get_business_context(tool_input)
-        profile = self.profiles.load(
-            "postgres" if isinstance(registry, PostgresRegistry) else "sqlite",
-            tool_input.db_id,
-        )
-        aliases = self.glossaries.matched_value_aliases(
-            tool_input.db_id, tool_input.question
-        )
-        question = tool_input.question.casefold()
-        words = {word.casefold() for word in re.findall(r"[\w-]+", question)}
-        candidates: list[BusinessValueCandidate] = []
-        index: dict[tuple[str, str], list[str]] = {}
-        if profile is not None:
-            index_key = (
-                tool_input.db_id,
-                "postgres" if isinstance(registry, PostgresRegistry) else "sqlite",
-                profile.profiled_at,
-            )
-            index = self._categorical_index.setdefault(index_key, {})
-            for column in profile.columns:
-                if column.semantic_type not in {"categorical", "text"}:
-                    continue
-                values = index.setdefault((column.table, column.column), list(
-                    column.allowed_values[:50]
-                    if column.exact and column.allowed_values
-                    else [item.value for item in column.top_values[:10]]
-                ))
-                provenance: Literal["PROFILE_COMPLETE", "PROFILE_SAMPLE"] = (
-                    "PROFILE_COMPLETE"
-                    if column.exact and column.allowed_values else "PROFILE_SAMPLE"
-                )
-                for value in values:
-                    if not value or len(value) > 100:
-                        continue
-                    match: Literal["EXACT", "FUZZY", "APPROVED_ALIAS"] | None = None
-                    if re.search(rf"(?<!\w){re.escape(value.casefold())}(?!\w)", question):
-                        match = "EXACT"
-                    elif any(
-                        canonical.casefold() == value.casefold()
-                        for canonical in aliases.values()
-                    ):
-                        match = "APPROVED_ALIAS"
-                    elif len(value) >= 3 and any(
-                        len(word) >= 3
-                        and SequenceMatcher(None, word, value.casefold()).ratio() >= 0.82
-                        for word in words
-                    ):
-                        match = "FUZZY"
-                    if match is not None:
-                        candidates.append(BusinessValueCandidate(
-                            table=column.table,
-                            column=column.column,
-                            value=value,
-                            match=match,
-                            provenance=provenance,
-                            ambiguous=match == "FUZZY",
-                            profile_freshness=profile.profiled_at,
-                            ambiguity_reason=(
-                                "Fuzzy matches require live verification."
-                                if match == "FUZZY" else None
-                            ),
-                        ))
-        candidates.sort(key=lambda item: (
-            {"EXACT": 0, "APPROVED_ALIAS": 1, "FUZZY": 2}[item.match],
-            item.table, item.column, item.value,
-        ))
-        candidates = candidates[:5]
-        facts = definitions.facts if definitions.found else []
-        if candidates:
-            facts = [*facts, "Value matches are profiled candidates, not live existence proof."]
-        if not facts:
-            facts = ["No approved definition or profiled value matches this question."]
-        return MetadataToolOutput(
-            tool="search_business_context",
-            evidence_id=_evidence_id("search_business_context", tool_input.db_id, facts),
-            facts=facts,
-            found=definitions.found or bool(candidates),
-            value_candidates=candidates,
         )

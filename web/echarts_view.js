@@ -4,9 +4,14 @@ window.QueryflowECharts = (function () {
   /* Series colors come from the shared token system (--chart-1..--chart-8,
      overridden per theme in styles.css). No arbitrary rainbow hue, one
      palette shared by every chart type. */
-  const FALLBACK_PALETTE = [
-    "#6e60e6", "#4f74d4", "#20946c", "#c1803a", "#d45d65", "#998df6", "#2e9bb5", "#b0568d",
+  const FALLBACK_PALETTE = window.QueryflowChartTheme?.colors || [
+    "#168447", "#2563EB", "#C2410C", "#7C3AED", "#0F766E", "#A16207", "#BE185D", "#475569",
   ];
+  const DISPLAY_PALETTES = {
+    ocean: ["#2676c7", "#16a5a9", "#76b9e6", "#347aa1", "#5b9dd6"],
+    forest: ["#27845c", "#71a854", "#3a9f8b", "#9eb86a", "#4f7660"],
+    sunset: ["#dc7048", "#d99a32", "#c45b74", "#a875c2", "#e6b26a"],
+  };
   const TYPES = new Set([
     "line", "multi_line", "step_line", "area", "stacked_area", "bar",
     "horizontal_bar", "grouped_bar", "stacked_bar", "scatter", "bubble",
@@ -18,7 +23,8 @@ window.QueryflowECharts = (function () {
     if (typeof getComputedStyle !== "function") return fallback;
     return getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback;
   }
-  function palette() {
+  function palette(name) {
+    if (Object.hasOwn(DISPLAY_PALETTES, name)) return DISPLAY_PALETTES[name];
     const steps = FALLBACK_PALETTE.map((_, index) => cssVar(`--chart-${index + 1}`, ""));
     const resolved = steps.filter(Boolean);
     return resolved.length ? resolved : FALLBACK_PALETTE;
@@ -27,6 +33,7 @@ window.QueryflowECharts = (function () {
     if (value == null || value === "") return "";
     const number = Number(value);
     if (!Number.isFinite(number)) return String(value);
+    if (window.QueryflowFormat) return window.QueryflowFormat.formatNumber(number,undefined,undefined,{compact,exact:!compact});
     if (!compact && number !== 0 && Math.abs(number) < 0.000001) return number.toExponential(3);
     return new Intl.NumberFormat(undefined, compact
       ? { notation: "compact", maximumFractionDigits: 1 }
@@ -58,7 +65,7 @@ window.QueryflowECharts = (function () {
   }
   function supported(type) { return TYPES.has(type); }
 
-  function buildOption(spec) {
+  function buildOption(spec, viewportWidth=800) {
     if (!spec || !supported(spec.chart_type) || !Array.isArray(spec.data) || !spec.data.length) return null;
     const data = spec.data;
     const type = spec.chart_type;
@@ -71,43 +78,54 @@ window.QueryflowECharts = (function () {
       || (row[name] == null ? !gapsAllowed.has(type) : !Number.isFinite(Number(row[name])))))) return null;
     const text = cssVar("--text", "#20212b");
     const muted = cssVar("--text-muted", "#5c6170");
-    const border = cssVar("--border-strong", "#dcdbe2");
+    const border = cssVar("--chart-grid", "#e8eef0");
     const compact = spec.number_format === "compact";
     const base = {
       animation: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
-      color: palette(),
+      color: palette(spec.display_palette),
       textStyle: { color: text, fontFamily: "Inter, sans-serif" },
       tooltip: { trigger: "item", renderMode: "richText", confine: true,
-        backgroundColor: cssVar("--sql-bg", "#1d2130"),
-        textStyle: { color: cssVar("--sql-text", "#dce4ff") },
+        backgroundColor: cssVar("--surface", "#ffffff"), borderColor:cssVar("--border","#c5e5d0"),
+        borderWidth:1, padding:12, extraCssText:"border-radius:10px;box-shadow:0 4px 18px rgba(22,132,71,.10)",
+        textStyle: { color: text },
         valueFormatter: value => value == null ? "Missing" : formatNumber(value, false) },
       aria: { enabled: true, decal: { show: false } },
     };
-    const format = value => formatNumber(value, compact);
+    const format = value => window.QueryflowChartTheme?.compact(value,spec.measure_units?.[y])
+      || formatNumber(value, compact);
+    const exact = value => window.QueryflowChartTheme?.exact(value,spec.measure_units?.[y])
+      || formatNumber(value, false);
     if (["pie", "donut"].includes(type)) {
+      if (data.some(row=>row[y]==null || Number(row[y])<0)
+        || !data.some(row=>Number(row[y])>0)) return null;
       return { ...base, legend: { bottom: 0, type: "scroll", textStyle: { color: muted } },
         series: [{ type: "pie", radius: type === "donut" ? ["42%", "67%"] : "67%",
+          itemStyle:{borderColor:cssVar("--surface","#fff"),borderWidth:2,borderRadius:4},
           data: data.map(row => ({ name: label(row[x]), value: row[y] })),
-          label: { formatter: "{b}" } }] };
+          avoidLabelOverlap:true, minShowLabelAngle:12,
+          label: { overflow:"truncate", width:100,
+            formatter: point=>`${window.QueryflowChartTheme?.shortLabel(point.name) || point.name}\n${format(point.value)} · ${formatNumber(point.percent,false)}%` },
+          tooltip:{valueFormatter:exact} }] };
     }
     if (type === "treemap") {
-      const parents = unique(data.map(row => row[x]));
-      const children = parents.map(parent => ({
-        name: parent,
-        children: data.filter(row => label(row[x]) === parent).map(row => ({
-          name: label(row[group]), value: row[y],
-        })),
-      }));
+      if (data.some(row=>typeof row[y]!=="number" || !Number.isFinite(row[y]) || row[y]<0)
+          || !data.some(row=>row[y]>0)) return null;
+      const children = data.map((row,index)=>({id:`row-${index}`,
+        name:[row[x],group ? row[group] : null].filter(value=>value!=null).map(label).join(" · "),
+        value:row[y]}));
       return { ...base, series: [{ type: "treemap", data: children, roam: false,
-        breadcrumb: { show: true }, label: { show: true } }] };
+        itemStyle:{borderColor:cssVar("--surface","#fff"),borderWidth:2,gapWidth:3},
+        tooltip:{valueFormatter:exact},
+        breadcrumb: { show: true }, label: { show: true,formatter:point=>`${point.name}\n${format(point.value)}` } }] };
     }
     if (type === "calendar_heatmap") {
       const years = unique(data.map(row => canonicalDate(row[x]).slice(0, 4)));
       const min = Math.min(...data.map(row => Number(row[y])));
       const max = Math.max(...data.map(row => Number(row[y])));
-      return { ...base, tooltip: { ...base.tooltip, formatter: item => `${item.value[0]}: ${format(item.value[1])}` },
+      return { ...base, tooltip: { ...base.tooltip, formatter: item => `${item.value[0]}: ${exact(item.value[1])}` },
         visualMap: { min, max, calculable: true, orient: "horizontal", left: "center", top: 10,
-          inRange: { color: [cssVar("--accent-soft", "#efedff"), cssVar("--accent", "#6e60e6")] } },
+          inRange: { color: min<0 ? ["#8b5cf6","#f8faf9","#168447"] : ["#e8f5ec","#86cfa0","#168447"] },
+          ...(min<0 ? {min:-Math.max(Math.abs(min),Math.abs(max)),max:Math.max(Math.abs(min),Math.abs(max))} : {}) },
         calendar: years.map((year, index) => ({ range: year, top: 65 + index * 190,
           cellSize: ["auto", 16], right: 24, left: 40,
           yearLabel: { color: muted }, monthLabel: { color: muted }, dayLabel: { color: muted } })),
@@ -124,15 +142,16 @@ window.QueryflowECharts = (function () {
         yAxis: { type: "category", data: ys, name: group, axisLabel: { color: muted } },
         visualMap: { min: Math.min(...values), max: Math.max(...values), calculable: true,
           orient: "horizontal", left: "center", bottom: 0,
-          inRange: { color: [cssVar("--accent-soft", "#efedff"), cssVar("--accent", "#6e60e6")] } },
+          inRange: { color: Math.min(...values)<0 ? ["#8b5cf6","#f8faf9","#168447"] : ["#e8f5ec","#86cfa0","#168447"] },
+          ...(Math.min(...values)<0 ? {min:-Math.max(...values.map(Math.abs)),max:Math.max(...values.map(Math.abs))} : {}) },
         series: [{ type: "heatmap", data: data.map(row => [xs.indexOf(label(row[x])),
-          ys.indexOf(label(row[group])), row[y]]) }] };
+          ys.indexOf(label(row[group])), row[y]]),itemStyle:{borderColor:cssVar("--surface","#fff"),borderWidth:1} }] };
     }
     if (type === "box") {
       return { ...base, grid: { left: 65, right: 25, top: 25, bottom: 40 },
         xAxis: { type: "category", data: data.map(box => label(box[x])), axisLabel: { color: muted } },
         yAxis: { type: "value", name: spec.y_label, axisLabel: { formatter: format, color: muted } },
-        series: [{ type: "boxplot", data: data.map(box =>
+        series: [{ type: "boxplot", itemStyle:{color:"#e8f5ec",borderColor:"#168447",borderWidth:2}, data: data.map(box =>
           [box.min, box.q1, box.median, box.q3, box.max]) }] };
     }
     const temporal = spec.time_format !== "raw" && data.every(row => dateStamp(row[x]) !== null);
@@ -145,20 +164,19 @@ window.QueryflowECharts = (function () {
     const grouped = ["multi_line", "stacked_area", "grouped_bar", "stacked_bar", "percent_stacked_bar"].includes(type);
     const lineType = ["line", "multi_line", "step_line", "area", "stacked_area"].includes(type);
     const valueAxis = { type: "value", scale: false, axisLabel: { formatter: format, color: muted },
-      splitLine: { lineStyle: { color: border, type: "dashed" } } };
-    const shortLabel = value => { const full = label(value); return full.length > 20 ? `${full.slice(0, 19)}…` : full; };
+      splitLine: { lineStyle: { color: border, type: "solid" } } };
+    const shortLabel = value => window.QueryflowChartTheme?.shortLabel(value,viewportWidth<600 ? 15 : 24)
+      || (label(value).length>24 ? `${label(value).slice(0,23)}…` : label(value));
     const categoryAxis = { type: "category", data: category.map(value => friendlyDate(value, spec.time_format)),
-      name: spec.x_label, axisLabel: { color: muted, hideOverlap: true,
-        formatter: shortLabel, rotate: !temporal && category.length > 8 ? 30 : 0 } };
+      name: window.QueryflowChartTheme?.label(spec.x_label || x) || spec.x_label, axisLabel: { color: muted, hideOverlap: true,
+        formatter: shortLabel, rotate:0,
+        interval:Math.max(0,Math.ceil(category.length/(viewportWidth<600 ? 4 : 7))-1) } };
     const option = { ...base,
       grid: { left: 35, right: 35, top: 35, bottom: 55, containLabel: true },
-      xAxis: horizontal ? valueAxis : numericX ? { ...valueAxis, name: spec.x_label } : categoryAxis,
-      yAxis: horizontal ? categoryAxis : { ...valueAxis, name: spec.y_label },
+      xAxis: {...(horizontal ? valueAxis : numericX ? { ...valueAxis, name: spec.x_label } : categoryAxis),nameLocation:"middle",nameGap:35,nameTextStyle:{color:text,fontSize:13}},
+      yAxis: horizontal ? categoryAxis : { ...valueAxis, name:window.QueryflowChartTheme?.label(spec.y_label || y) || spec.y_label },
       dataZoom: category.length > 2 && !numericX
-        ? [...(category.length > 25 ? [{ type: "slider", [horizontal ? "yAxisIndex" : "xAxisIndex"]: 0,
-          [horizontal ? "right" : "bottom"]: 12, [horizontal ? "width" : "height"]: 22,
-          filterMode: "filter", start: spec.zoom_start ?? 0, end: spec.zoom_end ?? 100 }] : []),
-        { type: "inside", [horizontal ? "yAxisIndex" : "xAxisIndex"]: 0, filterMode: "filter",
+        ? [{ type: "inside", [horizontal ? "yAxisIndex" : "xAxisIndex"]: 0, filterMode: "filter",
           start: spec.zoom_start ?? 0, end: spec.zoom_end ?? 100 }] : [],
       legend: { show: spec.legend !== false && (grouped || measures.length > 1), type: "scroll", top: 0, textStyle: { color: muted } },
       series: [],
@@ -185,7 +203,7 @@ window.QueryflowECharts = (function () {
         const totals = type === "percent_stacked_bar" ? new Map(category.map(value => [value,
           data.filter(row => label(row[x]) === value).reduce((sum, row) => sum + Number(row[y]), 0)])) : null;
         return { name, type: lineType ? "line" : "bar", stack: type.startsWith("stacked") || type === "percent_stacked_bar" ? "total" : undefined,
-          areaStyle: type === "stacked_area" ? {} : undefined,
+          areaStyle: type === "stacked_area" ? {opacity: 0.12} : undefined,
           connectNulls: false, data: category.map(value => points.has(value)
             ? (totals ? (totals.get(value) > 0 ? Number(points.get(value)) / totals.get(value) * 100 : null) : points.get(value))
             : null) };
@@ -193,7 +211,10 @@ window.QueryflowECharts = (function () {
     } else {
       option.series = [{ name: spec.y_label, type: lineType ? "line" : "bar",
         step: type === "step_line" ? "end" : undefined,
-        areaStyle: type === "area" ? {} : undefined,
+        lineStyle: type === "area" ? {width:3} : undefined,
+        areaStyle: type === "area" ? {color:{type:"linear", x:0, y:0, x2:0, y2:1,
+          colorStops:[{offset:0,color:palette(spec.display_palette)[0]},
+            {offset:1,color:"rgba(22,132,71,0.015)"}]}, opacity:0.28} : undefined,
         connectNulls: false,
         data: category.map(value => data.find(row => label(row[x]) === value)?.[y] ?? null) }];
     }
@@ -202,18 +223,36 @@ window.QueryflowECharts = (function () {
       option.yAxis.max = 100;
     }
     if (option.dataZoom.some(item => item.type === "slider")) option.grid[horizontal ? "right" : "bottom"] = 68;
+    for (const item of option.series) {
+      const stableColor=(grouped || measures.length>1) && window.QueryflowChartTheme?.colorFor(item.name,palette(spec.display_palette));
+      if (item.type === "line") {
+        item.smooth=false; item.symbol="circle"; item.symbolSize=8; item.showSymbol=item.data.length<=40;
+        item.lineStyle={...item.lineStyle,width:3,...(stableColor ? {color:stableColor} : {})};
+        item.itemStyle={borderColor:"#ffffff",borderWidth:2,...(stableColor ? {color:stableColor} : {})};
+      } else if (item.type === "bar") {
+        item.barMaxWidth=44; item.itemStyle={borderRadius:horizontal ? [0,5,5,0] : [5,5,0,0],...(stableColor ? {color:stableColor} : {})};
+        const measure=measures.find(name=>name===item.name) || y;
+        item.label={show:true,position:"inside",color:"#ffffff",fontSize:11,
+          formatter:point=>window.QueryflowChartTheme?.compact(point.value,
+            type==="percent_stacked_bar" ? "%" : spec.measure_units?.[measure]) || ""};
+        item.labelLayout={hideOverlap:true};
+      } else if (item.type === "scatter") item.itemStyle={opacity:.8,borderColor:"#ffffff",borderWidth:2};
+    }
     return option;
   }
 
   function render(container, presentation) {
     if (!container || !window.echarts || !presentation?.chart_spec) return null;
     const spec = presentation.chart_spec;
-    const option = buildOption(spec);
+    const option = buildOption(spec,container.clientWidth || 800);
     if (!option) return null;
+    container.setAttribute?.("role", "figure");
+    container.setAttribute?.("aria-label", `${spec.title || spec.chart_type}. ${spec.source_row_count || spec.data.length} observations. ${spec.x_label || spec.x}; ${spec.y_label || spec.y}. Exact values are available in the Data tab.`);
+    if (container.style && window.QueryflowChartTheme) container.style.height=`${window.QueryflowChartTheme.height(spec,container.clientWidth || 800)}px`;
     const horizontal = spec.chart_type === "horizontal_bar";
     const chart = window.echarts.init(container, null, { renderer: "canvas" });
     chart.setOption(option);
-    const pinchEnabled = option.dataZoom.length > 0;
+    const pinchEnabled = (option.dataZoom?.length || 0) > 0;
     let pinch = null;
     const distance = touches => Math.hypot(
       touches[0].clientX - touches[1].clientX,
@@ -261,6 +300,13 @@ window.QueryflowECharts = (function () {
     const observer = typeof ResizeObserver === "function" ? new ResizeObserver(resize) : null;
     observer?.observe(container);
     return {
+      highlightSeries(name) {
+        const series=chart.getOption()?.series || [];
+        const index=series.findIndex(item=>item.name === name);
+        if (index < 0) return;
+        chart.dispatchAction({type:"downplay"});
+        chart.dispatchAction({type:"highlight",seriesIndex:index});
+      },
       dispose() {
         window.removeEventListener("resize", resize);
         observer?.disconnect();
