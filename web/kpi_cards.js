@@ -8,6 +8,7 @@ window.QueryflowKpis = (() => {
    * evidence:{result_id:string, column:string, row_count:number}}} KpiSpec */
   const label = name => String(name).replaceAll("_", " ").replace(/([a-z])([A-Z])/g, "$1 $2");
   const format = (value, unit, locale) => {
+    if (window.QueryflowFormat) return window.QueryflowFormat.formatNumber(value,unit,locale,{compact:Math.abs(value)>=1000});
     const options = {maximumFractionDigits:2, notation:Math.abs(value)>=1000 ? "compact" : "standard"};
     if (unit === "count" && Number.isInteger(value)) return new Intl.NumberFormat(locale,{maximumFractionDigits:0}).format(value);
     if (/^[A-Z]{3}$/.test(unit || "")) {
@@ -197,7 +198,9 @@ window.QueryflowKpis = (() => {
       const header=document.createElement("div");header.className="kpi-card-heading";
       const bubble=document.createElement("span");bubble.className="kpi-icon-bubble";
       bubble.dataset.icon=iconFor(spec);bubble.append(glyph(iconFor(spec)));
-      const title = document.createElement("span"); title.className="kpi-card-title";title.textContent = spec.title;
+      const title = document.createElement("span"); title.className="kpi-card-title";
+      title.textContent = window.QueryflowChartTheme?.label(spec.title) || spec.title;
+      title.title = spec.definition;
       header.append(bubble,title);
       const body=document.createElement("div");body.className="kpi-value-row";
       const value = document.createElement("strong"); value.textContent = spec.formatted_value;

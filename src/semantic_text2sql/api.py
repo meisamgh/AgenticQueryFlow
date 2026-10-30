@@ -345,6 +345,9 @@ def create_app(
     # Complete bounded results are kept only for the active process. Persisted
     # history retains a smaller preview and is reused only when it is complete.
     recent_results: dict[tuple[str, str], RecentResult] = {}
+    # Display-only index of the same typed snapshots, never agent memory.
+    # Allows reopening earlier chart turns after the active result changes.
+    chart_snapshots: dict[tuple[str, str, str], RecentResult] = {}
     branch_context: ContextVar[
         tuple[str, ConversationState, RecentResult | None, int | None] | None
     ] = ContextVar("queryflow_branch_context", default=None)
@@ -633,7 +636,32 @@ def create_app(
         response.headers["Cache-Control"] = "no-store"
         if runs.get(run_id, session_id) is None:
             raise HTTPException(status_code=404, detail="Conversation turn not found.")
-        return runs.lineage(session_id, run_id)
+        records = runs.lineage(session_id, run_id)
+        configured = set(sqlite.list_ids())
+        if postgres is not None:
+            configured.update(postgres.configured_ids())
+        restored = []
+        for record in records:
+            cached = chart_snapshots.get((session_id, record.db_id, record.run_id))
+            payload = record.response_payload
+            if (
+                cached is not None and record.db_id in configured and record.accepted
+                and cached.result_id == payload.get("result_id")
+                and cached.chart_id == payload.get("chart_id")
+                and cached.sql == record.sql and not cached.truncated
+                and cached.row_count == len(cached.rows) and cached.chart_spec is not None
+            ):
+                payload = {
+                    **payload,
+                    "generation": {**(payload.get("generation") or {}), "rows": cached.rows},
+                    "presentation": {
+                        **(payload.get("presentation") or {}),
+                        "chart_spec": cached.chart_spec.model_dump(mode="json"),
+                    },
+                }
+                record = record.model_copy(update={"response_payload": payload})
+            restored.append(record)
+        return restored
 
     @app.post("/api/history/{run_id}/continue", response_model=ConversationState)
     async def continue_history(run_id: str, session_id: str) -> ConversationState:
@@ -665,6 +693,8 @@ def create_app(
     async def history_clear(response: Response, session_id: str) -> Response:
         response.headers["Cache-Control"] = "no-store"
         runs.drop_session(session_id)
+        for key in [key for key in chart_snapshots if key[0] == session_id]:
+            chart_snapshots.pop(key, None)
         return Response(status_code=204)
 
     @app.post("/api/conversations/{session_id}/reset", status_code=204)
@@ -2068,7 +2098,14 @@ def create_app(
             return
         key = (request.session_id, request.db_id)
         recent_results.pop(key, None)
-        recent_results[key] = RecentResult.from_response(response)
+        snapshot = RecentResult.from_response(response)
+        recent_results[key] = snapshot
+        if response.run_id and snapshot.chart_spec is not None:
+            chart_key = (request.session_id, request.db_id, response.run_id)
+            chart_snapshots.pop(chart_key, None)
+            chart_snapshots[chart_key] = snapshot
+            if len(chart_snapshots) > 100:
+                chart_snapshots.pop(next(iter(chart_snapshots)))
         if len(recent_results) > 100:
             recent_results.pop(next(iter(recent_results)))
 

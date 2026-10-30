@@ -48,6 +48,7 @@ from semantic_text2sql.plotting_service import design_chart
 from semantic_text2sql.result_cache import RecentResult
 from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded, use_request_budget
 from semantic_text2sql.visualization import parse_intent
+from semantic_text2sql.visualization_recommender import LLMChartProposal, profile_chart_result
 
 ToolName = Literal[
     "list_tables",
@@ -100,6 +101,7 @@ class AgentDecision(StrictModel):
     instruction: str | None = Field(default=None, max_length=4_000)
     answer: str | None = Field(default=None, max_length=2_000)
     finish_after_tool: bool = False
+    chart_proposal: LLMChartProposal | None = None
 
 
 _ACTION_VALUES: tuple[str, ...] = tuple(get_args(AgentDecision.model_fields["action"].annotation))
@@ -113,7 +115,7 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
         "intent": "NEW_QUERY",
         "tool": "ask_data",
         "tool_arguments": {
-            "objective": "Show total consumption by month",
+            "objective": "Show total consumption by month and plot the trend",
             "operation": "NEW_QUERY",
             "changes": [],
             "source_run_id": None,
@@ -121,6 +123,11 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
         "instruction": None,
         "answer": None,
         "finish_after_tool": True,
+        "chart_proposal": {
+            "chart_type": "line", "x": "month", "x_components": [],
+            "y": "total_consumption", "y_measures": [], "series": None,
+            "reason": "Show consumption over time.",
+        },
     },
     {
         "action": "CALL_TOOL",
@@ -135,6 +142,7 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
         "instruction": None,
         "answer": None,
         "finish_after_tool": True,
+        "chart_proposal": None,
     },
     {
         "action": "ANSWER",
@@ -144,6 +152,7 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
         "instruction": None,
         "answer": "Hello. I can help analyze your database.",
         "finish_after_tool": False,
+        "chart_proposal": None,
     },
 )
 
@@ -195,12 +204,19 @@ _TOOL_INPUT_SCHEMA: dict[str, object] = {
 }
 
 
+_CHART_PROPOSAL_SCHEMA = LLMChartProposal.model_json_schema()
+# Native strict providers require every key; local parsing remains compatible
+# with existing decisions that omit this optional proposal.
+_CHART_PROPOSAL_SCHEMA["required"] = list(_CHART_PROPOSAL_SCHEMA["properties"])
+for _chart_field in _CHART_PROPOSAL_SCHEMA["properties"].values():
+    _chart_field.pop("default", None)
+
 AGENT_DECISION_SCHEMA: dict[str, object] = {
     "type": "object",
     "additionalProperties": False,
     "required": [
         "action", "intent", "tool", "tool_arguments", "instruction", "answer",
-        "finish_after_tool",
+        "finish_after_tool", "chart_proposal",
     ],
     "properties": {
         "action": {"type": "string", "enum": list(_ACTION_VALUES)},
@@ -215,6 +231,7 @@ AGENT_DECISION_SCHEMA: dict[str, object] = {
         "instruction": {"type": ["string", "null"], "maxLength": 4_000},
         "answer": {"type": ["string", "null"], "maxLength": 2_000},
         "finish_after_tool": {"type": "boolean"},
+        "chart_proposal": {"anyOf": [_CHART_PROPOSAL_SCHEMA, {"type": "null"}]},
     },
 }
 
@@ -225,7 +242,7 @@ def _decision_json_line(example: dict[str, Any]) -> str:
 
 _DECISION_INSTRUCTIONS = (
     "Decision schema rules: Return ONLY one structured AgentDecision JSON object with keys "
-    "action, intent, tool, tool_arguments, answer, finish_after_tool; "
+    "action, intent, tool, tool_arguments, answer, finish_after_tool, chart_proposal; "
     "no prose, markdown, or code fences. "
     "action must be exactly one of: "
     + ", ".join(_ACTION_VALUES)
@@ -299,6 +316,11 @@ def _consistency_issue_lines(decision: AgentDecision) -> list[str]:
         issues.append("tool_arguments must be null unless action is CALL_TOOL")
     if decision.action == "ANSWER" and not (decision.answer or "").strip():
         issues.append(f"{decision.action} requires a nonempty answer")
+    if decision.chart_proposal is not None and (
+        decision.action != "CALL_TOOL"
+        or decision.tool not in {"ask_data", "change_visualization", "refresh_analysis"}
+    ):
+        issues.append("chart_proposal requires ask_data, refresh_analysis or change_visualization")
     intent_tools = {
         "NEW_QUERY": {"ask_data"},
         "MODIFY_QUERY": {"ask_data"},
@@ -346,6 +368,7 @@ class AgentState(StrictModel):
     base_response: ChatResponse | None = None
     steps: int = 0
     finish_after_tool: bool = False
+    chart_proposal: LLMChartProposal | None = None
     usage: TokenUsage = Field(default_factory=TokenUsage)
     ledger: list[CallLedgerEntry] = Field(default_factory=list)
 
@@ -650,6 +673,20 @@ class ConversationalAnalyticsAgent:
             or decision.tool_arguments and decision.tool_arguments.source_run_id
         ):
             return decision
+
+        failed_refresh = next((
+            item for item in reversed(state.observations)
+            if item.get("tool") == "refresh_analysis"
+            and item.get("status") != "executed"
+        ), None)
+        if failed_refresh is not None and (
+            decision.tool == "change_visualization" or latest_chart
+        ):
+            return AgentDecision(
+                action="ANSWER", intent="VISUALIZE",
+                answer=str(failed_refresh.get("failure")
+                           or "The historical analysis could not be refreshed safely."),
+            )
 
         if latest_chart and latest_chart[1].get("status") == "REQUERY_REQUIRED":
             chart_index, issue = latest_chart
@@ -1083,7 +1120,9 @@ class ConversationalAnalyticsAgent:
         # SQL-and-chart request still needs the plotting tool before completion.
         if state.finish_after_tool and state.observations and state.base_response is not None:
             latest = state.observations[-1]
-            wants_chart = parse_intent(self._request.message).requested
+            wants_chart = (
+                parse_intent(self._request.message).requested or state.chart_proposal is not None
+            )
             chart_ready = any(
                 item.get("tool") == "change_visualization"
                 and item.get("status") == "CHART_READY"
@@ -1142,6 +1181,12 @@ class ConversationalAnalyticsAgent:
                 and last.generation.row_count == len(last.generation.rows),
             } if last and last.generation and last.generation.accepted else None),
             "result_columns": previous.last_columns if previous else [],
+            "chart_column_profiles_advisory": (
+                profile_chart_result(
+                    last.generation.columns, last.generation.rows, sample_rows=0
+                )[0]
+                if last and last.generation and last.generation.accepted else None
+            ),
             "accepted_analytical_contract": (
                 previous.semantic_contract.model_dump(
                     mode="json", exclude_none=True, exclude_defaults=True,
@@ -1178,6 +1223,22 @@ class ConversationalAnalyticsAgent:
             "3. CHART CREATION OR MODIFICATION: Use change_visualization when the request "
             "concerns chart type, axes, series, or presentation and can be supported by "
             "existing data. Preserve all unaffected chart settings.\n"
+            "Chart selection requiring reasoning uses the existing visualization planner, "
+            "not ask_data. A type-only edit preserves accepted axes, series and result_id "
+            "and needs no plotting-model call. Explicit UI color/style/zoom edits are local "
+            "display actions, not new analyses.\n"
+            "Integrated visualization planning: When a user requests SQL and a chart, "
+            "you may attach chart_proposal to the ask_data decision if intended output "
+            "columns are sufficiently known. Use the existing chart schema; this is a "
+            "provisional design, not verified data. Set finish_after_tool=true when SQL "
+            "and the chart complete the goal. The controller validates actual columns, "
+            "types, units, grain and completeness after execution; a valid proposal "
+            "needs no plotting-model call. Unknown aliases must not be invented as "
+            "facts: use chart_proposal=null when uncertain, and the existing planner "
+            "will inspect the executed result. For chart-only requests you may propose "
+            "against accepted columns. Select the smallest useful X/Y/series set, "
+            "exclude irrelevant identifiers, and preserve unaffected encodings. "
+            "Never attach a chart merely to an SQL-only request.\n"
             "4. ANALYTICAL MODIFICATION: Use ask_data when metrics, formulas, filters, "
             "periods, dimensions, aggregations, ranking, or comparisons require changes "
             "to the accepted analysis. Preserve unaffected SemanticContract constraints.\n"
@@ -1297,6 +1358,17 @@ class ConversationalAnalyticsAgent:
                 }
             )
         decision = self._reconcile_route(completion.decision, state, previous, last)
+        if completion.decision.finish_after_tool and decision.action == "CALL_TOOL":
+            decision = decision.model_copy(update={"finish_after_tool": True})
+        if (
+            completion.decision.chart_proposal is not None
+            and decision.action == "CALL_TOOL"
+            and decision.tool in {"ask_data", "refresh_analysis", "change_visualization"}
+            and decision.chart_proposal is None
+        ):
+            decision = decision.model_copy(update={
+                "chart_proposal": completion.decision.chart_proposal,
+            })
         if (
             parse_intent(self._request.message).requested
             and any(item.get("tool") == "change_visualization"
@@ -1728,7 +1800,8 @@ class ConversationalAnalyticsAgent:
             # The plotting specialist receives the exact accepted rows, including
             # a result produced earlier in this same user turn. It cannot run SQL.
             failed_current_sql = any(
-                item.get("tool") == "ask_data" and item.get("status") != "executed"
+                item.get("tool") in {"ask_data", "refresh_analysis"}
+                and item.get("status") != "executed"
                 for item in state.observations
             )
             source = (
@@ -1740,7 +1813,12 @@ class ConversationalAnalyticsAgent:
             plot_provider = os.environ.get("TEXT2SQL_PLOTTING_PROVIDER") or self._request.provider
             plot_model = os.environ.get("TEXT2SQL_PLOTTING_MODEL") or self._request.model
             plot_completer = self.completers.get(plot_provider)
-            if plot_completer is None:
+            local_type_edit = bool(
+                source and source.presentation and source.presentation.chart_spec
+                and parse_intent(question, has_previous=True).explicit_type
+            )
+            proposal = state.decision.chart_proposal or state.chart_proposal
+            if plot_completer is None and not local_type_edit and proposal is None:
                 facts = {"tool": tool, "error": "Plotting model provider is unavailable."}
             else:
                 plot_objective = (
@@ -1760,6 +1838,7 @@ class ConversationalAnalyticsAgent:
                     db_id=self._request.db_id,
                     fresh_result=source is state.base_response and source is not None,
                     changes=tool_input.changes,
+                    provisional_proposal=proposal,
                 )
                 facts = {
                     "tool": tool,
@@ -1841,6 +1920,13 @@ class ConversationalAnalyticsAgent:
                 "turn_context": context,
                 "observations": [*state.observations, facts],
                 "base_response": base,
+                "chart_proposal": (
+                    state.decision.chart_proposal
+                    if tool in {
+                        "ask_data", "refresh_analysis", "reset_context", "check_sql_correctness"
+                    }
+                    else state.chart_proposal
+                ),
                 "decision": None,
                 "steps": state.steps + 1,
                 "usage": self._sum_usage(state.usage, downstream_usage),

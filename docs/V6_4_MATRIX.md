@@ -35,3 +35,14 @@ bounded snapshot retention. Verification results are recorded in the delivery
 report; live provider and PostgreSQL checks remain NOT RUN.
 SQL-memory acceptance cases: VERIFIED locally (10 cases); full Python suite
 487 passed/1 skipped; frontend 127 passed; Ruff, mypy and diff checks passed.
+
+Visualization refinement: existing SQL+plot+type-edit integration now asserts
+one SQL generation and one plotting-model call across both turns (previously two
+plotting calls). `test_historical_refresh_and_plot_share_new_result_without_regeneration`
+verifies refreshed SQL/result/chart lineage. Broader V6.4 statuses above are unchanged.
+
+Integrated proposal acceptance coverage: `test_integrated_chart_planning.py` and
+the integrated/malformed/chart-only cases in `test_v63_conversation.py` validate
+proposal schema, safe fallback, call counts and source identities. The historical
+refresh integration runs with and without an embedded proposal. No claim that
+all grain/unit/business semantics are provable; existing unresolved states remain.

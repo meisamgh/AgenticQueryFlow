@@ -19,11 +19,17 @@ window.QueryflowFormat = (() => {
     catch { return null; } // Unknown/invalid options stay explicit, never guessed.
   };
 
-  function formatNumber(value, unit, locale) {
+  function formatNumber(value, unit, locale, {compact = Math.abs(value) >= COMPACT_THRESHOLD, exact = false} = {}) {
+    if (value == null) return "—";
     if (!Number.isFinite(value)) return String(value);
+    if (exact) {
+      const text = new Intl.NumberFormat(locale || undefined, {maximumSignificantDigits:17}).format(value);
+      return unit === "ratio" ? `${text} (ratio)` : text + (unit ? ` ${unit}` : "");
+    }
     if (isCurrencyCode(unit)) {
       const format = tryFormat(locale, {
         style: "currency", currency: unit, maximumFractionDigits: 2,
+        notation: compact ? "compact" : "standard",
       });
       if (format) return format.format(value);
     }
@@ -38,12 +44,13 @@ window.QueryflowFormat = (() => {
     } else if (unit === "%" || unit === "percent") {
       return new Intl.NumberFormat(locale || undefined, formatterOptions).format(value) + "%";
     }
-    if (Math.abs(value) >= COMPACT_THRESHOLD) {
+    if (compact && unit !== "count") {
       return new Intl.NumberFormat(locale || undefined, {
         ...formatterOptions, notation: "compact", maximumFractionDigits: 2,
       }).format(value);
     }
-    return new Intl.NumberFormat(locale || undefined, formatterOptions).format(value);
+    return new Intl.NumberFormat(locale || undefined, formatterOptions).format(value)
+      + (unit && unit !== "count" ? ` ${unit}` : "");
   }
 
   /** Verified temporal formats only (mirrors the chart spec's time_format). */
@@ -57,7 +64,7 @@ window.QueryflowFormat = (() => {
       ?? (timeFormat === "day" && /^\d{4}-\d{2}-\d{2}$/.test(raw) ? raw : null);
     if (iso == null) return null;
     const stamp = Date.parse(`${iso}T00:00:00Z`);
-    if (!Number.isFinite(stamp)) return null;
+    if (!Number.isFinite(stamp) || new Date(stamp).toISOString().slice(0,10) !== iso) return null;
     try {
       return new Intl.DateTimeFormat(locale || undefined, {
         timeZone: "UTC", year: "numeric", month: "short",
@@ -75,6 +82,10 @@ window.QueryflowFormat = (() => {
     const { unit, timeFormat, timeColumn, column, locale } = metadata;
     if (value === null || value === undefined) return "—";
     const verifiedTime = timeFormat && timeFormat !== "raw" && column === timeColumn;
+    if (verifiedTime && timeFormat !== "year") {
+      const period = formatPeriod(value, timeFormat, locale);
+      if (period !== null) return period;
+    }
     if (typeof value === "number") {
       // A verified year column is shown exactly; never grouped like a measure.
       if (verifiedTime && (timeFormat === "year" || timeFormat === "month")

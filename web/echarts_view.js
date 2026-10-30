@@ -5,7 +5,7 @@ window.QueryflowECharts = (function () {
      overridden per theme in styles.css). No arbitrary rainbow hue, one
      palette shared by every chart type. */
   const FALLBACK_PALETTE = window.QueryflowChartTheme?.colors || [
-    "#168447", "#3B82F6", "#F97316", "#8B5CF6", "#86CFA0", "#FBBF24", "#0F766E", "#DB2777",
+    "#168447", "#2563EB", "#C2410C", "#7C3AED", "#0F766E", "#A16207", "#BE185D", "#475569",
   ];
   const DISPLAY_PALETTES = {
     ocean: ["#2676c7", "#16a5a9", "#76b9e6", "#347aa1", "#5b9dd6"],
@@ -33,6 +33,7 @@ window.QueryflowECharts = (function () {
     if (value == null || value === "") return "";
     const number = Number(value);
     if (!Number.isFinite(number)) return String(value);
+    if (window.QueryflowFormat) return window.QueryflowFormat.formatNumber(number,undefined,undefined,{compact,exact:!compact});
     if (!compact && number !== 0 && Math.abs(number) < 0.000001) return number.toExponential(3);
     return new Intl.NumberFormat(undefined, compact
       ? { notation: "compact", maximumFractionDigits: 1 }
@@ -64,7 +65,7 @@ window.QueryflowECharts = (function () {
   }
   function supported(type) { return TYPES.has(type); }
 
-  function buildOption(spec) {
+  function buildOption(spec, viewportWidth=800) {
     if (!spec || !supported(spec.chart_type) || !Array.isArray(spec.data) || !spec.data.length) return null;
     const data = spec.data;
     const type = spec.chart_type;
@@ -101,7 +102,9 @@ window.QueryflowECharts = (function () {
         series: [{ type: "pie", radius: type === "donut" ? ["42%", "67%"] : "67%",
           itemStyle:{borderColor:cssVar("--surface","#fff"),borderWidth:2,borderRadius:4},
           data: data.map(row => ({ name: label(row[x]), value: row[y] })),
-          label: { formatter: point=>`${point.name}\n${format(point.value)} · ${formatNumber(point.percent,false)}%` },
+          avoidLabelOverlap:true, minShowLabelAngle:12,
+          label: { overflow:"truncate", width:100,
+            formatter: point=>`${window.QueryflowChartTheme?.shortLabel(point.name) || point.name}\n${format(point.value)} · ${formatNumber(point.percent,false)}%` },
           tooltip:{valueFormatter:exact} }] };
     }
     if (type === "treemap") {
@@ -162,10 +165,12 @@ window.QueryflowECharts = (function () {
     const lineType = ["line", "multi_line", "step_line", "area", "stacked_area"].includes(type);
     const valueAxis = { type: "value", scale: false, axisLabel: { formatter: format, color: muted },
       splitLine: { lineStyle: { color: border, type: "solid" } } };
-    const shortLabel = value => { const full = label(value); return full.length > 20 ? `${full.slice(0, 19)}…` : full; };
+    const shortLabel = value => window.QueryflowChartTheme?.shortLabel(value,viewportWidth<600 ? 15 : 24)
+      || (label(value).length>24 ? `${label(value).slice(0,23)}…` : label(value));
     const categoryAxis = { type: "category", data: category.map(value => friendlyDate(value, spec.time_format)),
       name: window.QueryflowChartTheme?.label(spec.x_label || x) || spec.x_label, axisLabel: { color: muted, hideOverlap: true,
-        formatter: shortLabel, rotate: !temporal && category.length > 8 ? 30 : 0 } };
+        formatter: shortLabel, rotate:0,
+        interval:Math.max(0,Math.ceil(category.length/(viewportWidth<600 ? 4 : 7))-1) } };
     const option = { ...base,
       grid: { left: 35, right: 35, top: 35, bottom: 55, containLabel: true },
       xAxis: {...(horizontal ? valueAxis : numericX ? { ...valueAxis, name: spec.x_label } : categoryAxis),nameLocation:"middle",nameGap:35,nameTextStyle:{color:text,fontSize:13}},
@@ -221,7 +226,7 @@ window.QueryflowECharts = (function () {
     for (const item of option.series) {
       const stableColor=(grouped || measures.length>1) && window.QueryflowChartTheme?.colorFor(item.name,palette(spec.display_palette));
       if (item.type === "line") {
-        item.smooth=false; item.symbol="circle"; item.symbolSize=7; item.showSymbol=item.data.length<=40;
+        item.smooth=false; item.symbol="circle"; item.symbolSize=8; item.showSymbol=item.data.length<=40;
         item.lineStyle={...item.lineStyle,width:3,...(stableColor ? {color:stableColor} : {})};
         item.itemStyle={borderColor:"#ffffff",borderWidth:2,...(stableColor ? {color:stableColor} : {})};
       } else if (item.type === "bar") {
@@ -239,8 +244,10 @@ window.QueryflowECharts = (function () {
   function render(container, presentation) {
     if (!container || !window.echarts || !presentation?.chart_spec) return null;
     const spec = presentation.chart_spec;
-    const option = buildOption(spec);
+    const option = buildOption(spec,container.clientWidth || 800);
     if (!option) return null;
+    container.setAttribute?.("role", "figure");
+    container.setAttribute?.("aria-label", `${spec.title || spec.chart_type}. ${spec.source_row_count || spec.data.length} observations. ${spec.x_label || spec.x}; ${spec.y_label || spec.y}. Exact values are available in the Data tab.`);
     if (container.style && window.QueryflowChartTheme) container.style.height=`${window.QueryflowChartTheme.height(spec,container.clientWidth || 800)}px`;
     const horizontal = spec.chart_type === "horizontal_bar";
     const chart = window.echarts.init(container, null, { renderer: "canvas" });

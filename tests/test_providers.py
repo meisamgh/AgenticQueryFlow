@@ -733,7 +733,7 @@ def test_agent_decision_schema_enumerates_every_allowed_value() -> None:
     properties = schema["properties"]
     assert schema["required"] == [
         "action", "intent", "tool", "tool_arguments", "instruction", "answer",
-        "finish_after_tool",
+        "finish_after_tool", "chart_proposal",
     ]
     assert properties["action"]["enum"] == [
         "ANSWER",
@@ -930,7 +930,7 @@ def test_justdowork_structured_output_uses_forced_tool_schema() -> None:
     schema: dict[str, Any] = forced_tool["input_schema"]
     assert schema["required"] == [
         "action", "intent", "tool", "tool_arguments", "instruction", "answer",
-        "finish_after_tool",
+        "finish_after_tool", "chart_proposal",
     ]
     assert schema["properties"]["action"]["enum"] == [
         "ANSWER",

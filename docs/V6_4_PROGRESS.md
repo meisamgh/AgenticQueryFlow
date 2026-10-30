@@ -253,3 +253,91 @@ Ruff passed; mypy passed across 59 source files; `git diff --check` passed.
 Ten new SQL-memory acceptance cases pass. Existing dependency deprecation
 warnings remain. Local metadata benchmark: p50 1.602 → 0.090 ms; p95
 1.734 → 0.098 ms, without model or business-database calls.
+
+## Conversational visualization integration — 2026-10-30
+
+Retained one Top-layer orchestrator and existing LLMChartProposals planner.
+Added accepted grain/completeness/result identity to chart context, validated
+model-free chart-type edits, missing-provider support for those edits, and a
+failed-historical-refresh stale-source guard. Historical refresh → chart now has
+an actual SQLite integration test. See `VISUALIZATION_INTEGRATION.md` for
+measured call-count changes and the explicitly simulated latency benchmark.
+Verification: Python 489 passed/1 skipped (12.61s); frontend 127 passed (264ms);
+Ruff, mypy (59 source files), and diff checks passed. Added failed historical
+refresh → visualization regression: no stale chart, no replacement SQL query.
+Live provider, PostgreSQL and browser screenshot verification remain NOT RUN.
+
+## Premium chart presentation refinement — 2026-10-30
+
+Preserved prior uncommitted orchestration work. Frontend-only changes:
+- Shared metadata-aware number/period formatting across charts, KPIs and tables;
+  explicit compact/exact modes, unchanged raw values, validated calendar dates.
+- Default eight-color palette tested at >=3:1 contrast against white for graphical
+  marks; collision-aware series assignment retains colors within a palette.
+- 3px unsmoothed lines, 8px circular markers with 2px white borders; existing
+  disabled bottom slider and zoom/pan/reset behavior preserved.
+- Treemap tile separation, exact scatter hover labels, comparison-only visible
+  KPI sparklines, focus states, dark surfaces and mobile wrapping.
+- Cache-busted frontend assets and 22 new tests spanning all 19 chart types,
+  raw-data integrity, formatting, contrast and responsive sizing constraints.
+Verification: frontend 149 passed; Python 489 passed/1 skipped; Ruff/mypy/diff
+checks passed. Existing tests cover renderer rejection fallback, comparison
+evidence and no-network display changes. No live browser pixel-level or screen
+reader verification performed. Color contrast does not prove color-vision
+deficiency distinguishability. No SQL/LLM calls added; no runtime speedup claimed.
+
+## Integrated first-layer visualization proposals — 2026-10-30
+
+Added optional existing LLMChartProposal to AgentDecision and strict native JSON
+schema/examples. Request-local proposal propagation validates after governed SQL;
+valid proposals skip the plotting LLM, missing/rejected proposals use the same
+existing recommender. Shared validation rejects silent measure/series changes.
+Top-layer chart-only reconciliation preserves completion flags. Prior uncommitted
+frontend and memory work remains intact. See VISUALIZATION_INTEGRATION.md for
+measured calls and the scripted latency benchmark (not production claims).
+Acceptance tests cover two-call SQL+chart, fallback, historical refresh, chart
+reuse/lineage, malformed decision repair, incomplete results, incompatible units,
+duplicate grain and exact multi-measure preservation. Live-provider/PostgreSQL
+verification remains NOT RUN; no commit/push requested.
+Verification: 507 Python tests passed, 1 skipped (13.93s); 149 frontend tests
+passed (317ms); Ruff, mypy across 59 source files, and diff checks passed.
+
+## Compact chart polish — 2026-10-30
+
+Kept existing chart heights and KPI calculations. Added shared readable titles,
+non-mutating category label thinning/ellipsis, width-aware tick budgets, legends
+above Plotly charts, stable pie/donut source order, cleaner composition labels,
+readable KPI titles and accessible renderer-failure messages. Exact source labels
+remain in hover/data; no SQL, model, result identity or analytical behavior changes.
+Asset versions updated so browsers fetch the current presentation. New frontend
+cases assert 21-row integrity while thinning labels, unchanged 260px sample height,
+original pie values/order, title semantics and dense-line behavior. No browser
+screenshot/visual QA performed; these are renderer-option and DOM-mocked checks.
+Verification: 153 frontend tests passed (304ms); Python 507 passed/1 skipped
+(15.53s); Ruff, mypy across 59 source files, and diff checks passed.
+
+## Stable chart selector and history restoration — 2026-10-30
+
+- Chart choices preserve the original recommendation order while selected types
+  change; compatibility derives from accepted encodings, not the current type.
+- Browser display snapshots retain only complete chart rows/specifications with
+  session/database/run/result/chart identity and SQL/column checks (100-view cap).
+  New conversation resets analytical state without deleting displayed history;
+  Clear history clears the browser cache.
+- The history-turn endpoint hydrates exact complete charts from a bounded
+  process-local index of existing RecentResult snapshots, keyed by session,
+  database and run, validating result/chart IDs and SQL. It does not overwrite
+  active state or execute SQL. This supports page reload while the server retains
+  the snapshot. Clearing history removes its display index.
+- Persisted history stays bounded to its configured preview. After cache eviction
+  or server restart, incomplete previews remain incomplete; no hidden rerun or
+  fabricated chart. UI metadata distinguishes complete retention from previews.
+- Tests cover stable type switching, 19/20/21/100-row browser restoration,
+  identity/session/database isolation, invalid snapshots, cache bounds and a
+  real SQLite 21-row chart across new conversations/page reload. The API test
+  forbids business DB execution while opening history and checks restart behavior.
+Browser visual testing remains NOT RUN. Existing uncommitted work is preserved.
+Verification: frontend 160 passed; Python 508 passed/1 skipped (16.38s);
+Ruff, mypy and diff checks passed. Initial full run had an existing optimizer
+timing-dependent assertion fail; isolated rerun and full rerun passed unchanged.
+Already-discarded old snapshots cannot be reconstructed without an explicit rerun.

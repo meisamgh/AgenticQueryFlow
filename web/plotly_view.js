@@ -6,7 +6,7 @@ window.QueryflowPlotly = (function () {
     "horizontal_bar", "grouped_bar", "stacked_bar", "percent_stacked_bar",
     "scatter", "bubble", "histogram", "pie", "donut", "treemap",
   ]);
-  const COLORS = window.QueryflowChartTheme?.colors || ["#168447", "#3B82F6", "#F97316", "#8B5CF6", "#86CFA0", "#FBBF24", "#0F766E", "#DB2777"];
+  const COLORS = window.QueryflowChartTheme?.colors || ["#168447", "#2563EB", "#C2410C", "#7C3AED", "#0F766E", "#A16207", "#BE185D", "#475569"];
   const DISPLAY_PALETTES = {
     ocean: ["#2676c7", "#16a5a9", "#76b9e6", "#347aa1", "#5b9dd6"],
     forest: ["#27845c", "#71a854", "#3a9f8b", "#9eb86a", "#4f7660"],
@@ -30,7 +30,7 @@ window.QueryflowPlotly = (function () {
       ? getComputedStyle(document.documentElement).getPropertyValue(name).trim() || fallback : fallback;
   }
   function supported(type) { return TYPES.has(type); }
-  function buildFigure(spec) {
+  function buildFigure(spec, viewportWidth=800) {
     if (!spec || !supported(spec.chart_type) || !Array.isArray(spec.data) || !spec.data.length) return null;
     const { chart_type: type, x, y, series } = spec;
     if (!x || !y || spec.data.some(row => !Object.hasOwn(row, x) || !Object.hasOwn(row, y))) return null;
@@ -48,6 +48,8 @@ window.QueryflowPlotly = (function () {
       ? DISPLAY_PALETTES[spec.display_palette]
       : COLORS.map((fallback, index) => css(`--chart-${index + 1}`, fallback));
     const horizontal = type === "horizontal_bar";
+    const mobile = viewportWidth < 600;
+    const shortLabel = value => window.QueryflowChartTheme?.shortLabel(value,mobile ? 15 : 24) || String(value);
     const escapeLabel=value=>String(value).replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
     const compactValue=value=>window.QueryflowChartTheme?.compact(value,spec.measure_units?.[y]) || String(value);
     const exactValue=value=>window.QueryflowChartTheme?.exact(value,spec.measure_units?.[y]) || String(value);
@@ -66,10 +68,10 @@ window.QueryflowPlotly = (function () {
         customdata: raw,
         meta:{measure_unit:unit},
         text:ys.map(value=>formatValue(value).replace(/[&<>]/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[char]))),
-        hovertemplate:horizontal ? "%{y}<br>%{text}<extra></extra>" : "%{x}<br>%{text}<extra></extra>",
+        hovertemplate:horizontal ? "%{y}<br>%{text}<extra>%{fullData.name}</extra>" : "%{x}<br>%{text}<extra>%{fullData.name}</extra>",
         marker: { color, opacity:LINE.has(type) ? 1 : 0.85, line: {color:"#ffffff",width:2},
           size: type === "bubble" ? rows.map(row => Math.max(6,
-          Math.min(38, Math.sqrt(Math.max(0, Number(row[spec.size] || 0))) * 3))) : 7 },
+          Math.min(38, Math.sqrt(Math.max(0, Number(row[spec.size] || 0))) * 3))) : 8 },
         line: { color, shape: type === "step_line" ? "hv" : "linear", width: 3 },
         connectgaps: false, orientation: horizontal ? "h" : "v", ...extra };
     };
@@ -86,7 +88,8 @@ window.QueryflowPlotly = (function () {
         text:spec.data.map(row=>escapeLabel(compactValue(row[y]))),
         texttemplate:"%{label}<br>%{text}",
         hovertext:spec.data.map(row=>escapeLabel(exactValue(row[y]))),
-        marker:{colors:spec.data.map((_,i)=>colors[i%colors.length])},
+        marker:{colors:spec.data.map((_,i)=>colors[i%colors.length]),line:{color:css("--surface","#fff"),width:2}},
+        tiling:{pad:3}, pathbar:{visible:false},
         hovertemplate:"%{label}<br>%{hovertext}<extra></extra>"}];
     } else if (type === "pie" || type === "donut") {
       if (spec.data.some(row => numeric(row[y]) === null || numeric(row[y]) < 0)
@@ -97,13 +100,14 @@ window.QueryflowPlotly = (function () {
         texttemplate:spec.data.length>10 ? undefined : "%{label}<br>%{text} · %{percent:.1%}",
         hovertext:spec.data.map(row=>escapeLabel(exactValue(row[y]))),
         hovertemplate:"%{label}<br>%{hovertext}<br>%{percent:.1%}<extra></extra>",
-        hole: type === "donut" ? 0.52 : 0, marker: {colors,line:{color:css("--surface","#fff"),width:2}}, textinfo: spec.data.length>10 ? "none" : "label+percent"}];
+        hole: type === "donut" ? 0.52 : 0, sort:false,
+        marker: {colors,line:{color:css("--surface","#fff"),width:2}}, textinfo: spec.data.length>10 ? "none" : "label+percent"}];
     } else if (["scatter", "bubble"].includes(type)) {
       if (spec.data.some(row => !Number.isFinite(Number(row[x])))) return null;
       traces = [makeTrace(y, spec.data, "markers", colors[0])];
       traces[0].x = spec.data.map(row => Number(row[x]));
       // Labels are database/user text; keep them out of Plotly's HTML-capable hover template.
-      traces[0].hovertemplate = "%{x}<br>%{y}<extra></extra>";
+      traces[0].hovertemplate = "%{x}<br>%{text}<extra></extra>";
     } else if (measures.length > 1 && !series && ["multi_line", "grouped_bar"].includes(type)) {
       if (rawCategories.length !== spec.data.length) return null;
       traces = measures.map((name, index) => {
@@ -153,16 +157,16 @@ window.QueryflowPlotly = (function () {
       paper_bgcolor: css("--surface", "#fff"), plot_bgcolor: css("--surface", "#fff"),
       font: {family: "Inter, sans-serif", color: text, size: 12},
       hoverlabel:{bgcolor:css("--surface","#fff"),bordercolor:css("--border","#c5e5d0"),font:{color:text,size:12}},
-      legend:{orientation:"h",y:-0.22,x:0},
+      legend:{orientation:"h",y:1.06,yanchor:"bottom",x:0,font:{size:11},itemsizing:"constant"},
       bargap:0.24,bargroupgap:0.08,
       uniformtext:{minsize:10,mode:"hide"},
       transition:{duration:window.QueryflowChartTheme?.reducedMotion() ? 0 : 120},
-      margin: {l: horizontal ? 115 : 58, r: 22, t: 16, b: 68},
-      showlegend: spec.legend !== false && traces.length > 1,
+      margin: {l: horizontal ? 115 : 58, r: 22, t: spec.legend !== false && (traces.length>1 || ["pie","donut"].includes(type)) ? 42 : 16, b: 64},
+      showlegend: spec.legend !== false && (traces.length > 1 || ["pie","donut"].includes(type) && rawCategories.length>1),
       hovermode: isTimeSeries ? "x unified" : "closest", dragmode: "zoom", uirevision: "queryflow",
       barmode: type === "grouped_bar" ? "group" : STACK.has(type) ? "stack" : "relative",
       xaxis: {title: {text: window.QueryflowChartTheme?.label(horizontal ? spec.y_label || y : spec.x_label || x) || (horizontal ? spec.y_label || y : spec.x_label || x),standoff:16,font:{size:13,color:text}},
-        nticks:7,tickformat:horizontal ? (spec.measure_units?.[y]==="ratio" ? ".0%" : "~s")
+        nticks:mobile ? 4 : 7,tickformat:horizontal ? (spec.measure_units?.[y]==="ratio" ? ".0%" : "~s")
           : time ? (spec.time_format==="year" ? "%Y" : spec.time_format==="day" ? "%d %b %Y" : "%b %Y") : undefined,
         ticksuffix:horizontal && ["%","percent"].includes(spec.measure_units?.[y]) ? "%" : "",
         type: horizontal || ["scatter", "bubble"].includes(type) ? "linear" : time ? "date" : "category",
@@ -175,6 +179,11 @@ window.QueryflowPlotly = (function () {
         rangemode: "tozero", automargin: true, color: muted,
         zeroline:false, gridcolor: css("--chart-grid", "#e8eef0")},
     };
+    if (!time && !["scatter","bubble","pie","donut","treemap"].includes(type)) {
+      const axis=horizontal ? layout.yaxis : layout.xaxis;
+      const ticks=window.QueryflowChartTheme?.axisTicks(rawCategories,mobile ? 4 : 7) || rawCategories;
+      Object.assign(axis,{tickmode:"array",tickvals:ticks,ticktext:ticks.map(shortLabel),tickangle:0});
+    }
     if (type === "percent_stacked_bar") layout.yaxis.range = [0, 100];
     if (type === "area") {
       traces[0].fill = "tozeroy";
@@ -203,8 +212,10 @@ window.QueryflowPlotly = (function () {
   function render(container, presentation, _generation, onFailure) {
     if (!container || !window.Plotly || !presentation?.chart_spec) return null;
     const spec = presentation.chart_spec;
-    const figure = buildFigure(spec);
+    const figure = buildFigure(spec,container.clientWidth || 800);
     if (!figure) return null;
+    container.setAttribute?.("role", "figure");
+    container.setAttribute?.("aria-label", `${spec.title || spec.chart_type}. ${spec.source_row_count || spec.data.length} observations. ${spec.x_label || spec.x}; ${spec.y_label || spec.y}. Exact values are available in the Data tab.`);
     if (container.style && window.QueryflowChartTheme) container.style.height=`${window.QueryflowChartTheme.height(spec,container.clientWidth || 800)}px`;
     const plotly = window.Plotly;
     let disposed = false;

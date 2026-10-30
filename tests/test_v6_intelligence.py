@@ -246,10 +246,12 @@ class TestVisualizationRecommenderLLM:
         }
 
     async def _valid(self) -> None:
+        # This fixture has two rows per month: country must be explicit, not
+        # silently inferred as an extra series for an ostensibly monthly chart.
         payload = json.dumps(
             {
                 "primary_chart": self._proposal("multi_line", "month",
-                                                ["revenue", "cost", "profit"]),
+                                                ["revenue"], series="country"),
                 "alternative_charts": [self._proposal(
                     "grouped_bar", "month", ["revenue"], series="country"
                 )],

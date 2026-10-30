@@ -170,6 +170,64 @@ def test_historical_refresh_uses_current_data_no_generator_and_new_identity(
     assert store.sql_memory("owner", "shop", "first")["run_id"] == first["run_id"]  # type: ignore[index]
 
 
+@pytest.mark.parametrize("integrated", [False, True])
+def test_historical_refresh_and_plot_share_new_result_without_regeneration(
+    registry: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    integrated: bool,
+) -> None:
+    monkeypatch.setenv("TEXT2SQL_PLOTTING_PROVIDER", "agentrouter")
+    monkeypatch.setenv("TEXT2SQL_PLOTTING_MODEL", "test")
+    client, planner, sql, _ = app_client(registry, monkeypatch, tmp_path)
+    sql.sql = "SELECT country, COUNT(*) AS customer_count FROM customers GROUP BY country"
+    planner.decisions = [decision("ask_data", "Customers by country", "NEW_QUERY",
+                                  operation="NEW_QUERY")]
+    first = ask(client, "Customers by country")
+    planner.decisions = [
+        decision("search_conversation_memory", "first", "EXPLAIN"),
+        decision("refresh_analysis", first["run_id"]),
+        {"primary_chart": {"chart_type": "bar", "x": "country",
+                           "y": "customer_count", "reason": "Compare customer counts."},
+         "alternative_charts": []},
+    ]
+    if integrated:
+        planner.decisions[1]["chart_proposal"] = {
+            "chart_type": "bar", "x": "country", "y": "customer_count",
+            "reason": "Compare customer counts.",
+        }
+    plotted = ask(client, "Use my first analysis with current data and plot it")
+    assert plotted["plot_status"] == "CHART_READY", plotted
+    assert plotted["result_id"] != first["result_id"]
+    assert plotted["presentation_state"]["source_result_id"] == plotted["result_id"]
+    assert plotted["chart_id"]
+    assert len(sql.calls) == 1
+    assert planner.calls == (3 if integrated else 4)
+    if not integrated:
+        assert "Accepted analytical metadata" in planner.prompts[-1]
+    assert plotted["generation"]["sql"] == first["generation"]["sql"]
+
+
+def test_failed_historical_refresh_cannot_plot_unrelated_cached_result(
+    registry: Any, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("TEXT2SQL_PLOTTING_PROVIDER", "agentrouter")
+    monkeypatch.setenv("TEXT2SQL_PLOTTING_MODEL", "test")
+    client, planner, sql, _ = app_client(registry, monkeypatch, tmp_path)
+    sql.sql = "SELECT country, COUNT(*) AS customer_count FROM customers GROUP BY country"
+    planner.decisions = [decision("ask_data", "Customers by country", "NEW_QUERY",
+                                  operation="NEW_QUERY")]
+    ask(client, "Customers by country")
+    planner.decisions = [
+        decision("refresh_analysis", "missing-run"),
+        decision("change_visualization", "Plot the historical analysis", "VISUALIZE"),
+        {"action": "ANSWER", "intent": "DIRECT_ANSWER", "answer": "The chart is ready."},
+    ]
+    failed = ask(client, "Refresh the unavailable analysis and plot it")
+    assert failed.get("plot_status") != "CHART_READY", failed
+    assert not failed.get("chart_id")
+    assert failed["message"] != "The chart is ready."
+    assert len(sql.calls) == 1
+
+
 def test_modified_historical_analysis_uses_selected_contract_not_latest_query(
     registry: Any,
     monkeypatch: pytest.MonkeyPatch,

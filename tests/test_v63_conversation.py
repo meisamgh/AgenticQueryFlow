@@ -97,6 +97,164 @@ def _post(client: TestClient, message: str, session: str = "same") -> dict[str, 
     return response.json()
 
 
+@pytest.mark.parametrize("proposed_y", ["total_consumption", "nonexistent_measure", None])
+def test_integrated_sql_chart_proposal_validates_or_selectively_falls_back(
+    tmp_path: Path, monkeypatch: Any, proposed_y: str | None,
+) -> None:
+    initial = {
+        **_tool("NEW_QUERY", "ask_data", "Total consumption by currency", operation="NEW_QUERY"),
+        "finish_after_tool": True,
+    }
+    if proposed_y is not None:
+        initial["chart_proposal"] = {
+            "chart_type": "bar", "x": "currency", "y": proposed_y,
+            "reason": "Compare consumption by currency.",
+        }
+    top = ScriptedCompleter([initial])
+    plotting = ScriptedCompleter([{
+        "primary_chart": {"chart_type": "bar", "x": "currency", "y": "total_consumption",
+                          "reason": "Compare actual consumption values."},
+        "alternative_charts": [],
+    }])
+    sql = ScriptedSQL()
+    client = _client(tmp_path, monkeypatch, top, plotting, sql)
+    response = _post(client, "Total consumption by currency and plot it", "integrated")
+    assert response["plot_status"] == "CHART_READY", response
+    chart = response["presentation"]["chart_spec"]
+    assert chart["x"] == "currency" and chart["y"] == "total_consumption"
+    assert sorted(row["total_consumption"] for row in chart["data"]) == [5.0, 30.0]
+    assert response["presentation_state"]["source_result_id"] == response["result_id"]
+    assert response["chart_id"]
+    assert top.calls == 1
+    assert len(sql.calls) == 1
+    assert plotting.calls == (0 if proposed_y == "total_consumption" else 1)
+    if proposed_y is not None:
+        entry = next(item for item in response["call_ledger"]
+                     if item["component"] == "chart_proposal_validation")
+        assert entry["status"] == ("SUCCEEDED" if proposed_y == "total_consumption" else "FAILED")
+        assert entry["latency_ms"] >= 0
+    # A following type-only edit keeps the exact result and encodings.
+    top.responses = iter([{
+        **_tool("VISUALIZE", "change_visualization", "Change to a horizontal bar chart"),
+        "finish_after_tool": True,
+    }])
+    edited = _post(client, "Change to a horizontal bar chart", "integrated")
+    assert edited["result_id"] == response["result_id"]
+    assert edited["chart_id"] != response["chart_id"]
+    assert edited["presentation"]["chart_spec"]["y"] == "total_consumption"
+    assert len(sql.calls) == 1
+    assert plotting.calls == (0 if proposed_y == "total_consumption" else 1)
+
+
+@pytest.mark.parametrize("repair_succeeds", [True, False])
+def test_invalid_embedded_chart_is_repaired_before_any_sql_tool(
+    tmp_path: Path, monkeypatch: Any, repair_succeeds: bool,
+) -> None:
+    bad = {
+        **_tool("NEW_QUERY", "ask_data", "Total consumption by currency", operation="NEW_QUERY"),
+        "finish_after_tool": True,
+        "chart_proposal": {"chart_type": "bar", "x": "currency", "y": "total_consumption",
+                           "javascript": "Never execute this"},
+    }
+    good = {**bad, "chart_proposal": {
+        "chart_type": "bar", "x": "currency", "y": "total_consumption",
+    }}
+    top = ScriptedCompleter([bad, good if repair_succeeds else bad])
+    plotting, sql = ScriptedCompleter([]), ScriptedSQL()
+    response = _post(_client(tmp_path, monkeypatch, top, plotting, sql),
+                     "Total consumption by currency and plot it", "invalid-proposal")
+    assert top.calls == 2
+    assert len(sql.calls) == (1 if repair_succeeds else 0)
+    assert plotting.calls == 0
+    assert (response.get("plot_status") == "CHART_READY") == repair_succeeds
+    assert any(item["status"] == "FAILED" for item in response["call_ledger"])
+
+
+def test_chart_only_proposal_reuses_complete_result_without_sql_or_plotting_model(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    top = ScriptedCompleter([
+        {**_tool("NEW_QUERY", "ask_data", "Total consumption by currency", operation="NEW_QUERY"),
+         "finish_after_tool": True},
+        {**_tool("VISUALIZE", "change_visualization", "Plot the consumption by currency"),
+         "finish_after_tool": True,
+         "chart_proposal": {"chart_type": "bar", "x": "currency", "y": "total_consumption"}},
+    ])
+    plotting, sql = ScriptedCompleter([]), ScriptedSQL()
+    client = _client(tmp_path, monkeypatch, top, plotting, sql)
+    first = _post(client, "Total consumption by currency", "cached-design")
+    plotted = _post(client, "Plot it", "cached-design")
+    assert plotted["plot_status"] == "CHART_READY", plotted
+    assert plotted["result_id"] == first["result_id"]
+    assert plotted["presentation_state"]["source_result_id"] == first["result_id"]
+    assert top.calls == 2 and len(sql.calls) == 1 and plotting.calls == 0
+    assert "chart_column_profiles_advisory" in top.prompts[-1]
+
+
+def test_reopening_chart_restores_complete_retained_snapshot_without_query_execution(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    class MonthlySQL(ScriptedSQL):
+        async def generate(self, **kwargs: Any) -> tuple[str, int]:
+            if "month" in str(kwargs["question"]).lower():
+                self.calls.append(str(kwargs["question"]))
+                return ("SELECT Date AS month, SUM(Consumption) AS total_consumption "
+                        "FROM yearmonth GROUP BY Date ORDER BY Date", 1)
+            return await super().generate(**kwargs)
+
+    top = ScriptedCompleter([
+        {**_tool("NEW_QUERY", "ask_data", "Total consumption by month", operation="NEW_QUERY"),
+         "finish_after_tool": True,
+         "chart_proposal": {"chart_type": "line", "x": "month", "y": "total_consumption"}},
+        {**_tool("NEW_QUERY", "ask_data", "Total consumption by currency", operation="NEW_QUERY"),
+         "finish_after_tool": True,
+         "chart_proposal": {"chart_type": "bar", "x": "currency", "y": "total_consumption"}},
+    ])
+    sql, store = MonthlySQL(), RunHistoryStore(tmp_path / "history.sqlite")
+    client = _client(tmp_path, monkeypatch, top, ScriptedCompleter([]), sql, history=store)
+    with sqlite3.connect(tmp_path / "consumption" / "consumption.sqlite") as connection:
+        connection.executemany("INSERT INTO yearmonth VALUES (1, ?, ?)", [
+            (f"{2025 + index // 12}{index % 12 + 1:02d}", float(index + 1))
+            for index in range(19)
+        ])
+    first = _post(client, "Total consumption by month and plot it", "reopen")
+    assert first["generation"]["row_count"] == 21
+    assert first["plot_status"] == "CHART_READY"
+    saved = store.get(first["run_id"], "reopen")
+    assert saved and len(saved.response_payload["generation"]["rows"]) == 20
+    client.post("/api/conversations/reopen/reset")
+    _post(client, "Total consumption by currency and plot it", "reopen")
+
+    def forbidden_execute(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("Opening history must not execute database SQL")
+
+    monkeypatch.setattr(DatabaseRegistry, "execute", forbidden_execute)
+    client.post("/api/conversations/reopen/reset")
+    assert store.sql_memory("reopen", "consumption", "first") is None
+    url = f"/api/history/{first['run_id']}/turns?session_id=reopen"
+    restored = client.get(url)
+    assert restored.status_code == 200
+    payload = next(
+        row for row in restored.json() if row["run_id"] == first["run_id"]
+    )["response_payload"]
+    assert payload["generation"]["rows"] == first["generation"]["rows"]
+    assert payload["presentation"]["chart_spec"] == first["presentation"]["chart_spec"]
+    assert payload["result_id"] == first["result_id"]
+    assert payload["chart_id"] == first["chart_id"]
+    assert client.get(url.replace("session_id=reopen", "session_id=another")).status_code == 404
+    assert len(sql.calls) == 2 and top.calls == 2
+    assert len(store.get(first["run_id"], "reopen").rows_preview) == 20
+    # A restarted process must not pretend a persisted preview is complete.
+    restarted = TestClient(create_app(
+        TextToSQLAgent(DatabaseRegistry(tmp_path), sql), run_history=store,
+    ))
+    preview = restarted.get(url).json()[0]["response_payload"]
+    assert len(preview["generation"]["rows"]) == 20
+    assert preview["generation"]["row_count"] == 21
+    assert client.delete("/api/history?session_id=reopen").status_code == 204
+    assert client.get(url).status_code == 404
+
+
 def test_single_tool_sql_skips_second_top_model_call(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
@@ -623,7 +781,7 @@ def test_combined_sql_and_plot_then_change_type_without_new_sql(
     assert changed["presentation"]["chart_spec"]["chart_type"] == "horizontal_bar"
     assert changed["generation"]["sql"] == combined["generation"]["sql"]
     assert len(sql.calls) == 1
-    assert plotting.calls == 2
+    assert plotting.calls == 1  # Type-only follow-up executes without a plotting LLM.
     assert chart_inputs == [(False, False), (True, False)]
 
 

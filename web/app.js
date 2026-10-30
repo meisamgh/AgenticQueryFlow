@@ -878,7 +878,8 @@ function renderChartInto(slot, presentation, generation) {
     } else {
       const note = document.createElement("p");
       note.className = "chart-note";
-      note.textContent = "Interactive chart unavailable. The exact rows remain in Data.";
+      note.textContent = "This chart could not be displayed. Open Data to inspect the results, or choose another chart.";
+      note.setAttribute?.("role", "status");
       slot.append(note);
     }
   };
@@ -896,7 +897,8 @@ function renderChartInto(slot, presentation, generation) {
   }
   const note = document.createElement("p");
   note.className = "chart-note";
-  note.textContent = "Interactive charts are unavailable. SQL and the exact result table remain in their tabs.";
+  note.textContent = "This chart could not be displayed. Your results and SQL are still available in their tabs.";
+  note.setAttribute?.("role", "status");
   slot.append(note);
   return { echarts: null };
 }
@@ -1052,6 +1054,11 @@ function wireChartSection(article, presentation, generation, runId, recommendati
   const menu = section.querySelector(".chart-menu");
   const explorer = window.QueryflowChartExplorer;
   const original = presentation.chart_spec;
+  const stableTypeOrder = [...new Set([
+    recommendations?.primary_chart?.chart_type,
+    ...(recommendations?.alternative_charts || []).map(item=>item.chart_type),
+    ...(explorer?.choices(original) || []),
+  ].filter(Boolean))];
   const settingKey = runId ? `queryflow-chart-${runId}` : null;
   let stored = null;
   try { stored = settingKey ? JSON.parse(sessionStorage.getItem(settingKey) || "null") : null; }
@@ -1115,8 +1122,7 @@ function wireChartSection(article, presentation, generation, runId, recommendati
     if (explorer) {
       const recommended = [recommendations?.primary_chart, ...(recommendations?.alternative_charts || [])]
         .filter(item => item && explorer.choices(next).includes(item.chart_type));
-      const recommendedTypes = [...new Set(recommended.map(item => item.chart_type))];
-      const types = [...recommendedTypes, ...explorer.choices(next).filter(type => !recommendedTypes.includes(type))];
+      const types = explorer.orderedChoices(next,stableTypeOrder,original.chart_type);
       const picker = document.createElement("details");
       picker.className = "chart-choice";
       picker.addEventListener("keydown", event => {
@@ -1286,7 +1292,8 @@ function openChartFullscreen(article, presentation, generation) {
   inner.setAttribute("aria-label", "Expanded chart");
   const header = document.createElement("header");
   const title = document.createElement("strong");
-  title.textContent = presentation.title || `${presentation.y} by ${presentation.x}`;
+  title.textContent = window.QueryflowChartTheme?.title(presentation.chart_spec || presentation)
+    || presentation.title || `${presentation.y} by ${presentation.x}`;
   const closeButton = document.createElement("button");
   closeButton.type = "button";
   closeButton.className = "icon-button";
@@ -1460,6 +1467,7 @@ function isPlotOnlyTurn(body) {
 }
 
 async function appendAssistant(body, elapsed, options = {}) {
+  if (!options.restored) rememberChartSnapshot(body);
   const fragment = $("#assistantTemplate").content.cloneNode(true);
   const article = fragment.querySelector("article");
   const generation = body.generation || {};
@@ -1501,7 +1509,8 @@ async function appendAssistant(body, elapsed, options = {}) {
   if (mode === "chart" && chartDataComplete) {
     chartSection.hidden = false;
     const spec = presentation.chart_spec;
-    fragment.querySelector(".chart-title").textContent = presentation.title || `${presentation.y} by ${presentation.x}`;
+    fragment.querySelector(".chart-title").textContent = window.QueryflowChartTheme?.title(spec)
+      || presentation.title || `${presentation.y} by ${presentation.x}`;
     const subtitle = fragment.querySelector(".chart-sub");
     subtitle.textContent = (spec.warnings || []).join(" · ");
     subtitle.hidden = !subtitle.textContent;
@@ -1558,7 +1567,9 @@ async function appendAssistant(body, elapsed, options = {}) {
     }
     const snapshot = document.createElement("p");
     snapshot.className = "snapshot-note";
-    snapshot.textContent = `Saved snapshot · ${Math.min(options.run.rows_preview.length, 20)} preview rows of ${options.run.row_count} returned${options.run.truncated ? " (original result truncated)" : ""}. Opening history did not run the query.`;
+    const retained = generation.rows?.length || 0;
+    const complete = !generation.truncated && retained === generation.row_count;
+    snapshot.textContent = `Retained snapshot · ${retained} of ${generation.row_count || 0} rows${complete ? " · complete" : " · preview only"}. Opening history did not run the query.`;
     actions.before(snapshot);
   }
   actions.hidden = !actions.children.length;
@@ -3080,9 +3091,38 @@ async function rerunSaved(record) {
   }
 }
 
+/* Bounded, session-local display snapshots. Never persisted as analytical memory. */
+function chartSnapshotKey(session, db, run, result, chart) {
+  return JSON.stringify([session,db,run,result,chart || null]);
+}
+
+function rememberChartSnapshot(body) {
+  state.chartSnapshots ||= new Map();
+  if (body.operation === "RESET_CONTEXT") return;
+  const generation=body.generation, chart=body.presentation?.chart_spec;
+  if (!body.run_id || !body.result_id || !generation?.accepted || !chart
+      || generation.truncated || generation.row_count !== generation.rows?.length
+      || !chartMatchesResultIdentity(body)) return;
+  const key=chartSnapshotKey(sessionId,generation.db_id,body.run_id,body.result_id,body.chart_id);
+  state.chartSnapshots.delete(key);
+  state.chartSnapshots.set(key,{
+    sql:generation.sql, columns:generation.columns, rows:generation.rows,
+    row_count:generation.row_count, chart_spec:chart,
+  });
+  if (state.chartSnapshots.size>100) state.chartSnapshots.delete(state.chartSnapshots.keys().next().value);
+}
+
 function restoredRunToResponse(record) {
   if (record.response_payload && Object.keys(record.response_payload).length) {
-    const payload = record.response_payload;
+    const payload = {...record.response_payload};
+    const key=chartSnapshotKey(sessionId,record.db_id,record.run_id,payload.result_id,payload.chart_id);
+    const snapshot=state.chartSnapshots?.get(key);
+    if (snapshot && payload.generation?.accepted && snapshot.sql === payload.generation.sql
+        && snapshot.row_count === payload.generation.row_count
+        && JSON.stringify(snapshot.columns) === JSON.stringify(payload.generation.columns)) {
+      payload.generation={...payload.generation,rows:snapshot.rows,truncated:false};
+      payload.presentation={...payload.presentation,chart_spec:snapshot.chart_spec};
+    }
     if (payload.presentation_state == null) {
       // History saved before the typed presentation state existed: synthesize
       // it from the validated chart spec so restored threads stay chart-first.
@@ -3238,6 +3278,7 @@ $("#clearHistory").addEventListener("click", async () => {
     await api(`/api/history?session_id=${encodeURIComponent(sessionId)}`, { method: "DELETE" });
   } catch (error) { showError(`Could not clear history: ${error.message}`); return; }
   state.history = [];
+  state.chartSnapshots?.clear();
   state.activeRunId = null;
   state.branchFromRunId = null;
   state.restorePending = false;

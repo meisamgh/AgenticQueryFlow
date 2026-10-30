@@ -87,6 +87,13 @@ window.QueryflowChartExplorer = (function () {
       result.categories = distinct(spec.data, spec.x);
     return result;
   }
+  function orderedChoices(spec, preferred=[], sourceType=spec.chart_type) {
+    const available=choices({...spec,chart_type:sourceType});
+    const order=[...new Set([...preferred,"line","multi_line","step_line","area","stacked_area",
+      "bar","horizontal_bar","grouped_bar","stacked_bar","percent_stacked_bar",
+      "scatter","bubble","histogram","box","heatmap","pie","donut","treemap","calendar_heatmap"])];
+    return order.filter(type=>available.includes(type));
+  }
   function apply(spec, settings = {}) {
     if (!spec?.data?.length) return null;
     const available = filters(spec);
@@ -141,6 +148,6 @@ window.QueryflowChartExplorer = (function () {
     output.legend = settings.legend !== false && (measures.length > 1 || Boolean(selectedSeries));
     return output;
   }
-  return { choices, filters, apply, isTime, chronological, completeGrid, numericColumns,
+  return { choices, orderedChoices, filters, apply, isTime, chronological, completeGrid, numericColumns,
     compatibleMeasures, unitFor };
 })();

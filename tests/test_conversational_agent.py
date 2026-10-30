@@ -859,7 +859,7 @@ def test_structured_schema_enumerates_every_allowed_value() -> None:
     ]
     assert AGENT_DECISION_SCHEMA["required"] == [
         "action", "intent", "tool", "tool_arguments", "instruction", "answer",
-        "finish_after_tool",
+        "finish_after_tool", "chart_proposal",
     ]
 
     from semantic_text2sql.conversational_agent import _DECISION_EXAMPLES, AgentDecision, ToolInput
