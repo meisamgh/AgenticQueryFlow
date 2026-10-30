@@ -20,6 +20,10 @@ dev = ["mypy>=1.15,<2", "pytest>=8.3,<9", "ruff>=0.11,<1"]
 
 [project.optional-dependencies]
 ml = ["lightgbm>=4.6,<5"]
+mysql = ["SQLAlchemy>=2.0,<2.1", "PyMySQL>=1.1,<2"]
+sqlserver = ["SQLAlchemy>=2.0,<2.1", "pyodbc>=5,<6"]
+snowflake = ["SQLAlchemy>=2.0,<2.1", "snowflake-sqlalchemy>=1.7,<2"]
+bigquery = ["google-cloud-bigquery>=3,<4"]
 
 [build-system]
 requires = ["hatchling"]

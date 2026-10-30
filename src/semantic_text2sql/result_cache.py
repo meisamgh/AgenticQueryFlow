@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
+from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.models import (
     ChartSpec,
     ChatResponse,
@@ -24,7 +25,7 @@ class RecentResult:
     question: str
     provider: ModelProvider
     model: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     strategy: StrategyHints
     sql: str
     columns: list[str]

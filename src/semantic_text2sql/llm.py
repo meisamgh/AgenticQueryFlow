@@ -15,6 +15,7 @@ from typing import Literal, Protocol, cast
 
 import httpx
 
+from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.models import ModelProvider, SchemaInfo, StrategyHints, TokenUsage
 from semantic_text2sql.runtime import active_request_budget
 
@@ -206,7 +207,7 @@ class SQLModel(Protocol):
         evidence: str | None,
         schema: SchemaInfo,
         strategy: StrategyHints,
-        dialect: Literal["sqlite", "postgres"],
+        dialect: DatabaseDialect,
         profile_context: str,
         previous_sql: str | None,
         feedback: str | None,
@@ -246,7 +247,7 @@ class GroqSQLModel:
             cast(str | None, kwargs.get("evidence")),
             cast(SchemaInfo, kwargs["schema"]),
             cast(StrategyHints, kwargs["strategy"]),
-            cast(Literal["sqlite", "postgres"], kwargs["dialect"]),
+            cast(DatabaseDialect, kwargs["dialect"]),
             str(kwargs["profile_context"]),
             cast(str | None, kwargs.get("previous_sql")),
             cast(str | None, kwargs.get("feedback")),
@@ -462,7 +463,7 @@ class JustDoWorkSQLModel:
             cast(str | None, kwargs.get("evidence")),
             cast(SchemaInfo, kwargs["schema"]),
             cast(StrategyHints, kwargs["strategy"]),
-            cast(Literal["sqlite", "postgres"], kwargs["dialect"]),
+            cast(DatabaseDialect, kwargs["dialect"]),
             str(kwargs["profile_context"]),
             cast(str | None, kwargs.get("previous_sql")),
             cast(str | None, kwargs.get("feedback")),
@@ -651,7 +652,7 @@ class CodeCraftSQLModel:
             cast(str | None, kwargs.get("evidence")),
             cast(SchemaInfo, kwargs["schema"]),
             cast(StrategyHints, kwargs["strategy"]),
-            cast(Literal["sqlite", "postgres"], kwargs["dialect"]),
+            cast(DatabaseDialect, kwargs["dialect"]),
             str(kwargs["profile_context"]),
             cast(str | None, kwargs.get("previous_sql")),
             cast(str | None, kwargs.get("feedback")),
@@ -917,7 +918,7 @@ class AgentRouterClaudeModel:
         evidence: str | None,
         schema: SchemaInfo,
         strategy: StrategyHints,
-        dialect: Literal["sqlite", "postgres"],
+        dialect: DatabaseDialect,
         profile_context: str,
         previous_sql: str | None,
         feedback: str | None,
@@ -1212,7 +1213,7 @@ class AgentRouterCodexModel:
             evidence,
             cast(SchemaInfo, kwargs["schema"]),
             cast(StrategyHints, kwargs["strategy"]),
-            cast(Literal["sqlite", "postgres"], kwargs["dialect"]),
+            cast(DatabaseDialect, kwargs["dialect"]),
             str(kwargs["profile_context"]),
             previous_sql,
             feedback,
@@ -1599,7 +1600,7 @@ class RoutingSQLModel:
         evidence: str | None,
         schema: SchemaInfo,
         strategy: StrategyHints,
-        dialect: Literal["sqlite", "postgres"],
+        dialect: DatabaseDialect,
         profile_context: str,
         previous_sql: str | None,
         feedback: str | None,
@@ -1765,7 +1766,7 @@ def _prompt(
     evidence: str | None,
     schema: SchemaInfo,
     strategy: StrategyHints,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
     profile_context: str,
     previous_sql: str | None,
     feedback: str | None,
@@ -1889,7 +1890,7 @@ def _verified_or_fallback_context(
     profile_context: str,
     schema: SchemaInfo,
     question: str,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
 ) -> tuple[str, dict[str, object]]:
     """Use the authoritative context once; synthesize a compact fallback for direct callers."""
     try:
@@ -1924,7 +1925,14 @@ def _is_optimization_feedback(feedback: str | None) -> bool:
     return bool(feedback and feedback.startswith("Optimize the previously accepted SQL"))
 
 
-def _dialect_rules(dialect: Literal["sqlite", "postgres"]) -> str:
+def _dialect_rules(dialect: DatabaseDialect) -> str:
+    if dialect in {"mysql", "tsql", "snowflake", "bigquery"}:
+        return {
+            "mysql": "Use MySQL 8 SELECT syntax, backtick identifiers and MySQL date functions.",
+            "tsql": "Use SQL Server T-SQL, bracket identifiers and TOP/OFFSET FETCH, not LIMIT.",
+            "snowflake": "Use Snowflake SQL and verified schema-qualified identifiers.",
+            "bigquery": "Use BigQuery GoogleSQL, backticks and verified project/dataset names.",
+        }[dialect] + " Use only read-only queries and the supplied verified schema."
     if dialect == "postgres":
         return "Use PostgreSQL 15 syntax. Never use SQLite-only functions such as IIF or STRFTIME."
     return (
@@ -1937,7 +1945,7 @@ def _dialect_rules(dialect: Literal["sqlite", "postgres"]) -> str:
 
 def _optimization_prompt(
     accepted_sql: str,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
     dialect_rules: str,
     context_payload: dict[str, object],
     feedback: str | None,

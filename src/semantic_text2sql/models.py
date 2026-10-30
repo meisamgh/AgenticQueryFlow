@@ -7,6 +7,7 @@ from typing import Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, computed_field, model_validator
 
+from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.sql_formatting import format_sql_for_display
 
 DEFAULT_MODEL = "gpt-5.6-sol"
@@ -47,7 +48,7 @@ class TableInfo(StrictModel):
 
 class SchemaInfo(StrictModel):
     db_id: str
-    dialect: Literal["sqlite", "postgres"] = "sqlite"
+    dialect: DatabaseDialect = "sqlite"
     tables: list[TableInfo]
     relationships: list[ForeignKeyInfo] = Field(default_factory=list)
 
@@ -132,7 +133,7 @@ class RelationshipProfile(StrictModel):
 
 class DatabaseProfile(StrictModel):
     db_id: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     profiled_at: str
     columns: list[ColumnProfile]
     tables: list[TableProfile] = Field(default_factory=list)
@@ -387,7 +388,7 @@ class VerifiedRelationship(StrictModel):
 
 class VerifiedContext(StrictModel):
     question: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     tables: dict[str, VerifiedTable] = Field(default_factory=dict)
     relationships: list[VerifiedRelationship] = Field(default_factory=list)
     business_context: str | None = None
@@ -690,7 +691,7 @@ class VerifiedSchemaSnapshot(StrictModel):
     """Live schema/profile inspected once within a governed SQL request."""
 
     db_id: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     live_schema: SchemaInfo
     profile: DatabaseProfile | None = None
 
@@ -699,7 +700,7 @@ class GenerateRequest(StrictModel):
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     question: str = Field(min_length=1, max_length=4_000)
     evidence: str | None = Field(default=None, max_length=8_000)
-    dialect: Literal["sqlite", "postgres"] = "sqlite"
+    dialect: DatabaseDialect = "sqlite"
     provider: ModelProvider = "agentrouter"
     model: str = Field(default=DEFAULT_MODEL, min_length=1, max_length=200)
     max_attempts: int = Field(default=3, ge=1, le=3)
@@ -1071,7 +1072,7 @@ class GenerateResponse(StrictModel):
     question: str
     provider: ModelProvider
     model: str
-    dialect: Literal["sqlite", "postgres"] = "sqlite"
+    dialect: DatabaseDialect = "sqlite"
     strategy: StrategyHints
     schema_selection: SchemaSelection | None = None
     semantic_contract: SemanticContract | None = None
@@ -1108,14 +1109,14 @@ class GenerateResponse(StrictModel):
 class CheckRequest(StrictModel):
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     sql: str = Field(min_length=1, max_length=50_000)
-    dialect: Literal["sqlite", "postgres"] = "sqlite"
+    dialect: DatabaseDialect = "sqlite"
     execute: bool = False
     max_rows: int = Field(default=100, ge=1, le=500)
 
 
 class CheckResponse(StrictModel):
     db_id: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     validation: ValidationResult
     rows: list[list[Any]] = Field(default_factory=list)
     columns: list[str] = Field(default_factory=list)
@@ -1133,5 +1134,5 @@ class ModelOption(StrictModel):
 
 class DatabaseOption(StrictModel):
     db_id: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     configured: bool

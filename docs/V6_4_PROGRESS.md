@@ -189,6 +189,29 @@ October 26 local Gemma understanding integration (uncommitted):
 - A live local greeting produced a valid AgentDecision via fallback in 6.98 seconds, reporting 123 tokens. This verifies local completion and parsing, not analytical routing accuracy or production latency. Provider regression tests, full pytest (one skipped), Ruff and mypy passed.
 # Local premium chart styling — 2026-10-29
 
+## Executable remote adapters — 2026-10-30
+
+- Added a shared DatabaseDialect type and lazy RemoteDatabaseRegistry, extending
+  the existing non-SQLite injection point rather than introducing another pipeline.
+- MySQL, SQL Server, Snowflake and BigQuery are registered from explicit environment
+  manifests and reach existing schema/retrieval/generation/validation/execution,
+  recovery, paging and metadata paths. SQL remains validated and schema-qualified.
+- Added parameterized native value lookup, explicit remote profiling CLI, driver
+  extras and lockfile, bounded fetches/timeouts, sanitized errors and shutdown cleanup.
+- BigQuery performs a cost dry run before the real job and attempts cancellation
+  on timeout; the extra operation is charged to the active shared DB-call budget.
+- Scripted integration tests cover all four engines via `/api/chat`, source scope,
+  forbidden SQL, parameter binding, cost rejection, cancellation and unconfirmed roles.
+- Full local verification: 477 passed, 1 skipped Python; 127 frontend passed;
+  Ruff, mypy (59 source files) and diff checks passed. These are not live-server tests.
+- Official driver import smoke tests passed for MySQL, Snowflake and BigQuery.
+  Snowflake import failed under SQLAlchemy 2.1.6; pinning below 2.1 resolved it.
+  SQL Server's Python driver is installed but its system ODBC library/driver is absent.
+- Live DB credentials/IAM were not provided: live remote queries, live-provider SQL
+  accuracy and production performance are NOT RUN. Role confirmation is an admin
+  acknowledgement, not automatic server-permission verification. See EXTERNAL_DATABASES.md.
+- Existing `.env` credentials and unrelated image additions/deletions were preserved.
+
 ## Historical inspection and categorical evidence hardening — local follow-up
 
 - Added `RunHistoryStore.inspect_result` and POST `/api/results/inspect`, reusing

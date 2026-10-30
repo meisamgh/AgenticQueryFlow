@@ -70,7 +70,10 @@ class TextToSQLAgent:
     def _database(self, dialect: str) -> DatabaseRegistry | PostgresRegistry:
         if dialect == "sqlite":
             return self.registry
-        if dialect == "postgres" and self.postgres is not None:
+        if (
+            dialect in {"postgres", "mysql", "tsql", "snowflake", "bigquery"}
+            and self.postgres is not None
+        ):
             return self.postgres
         raise DatabaseError("DATABASE_DIALECT_UNAVAILABLE", f"{dialect} is not configured.")
 
@@ -846,7 +849,7 @@ def _validate_result_equivalence(
                 ),
             }
         )
-    ordered = _has_meaningful_order(baseline_sql, dialect=validation_dialect(database))
+    ordered = _has_meaningful_order(baseline_sql, dialect=validation_dialect(database, db_id))
     same_rows = (
         _normalized_rows(baseline_rows) == _normalized_rows(candidate_rows)
         if ordered
@@ -943,8 +946,8 @@ def _has_meaningful_order(sql: str, *, dialect: str) -> bool:
         return True
 
 
-def validation_dialect(database: DatabaseRegistry | PostgresRegistry) -> str:
-    return "postgres" if isinstance(database, PostgresRegistry) else "sqlite"
+def validation_dialect(database: DatabaseRegistry | PostgresRegistry, db_id: str = "") -> str:
+    return database.dialect_for(db_id) if isinstance(database, PostgresRegistry) else "sqlite"
 
 
 def _normalized_rows(rows: list[list[object]]) -> list[tuple[object, ...]]:

@@ -9,6 +9,7 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.errors import ParseError, TokenError
 
+from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.models import (
     SchemaInfo,
     SemanticContract,
@@ -43,7 +44,7 @@ def clean_model_sql(value: str) -> str:
     return stripped.strip().removesuffix(";").strip()
 
 
-def normalize_sql(value: str, *, dialect: Literal["sqlite", "postgres"] = "sqlite") -> str:
+def normalize_sql(value: str, *, dialect: DatabaseDialect = "sqlite") -> str:
     try:
         return sqlglot.parse_one(value, read=dialect).sql(dialect=dialect, pretty=False)
     except (ParseError, TokenError):
@@ -54,7 +55,7 @@ def validate_sql(
     sql: str,
     schema: SchemaInfo,
     *,
-    dialect: Literal["sqlite", "postgres"] = "sqlite",
+    dialect: DatabaseDialect = "sqlite",
     allowed_tables: set[str] | None = None,
     allowed_columns: dict[str, set[str]] | None = None,
 ) -> ValidationResult:
@@ -146,7 +147,7 @@ def validate_sql_semantics(
     contract: SemanticContract,
     verified_context: dict[str, object] | None = None,
     *,
-    dialect: Literal["sqlite", "postgres"] = "sqlite",
+    dialect: DatabaseDialect = "sqlite",
 ) -> list[SemanticFinding]:
     """Reject only contract mismatches provable from the SQL AST.
 
@@ -218,7 +219,7 @@ def validate_sql_semantics(
 
 def _approved_metric_findings(
     root: exp.Expression, contract: SemanticContract,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
 ) -> list[SemanticFinding]:
     findings: list[SemanticFinding] = []
     aliases = {

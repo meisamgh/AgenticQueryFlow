@@ -13,7 +13,7 @@ from typing import Any, cast
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import Field
 from sqlglot import parse_one
@@ -48,6 +48,7 @@ from semantic_text2sql.conversational_bridge import ConversationalAnalyticsBridg
 from semantic_text2sql.data_requirement_validator import validate_reusability
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.explanation import deterministic_explanation, explain_turn_detailed
+from semantic_text2sql.external_connections import external_connections_from_environment
 from semantic_text2sql.filter_discovery import (
     _SENSITIVE_TYPES as _FILTER_FORBIDDEN_SEMANTIC_TYPES,
 )
@@ -102,6 +103,7 @@ from semantic_text2sql.presentation import present_result
 from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.provider_registry import configured_model_options, supports_model
 from semantic_text2sql.recovery_events import recovery_events
+from semantic_text2sql.remote_databases import RemoteDatabaseRegistry
 from semantic_text2sql.result_cache import RecentResult
 from semantic_text2sql.run_history import RunHistoryStore, RunRecord, build_run_record
 from semantic_text2sql.runtime import (
@@ -178,8 +180,15 @@ def create_app(
         )
     runs = run_history or RunHistoryStore.from_environment()
     postgres_databases = postgres_databases_from_environment()
-    postgres = PostgresRegistry(postgres_databases) if postgres_databases else None
+    external_connections = external_connections_from_environment()
+    postgres = (
+        RemoteDatabaseRegistry(postgres_databases, external_connections)
+        if external_connections
+        else PostgresRegistry(postgres_databases) if postgres_databases else None
+    )
     sqlite = DatabaseRegistry(Path(os.environ.get("TEXT2SQL_DATABASE_ROOT", "data")))
+    if set(sqlite.list_ids()) & set(external_connections):
+        raise ValueError("Database IDs must be unique across SQLite and remote connections.")
     profiles = ProfileStore(Path(os.environ.get("TEXT2SQL_PROFILE_ROOT", "profiles")))
     glossaries = GlossaryStore(
         Path(os.environ.get("TEXT2SQL_GLOSSARY_ROOT", "data/business_glossaries"))
@@ -262,6 +271,23 @@ def create_app(
             "safety-first validation, and read-only execution."
         ),
     )
+    if isinstance(postgres, RemoteDatabaseRegistry):
+        app.router.add_event_handler("shutdown", postgres.close)
+
+    @app.exception_handler(DatabaseError)
+    async def database_error_response(request: Request, exc: DatabaseError) -> JSONResponse:
+        del request
+        safe_messages = {
+            "DATABASE_DRIVER_MISSING": "Install the selected database extra and its system driver.",
+            "READ_ONLY_ROLE_REQUIRED": "Provision and confirm a read-only database role first.",
+            "DATABASE_CONNECTION_FAILED": "Check the local connection settings and credentials.",
+            "DATABASE_INSPECTION_FAILED": "Check schema access and table permissions.",
+            "CONNECTION_NOT_CONFIGURED": "Set the configured connection environment variable.",
+        }
+        return JSONResponse(status_code=503, content={
+            "code": exc.code,
+            "detail": safe_messages.get(exc.code, "The database operation could not be completed."),
+        })
     if os.environ.get("TEXT2SQL_GZIP_ENABLED", "true").casefold() == "true":
         app.add_middleware(
             GZipMiddleware,
@@ -394,8 +420,8 @@ def create_app(
                     raise HTTPException(422, "Paging is limited to the first 10,000 rows.")
                 database = (
                     sqlite if source.dialect == "sqlite" and request.db_id in sqlite.list_ids()
-                    else postgres if source.dialect == "postgres" and postgres is not None
-                    and request.db_id in postgres_databases else None
+                    else postgres if postgres is not None
+                    and request.db_id in postgres.configured_ids() else None
                 )
                 if database is None:
                     raise HTTPException(404, "The selected database is unavailable.")
@@ -631,7 +657,7 @@ def create_app(
     @app.post("/api/sql/diff", response_model=SqlDiffResponse)
     async def sql_diff(payload: SqlDiffRequest, response: Response) -> SqlDiffResponse:
         response.headers["Cache-Control"] = "no-store"
-        dialect = "postgres" if payload.dialect == "postgres" else "sqlite"
+        dialect = payload.dialect
         return sql_changelog(payload.previous_sql, payload.updated_sql, dialect=dialect)
 
     @app.delete("/api/history", status_code=204)
@@ -665,7 +691,7 @@ def create_app(
         ]
         if postgres is not None:
             options.extend(
-                DatabaseOption(db_id=db_id, dialect="postgres", configured=True)
+                DatabaseOption(db_id=db_id, dialect=postgres.dialect_for(db_id), configured=True)
                 for db_id in postgres.configured_ids()
             )
         elif not postgres_databases:
@@ -796,7 +822,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Unknown filter field.")
         physical = column_info.data_type.casefold().split("(", 1)[0]
         if not (
-            physical.startswith(("text", "varchar", "char"))
+            physical.startswith(("text", "varchar", "char", "nvarchar", "nchar", "string"))
             or physical in {"date", "datetime", "timestamp"}
         ):
             raise HTTPException(status_code=400, detail="Only text or date fields support values.")
@@ -860,14 +886,15 @@ def create_app(
             )
             parameters = ()
         try:
-            _, rows, _ = await asyncio.to_thread(
-                database.execute,
-                db_id,
-                sql,
-                max_rows=101,
-                timeout_seconds=2.0,
-                parameters=parameters,
-            )
+            if isinstance(database, RemoteDatabaseRegistry) and db_id in database.connections:
+                _, rows, _ = await asyncio.to_thread(
+                    database.lookup_values, db_id, table, column, search_term, exact=exact,
+                )
+            else:
+                _, rows, _ = await asyncio.to_thread(
+                    database.execute, db_id, sql, max_rows=101,
+                    timeout_seconds=2.0, parameters=parameters,
+                )
         except DatabaseError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         values: list[str] = [str(row[0]) for row in rows if row and row[0] is not None]
@@ -899,7 +926,7 @@ def create_app(
             dialect = "sqlite"
             schema = sqlite.inspect(db_id)
         elif postgres is not None and db_id in postgres.configured_ids():
-            dialect = "postgres"
+            dialect = postgres.dialect_for(db_id)
             schema = postgres.inspect(db_id)
         else:
             raise HTTPException(status_code=404, detail="Database was not found or configured.")
@@ -1603,14 +1630,16 @@ def create_app(
                     operation=operation,
                     client_message=request.message,
                     state=pending,
-                    dialect=("sqlite" if request.db_id in sqlite.list_ids() else "postgres"),
+                    dialect=("sqlite" if request.db_id in sqlite.list_ids()
+                             else postgres.dialect_for(request.db_id) if postgres else "postgres"),
                 )
                 explanation_model_succeeded = True
             except (ModelError, ValueError):
                 explanation = deterministic_explanation(
                     operation,
                     pending,
-                    "sqlite" if request.db_id in sqlite.list_ids() else "postgres",
+                    "sqlite" if request.db_id in sqlite.list_ids()
+                    else postgres.dialect_for(request.db_id) if postgres else "postgres",
                 )
             return ChatResponse(
                 session_id=request.session_id,
