@@ -25,7 +25,10 @@ def test_retained_history_identity_and_completeness(
         assert inspected["rows"] == [[i] for i in range(5, 10)]
         assert inspected["result_id"] == "result-one"
         assert inspected["complete"] is (count <= 20)
-        assert inspected["calculation_allowed"] is (count <= 20)
+        assert inspected["calculation_allowed"] is False
+        assert inspected["page_complete"] is False
+        whole = store.inspect_result("owner", "shop", reference, page_size=100)
+        assert whole is not None and whole["calculation_allowed"] is (count <= 20)
         assert bool(inspected["warning"]) is (count > 20)
     assert store.inspect_result("other", "shop", "result-one") is None
     assert store.inspect_result("owner", "other", "result-one") is None

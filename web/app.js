@@ -1602,16 +1602,6 @@ async function appendAssistant(body, elapsed, options = {}) {
       event.currentTarget.classList.add("active");
       window.setTimeout(() => event.currentTarget.classList.remove("active"), 1200);
     });
-    fragment.querySelector(".csv-button").addEventListener("click", () => {
-      if (generation.truncated) {
-        showError(`CSV contains only the first ${generation.rows?.length || 0} returned rows; more rows are available in Data.`);
-      }
-      downloadCsv(generation.columns || [], generation.rows || []);
-      appendExportBubble(generation.columns || [], generation.rows || [], {
-        truncated: generation.truncated,
-        source: "Generated SQL result · raw values",
-      });
-    });
     fragment.querySelector(".row-count").textContent = generation.truncated
       ? `${generation.rows?.length || 0} returned · partial result`
       : `${generation.row_count || 0} rows · ${generation.columns?.length || 0} columns`;
@@ -2492,7 +2482,7 @@ function renderTable(container, columns, rows, options = {}) {
         .filter((_, index) => visibleColumns[index]));
       downloadCsv(exportColumns, exportRows);
       appendExportBubble(exportColumns, exportRows, {
-        truncated: Boolean(options.truncated && !localView),
+        truncated: Boolean(options.truncated),
         source: `Data tab retained result · ${localView ? "search/sort applied · " : ""}raw values`,
       });
     });

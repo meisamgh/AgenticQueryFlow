@@ -295,7 +295,9 @@ class RunHistoryStore:
             "rows": record.rows_preview[offset:offset + page_size],
             "row_count": record.row_count, "retained_row_count": len(record.rows_preview),
             "complete": complete, "truncated": record.truncated,
-            "calculation_allowed": complete, "offset": offset,
+            "calculation_allowed": complete and offset == 0
+                and page_size >= record.row_count, "offset": offset,
+            "page_complete": complete and offset == 0 and page_size >= record.row_count,
             "has_more_retained": offset + page_size < len(record.rows_preview),
             "semantic_contract": state.semantic_contract.model_dump(mode="json")
                 if state and state.semantic_contract else None,

@@ -6,6 +6,7 @@ permission to execute model-authored SQL. Analytical work delegates to chat.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -63,6 +64,7 @@ ToolName = Literal[
     "present_result",
     "explain_existing_result",
     "reset_context",
+    "inspect_result",
 ]
 
 
@@ -294,8 +296,8 @@ def _consistency_issue_lines(decision: AgentDecision) -> list[str]:
         "VISUALIZE": {"change_visualization", "present_result"},
         "EXPLORE_SCHEMA": {"list_tables", "search_schema", "get_column_profile"},
         "BUSINESS_CONTEXT": {"get_available_metrics", "get_business_context"},
-        "EXPLAIN": {"explain_existing_result", "present_result"},
-        "INVESTIGATE": {"analyze_result", "ask_data"},
+        "EXPLAIN": {"explain_existing_result", "present_result", "inspect_result"},
+        "INVESTIGATE": {"analyze_result", "ask_data", "inspect_result"},
         "CORRECT": {"check_sql_correctness", "ask_data"},
         "REVIEW_SQL": {"check_sql_correctness"},
         "OPTIMIZE": {"ask_data"},
@@ -408,6 +410,7 @@ class ConversationalAnalyticsAgent:
         sql_handler: Callable[[ChatRequest], Awaitable[ChatResponse]],
         investigation_handler: Callable[[ChatRequest], Awaitable[ChatResponse]] | None = None,
         reset_handler: Callable[[str], None] | None = None,
+        history_inspector: Callable[[str, str, str], dict[str, Any] | None] | None = None,
     ) -> None:
         self.bridge = bridge
         self.completers = completers
@@ -416,6 +419,7 @@ class ConversationalAnalyticsAgent:
         self.sql_handler = sql_handler
         self.investigation_handler = investigation_handler
         self.reset_handler = reset_handler
+        self.history_inspector = history_inspector
         graph = StateGraph(AgentState)
         graph.add_node("reason", self._reason)
         graph.add_node("act", self._act)
@@ -1174,6 +1178,10 @@ class ConversationalAnalyticsAgent:
             + "\nTools: list_tables/search_schema/describe_table/get_relationships/"
             "get_column_profile inspect allowlisted metadata; get_available_metrics/"
             "get_business_context return approved definitions; ask_data delegates new or "
+            "modified questions; inspect_result reads historical evidence without restoring "
+            "state: its objective must be the exact known result_id or run_id, never an "
+            "invented ID. Inspect complete=false/page_complete=false rows only as a "
+            "preview, not as a full-result calculation source. ask_data delegates new or "
             "modified analytical questions to governed Text-to-SQL; analyze_result/"
             "present_result inspect bounded accepted result rows; check_sql_correctness "
             "reviews accepted SQL; change_visualization reuses or requeries as the "
@@ -1554,6 +1562,16 @@ class ConversationalAnalyticsAgent:
                 base = response.model_copy(
                     update={"token_usage": TokenUsage(), "call_ledger": []}
                 )
+        elif tool == "inspect_result":
+            reference = question.strip()
+            inspected = None
+            if self.history_inspector and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", reference):
+                inspected = await asyncio.to_thread(
+                    self.history_inspector, self._request.session_id,
+                    self._request.db_id, reference,
+                )
+            facts = {"tool":tool, "status":"OK" if inspected else "UNAVAILABLE",
+                     "historical_result":inspected}
         elif tool in {"get_business_context", "get_available_metrics"}:
             output = self.bridge.get_business_context(
                 MetadataToolInput(

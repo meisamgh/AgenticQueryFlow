@@ -2184,6 +2184,12 @@ def create_app(
         for key in [key for key in recent_results if key[0] == session_id]:
             recent_results.pop(key, None)
 
+    def inspect_assistant_history(session: str, db: str, reference: str) -> dict[str, Any] | None:
+        state = accepted_state(session)
+        if state is None or state.db_id != db:
+            return None
+        return runs.inspect_result(session, db, reference)
+
     conversational_agent = ConversationalAnalyticsAgent(
         bridge=bridge,
         completers=turn_completers,
@@ -2192,6 +2198,7 @@ def create_app(
         reset_handler=reset_assistant_context,
         sql_handler=assistant_sql_handler,
         investigation_handler=assistant_investigation_handler,
+        history_inspector=inspect_assistant_history,
     )
 
     @app.post("/api/chat", response_model=ChatResponse)

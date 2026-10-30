@@ -957,13 +957,11 @@ test('search, filters and export sit in the Data header; no toolbar under the ta
 });
 
 test('exporting data posts a chat bubble with the Queryflow AI avatar', () => {
-  // Both export entry points announce themselves as a chat message.
+  // Exactly one Data handler announces the exported retained view.
   assert.ok(source.includes('appendExportBubble(exportColumns, exportRows'),
     'the Data tab export must add a bubble for the exported view');
-  assert.ok(source.includes('appendExportBubble(generation.columns || [], generation.rows || []'),
-    'the SQL tab export must add a bubble too');
-  assert.ok(source.split('appendExportBubble(').length - 1 >= 3,
-    'definition plus two call sites');
+  assert.ok(!source.includes('appendExportBubble(generation.columns || [], generation.rows || []'));
+  assert.ok(source.includes('truncated: Boolean(options.truncated)'));
   // The bubble is a real assistant message with the same leaf avatar as answers.
   const template = markup.split('<template id="exportTemplate">')[1].split('</template>')[0];
   assert.ok(template.includes('class="speaker ai"'));

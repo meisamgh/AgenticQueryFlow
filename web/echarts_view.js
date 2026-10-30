@@ -95,6 +95,8 @@ window.QueryflowECharts = (function () {
     const exact = value => window.QueryflowChartTheme?.exact(value,spec.measure_units?.[y])
       || formatNumber(value, false);
     if (["pie", "donut"].includes(type)) {
+      if (data.some(row=>row[y]==null || Number(row[y])<0)
+        || !data.some(row=>Number(row[y])>0)) return null;
       return { ...base, legend: { bottom: 0, type: "scroll", textStyle: { color: muted } },
         series: [{ type: "pie", radius: type === "donut" ? ["42%", "67%"] : "67%",
           itemStyle:{borderColor:cssVar("--surface","#fff"),borderWidth:2,borderRadius:4},

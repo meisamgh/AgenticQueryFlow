@@ -768,6 +768,7 @@ def test_agent_decision_schema_enumerates_every_allowed_value() -> None:
         "present_result",
         "explain_existing_result",
         "reset_context",
+        "inspect_result",
     ]
     assert schema["additionalProperties"] is False
     from semantic_text2sql.conversational_agent import _DECISION_EXAMPLES

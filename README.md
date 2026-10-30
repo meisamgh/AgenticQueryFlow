@@ -14,6 +14,40 @@ may propose a chart over those accepted rows. Chart proposals remain determinist
 _Visual overview of the query workflow. The architecture and runtime boundaries documented below
 are authoritative._
 
+## Settings
+
+Copy `.env.example` to a local `.env`, then set paths and model credentials.
+Never commit `.env` or paste API keys into browser requests or notebooks.
+
+| Setting | Purpose |
+| --- | --- |
+| `TEXT2SQL_DATABASE_ROOT` | Directory containing SQLite databases |
+| `TEXT2SQL_DEFAULT_DB_ID` | Default configured database identifier |
+| `TEXT2SQL_PROFILE_ROOT` | Directory containing stored schema/column profiles |
+| `TEXT2SQL_GLOSSARY_ROOT` | Directory containing approved business glossary JSON files |
+| `TEXT2SQL_CONTEXT_MODE` | `retrieval` for deterministic context selection, or `model1` |
+| `TEXT2SQL_SQL_PROVIDER`, `TEXT2SQL_SQL_MODEL` | SQL generation provider and model |
+| `TEXT2SQL_ASSISTANT_PROVIDER`, `TEXT2SQL_ASSISTANT_MODEL` | Conversational orchestration |
+| `TEXT2SQL_PLOTTING_PROVIDER`, `TEXT2SQL_PLOTTING_MODEL` | Optional chart planner overrides |
+
+Example local paths:
+
+```ini
+TEXT2SQL_DATABASE_ROOT=/absolute/path/databases
+TEXT2SQL_PROFILE_ROOT=/absolute/path/profiles
+TEXT2SQL_GLOSSARY_ROOT=/absolute/path/business_glossaries
+TEXT2SQL_CONTEXT_MODE=retrieval
+```
+
+For your selected adapter, configure its matching `*_BASE_URL` and `*_API_KEY`
+from `.env.example`, plus a model identifier supported by that endpoint. For example,
+`GROQ_BASE_URL`/`GROQ_API_KEY` belong to the `groq` adapter; credentials for another
+adapter are not interchangeable. Use a least-privilege, read-only database account.
+Profiles and glossary files must follow the existing repository schemas; a profile
+directory does not replace the actual database connection. Restart the server after
+changing `.env`. These are server settings, not a public credential-editing endpoint.
+
+
 ## Demo
 
 https://github.com/user-attachments/assets/99608fc4-5d31-419d-af3f-6cd446d09372

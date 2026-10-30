@@ -102,6 +102,32 @@ def test_agent_answers_greeting_with_one_model_call_and_no_sql(
     assert calls == []
 
 
+def test_agent_inspects_historical_reference_without_sql(registry: Any, tmp_path: Any) -> None:
+    calls: list[str] = []
+    completer = Completer([
+        {"action":"CALL_TOOL", "intent":"EXPLAIN", "tool":"inspect_result",
+         "tool_arguments":{"objective":"result_old"}, "answer":None},
+        {"action":"ANSWER", "intent":"DIRECT_ANSWER", "tool":None,
+         "answer":"The retained historical preview contains five rows."},
+    ])
+    agent = _agent(registry, tmp_path, completer, calls)
+    references: list[tuple[str, str, str]] = []
+
+    def inspect(session: str, db: str, reference: str) -> dict[str, Any]:
+        references.append((session, db, reference))
+        return {"result_id":reference, "complete":False, "page_complete":False,
+                "calculation_allowed":False, "rows":[[1], [2], [3], [4], [5]]}
+
+    agent.history_inspector = inspect
+    response = asyncio.run(agent.run(ChatRequest(
+        session_id="history", db_id="shop", message="Inspect result_old",
+    )))
+    assert references == [("history", "shop", "result_old")]
+    assert calls == []
+    assert "five rows" in response.message
+    assert completer.calls == 2
+
+
 def test_provider_dns_failure_has_specific_safe_message() -> None:
     from semantic_text2sql.llm import ModelError
 

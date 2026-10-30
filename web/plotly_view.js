@@ -89,7 +89,8 @@ window.QueryflowPlotly = (function () {
         marker:{colors:spec.data.map((_,i)=>colors[i%colors.length])},
         hovertemplate:"%{label}<br>%{hovertext}<extra></extra>"}];
     } else if (type === "pie" || type === "donut") {
-      if (spec.data.some(row => numeric(row[y]) === null || numeric(row[y]) < 0)) return null;
+      if (spec.data.some(row => numeric(row[y]) === null || numeric(row[y]) < 0)
+        || !spec.data.some(row=>numeric(row[y])>0)) return null;
       traces = [{type: "pie", labels: spec.data.map(row => String(row[x])),
         values: spec.data.map(row => numeric(row[y])), customdata: spec.data.map(row => row[x]),
         text:spec.data.map(row=>escapeLabel(compactValue(row[y]))),
@@ -161,14 +162,16 @@ window.QueryflowPlotly = (function () {
       hovermode: isTimeSeries ? "x unified" : "closest", dragmode: "zoom", uirevision: "queryflow",
       barmode: type === "grouped_bar" ? "group" : STACK.has(type) ? "stack" : "relative",
       xaxis: {title: {text: window.QueryflowChartTheme?.label(horizontal ? spec.y_label || y : spec.x_label || x) || (horizontal ? spec.y_label || y : spec.x_label || x),standoff:16,font:{size:13,color:text}},
-        nticks:7,tickformat:time && !horizontal ? (spec.time_format==="year" ? "%Y" : "%b %Y") : undefined,
+        nticks:7,tickformat:horizontal ? (spec.measure_units?.[y]==="ratio" ? ".0%" : "~s")
+          : time ? (spec.time_format==="year" ? "%Y" : spec.time_format==="day" ? "%d %b %Y" : "%b %Y") : undefined,
+        ticksuffix:horizontal && ["%","percent"].includes(spec.measure_units?.[y]) ? "%" : "",
         type: horizontal || ["scatter", "bubble"].includes(type) ? "linear" : time ? "date" : "category",
         categoryorder: "array", categoryarray: time ? undefined : rawCategories,
         automargin: true, color: muted, showgrid:false, zeroline:false, gridcolor: css("--chart-grid", "#e8eef0"),
         rangeslider: {visible: false}},
       yaxis: {title: {text:window.QueryflowChartTheme?.label(horizontal ? spec.x_label || x : spec.y_label || y) || (horizontal ? spec.x_label || x : spec.y_label || y),standoff:12},nticks:5,
-        tickformat:spec.measure_units?.[y] === "ratio" ? ".0%" : "~s",
-        ticksuffix:["%","percent"].includes(spec.measure_units?.[y]) ? "%" : "",
+        tickformat:horizontal ? undefined : spec.measure_units?.[y] === "ratio" ? ".0%" : "~s",
+        ticksuffix:!horizontal && ["%","percent"].includes(spec.measure_units?.[y]) ? "%" : "",
         rangemode: "tozero", automargin: true, color: muted,
         zeroline:false, gridcolor: css("--chart-grid", "#e8eef0")},
     };

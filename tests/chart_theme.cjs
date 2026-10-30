@@ -96,3 +96,16 @@ test('chart choices distinguish heatmap and treemap icons and CSV keeps an acces
   assert.ok(css.includes('.data-header-right .csv-button:focus-visible'));
   assert.ok(css.includes('.data-header-right .csv-button { display:inline-flex'));
 });
+test('daily ticks retain days, horizontal ratios use the numeric axis, and empty pies are rejected',()=>{
+  const w=setup(),data=[{date:'2026-01-01',value:.25},{date:'2026-01-02',value:.5}];
+  const daily=w.QueryflowPlotly.buildFigure({chart_type:'line',x:'date',y:'value',time_format:'day',data});
+  assert.equal(daily.layout.xaxis.tickformat,'%d %b %Y');
+  const horizontal=w.QueryflowPlotly.buildFigure({chart_type:'horizontal_bar',x:'date',y:'value',time_format:'raw',measure_units:{value:'ratio'},data});
+  assert.equal(horizontal.layout.xaxis.tickformat,'.0%');
+  assert.equal(horizontal.layout.yaxis.tickformat,undefined);
+  for(const chart_type of ['pie','donut']) {
+    const spec={chart_type,x:'date',y:'value',time_format:'raw',data:data.map(row=>({...row,value:0}))};
+    assert.equal(w.QueryflowPlotly.buildFigure(spec),null);
+    assert.equal(w.QueryflowECharts.buildOption(spec),null);
+  }
+});
