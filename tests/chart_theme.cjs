@@ -85,3 +85,14 @@ test('treemap and donut format tile values without changing source measures',()=
     assert.equal(option.series[0].data[0].value,162640000);
   }
 });
+test('chart choices distinguish heatmap and treemap icons and CSV keeps an accessible pill control',()=>{
+  const source=fs.readFileSync('web/app.js','utf8');
+  assert.ok(source.includes('heatmap:"chart-heatmap",treemap:"chart-treemap"'));
+  const ctx=vm.createContext({});
+  vm.runInContext(fs.readFileSync('web/icons.js','utf8')+'; globalThis.paths=ICON_PATHS;',ctx);
+  assert.notEqual(ctx.paths['chart-heatmap'],ctx.paths['chart-treemap']);
+  assert.notEqual(ctx.paths['chart-pie'],ctx.paths['chart-donut']);
+  const css=fs.readFileSync('web/styles.css','utf8');
+  assert.ok(css.includes('.data-header-right .csv-button:focus-visible'));
+  assert.ok(css.includes('.data-header-right .csv-button { display:inline-flex'));
+});

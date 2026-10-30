@@ -1123,8 +1123,11 @@ function wireChartSection(article, presentation, generation, runId, recommendati
         if (event.key === "Escape") { picker.open = false; summary.focus(); }
       });
       const summary = document.createElement("summary");
-      const chartSymbol = type => ["bar", "horizontal_bar", "stacked_bar", "grouped_bar"].includes(type)
-        ? "chart-bar" : ["pie", "donut"].includes(type) ? "chart-pie" : "chart-line";
+      const chartSymbol = type => ({heatmap:"chart-heatmap",treemap:"chart-treemap",
+        scatter:"chart-scatter",bubble:"chart-bubble",area:"chart-area",stacked_area:"chart-area",
+        step_line:"chart-step",box:"chart-box",donut:"chart-donut",pie:"chart-pie",
+        horizontal_bar:"chart-horizontal",stacked_bar:"chart-stacked",percent_stacked_bar:"chart-stacked",
+        calendar_heatmap:"chart-calendar",bar:"chart-bar",grouped_bar:"chart-bar",histogram:"chart-bar"})[type] || "chart-line";
       summary.innerHTML = icon(chartSymbol(next.chart_type), 19);
       const selectedLabel = document.createElement("span");
       selectedLabel.textContent = readableResultLabel(next.chart_type);

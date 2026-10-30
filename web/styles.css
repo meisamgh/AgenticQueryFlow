@@ -1336,6 +1336,10 @@ body.sidebar-collapsed .sidebar { display:none; }
 [data-theme="dark"] .inspector-tabs button[aria-selected="true"] { background:#143c2c; color:#86efac; }
 
 /* Result-scoped Data view: local controls never regenerate SQL. */
+.data-header-right .csv-button { display:inline-flex; align-items:center; gap:7px; width:auto; min-height:34px; padding:6px 12px; border:1px solid #a9ddbb; border-radius:999px; background:#e8f5ec; color:#166534; font-size:12px; font-weight:600; box-shadow:0 2px 6px rgba(22,132,71,.07); }
+.data-header-right .csv-button:hover { background:#d8efdf; border-color:#86cfa0; }
+.data-header-right .csv-button:focus-visible { outline:2px solid #168447; outline-offset:3px; }
+.data-header-right .csv-button svg { width:15px; height:15px; }
 .chart-exact-data { position:relative; font-size:11px; font-weight:500; }
 .chart-exact-data summary { cursor:pointer; padding:4px 7px; border:1px solid #c5e5d0; border-radius:999px; background:#fff; color:#103d32; }
 .chart-exact-data[open] > span { position:absolute; top:100%; right:0; z-index:30; width:min(300px,65vw); padding:12px; border:1px solid #c5e5d0; border-radius:12px; background:#fff; color:#0f172a; box-shadow:0 4px 18px rgba(22,132,71,.12); white-space:normal; line-height:1.6; }
