@@ -36,6 +36,7 @@ class RecentResult:
     summary: str
     provenance: list[str]
     verified_context: dict[str, Any]
+    execution_timestamp: float | None = None
 
     @property
     def message(self) -> str:
@@ -53,6 +54,7 @@ class RecentResult:
                 else response.run_id
             ),
             result_id=response.result_id,
+            execution_timestamp=generation.execution_timestamp,
             chart_id=response.chart_id,
             db_id=generation.db_id,
             question=generation.question,
@@ -86,6 +88,7 @@ class RecentResult:
     def generation(self) -> GenerateResponse:
         """Materialize only the accepted rows needed by the existing chart API."""
         return GenerateResponse(
+            execution_timestamp=self.execution_timestamp,
             db_id=self.db_id,
             question=self.question,
             provider=self.provider,

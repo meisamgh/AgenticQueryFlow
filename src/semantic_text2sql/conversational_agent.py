@@ -65,6 +65,8 @@ ToolName = Literal[
     "explain_existing_result",
     "reset_context",
     "inspect_result",
+    "search_conversation_memory",
+    "refresh_analysis",
 ]
 
 
@@ -74,6 +76,7 @@ class ToolInput(StrictModel):
     objective: str = Field(min_length=1, max_length=4_000)
     operation: Literal["NEW_QUERY", "REFINE", "CORRECTION", "COMPARE", "OPTIMIZE"] | None = None
     changes: list[RequestedChange] = Field(default_factory=list, max_length=10)
+    source_run_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
 
 
 class AgentDecision(StrictModel):
@@ -113,6 +116,7 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
             "objective": "Show total consumption by month",
             "operation": "NEW_QUERY",
             "changes": [],
+            "source_run_id": None,
         },
         "instruction": None,
         "answer": None,
@@ -126,6 +130,7 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
             "objective": "Plot the accepted monthly result",
             "operation": None,
             "changes": [],
+            "source_run_id": None,
         },
         "instruction": None,
         "answer": None,
@@ -146,9 +151,13 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
 _TOOL_INPUT_SCHEMA: dict[str, object] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["objective", "operation", "changes"],
+    "required": ["objective", "operation", "changes", "source_run_id"],
     "properties": {
         "objective": {"type": "string", "minLength": 1, "maxLength": 4_000},
+        "source_run_id": {"anyOf": [
+            {"type":"string", "minLength":1, "maxLength":100, "pattern":"^[A-Za-z0-9_-]+$"},
+            {"type":"null"},
+        ]},
         "operation": {
             "anyOf": [
                 {
@@ -296,8 +305,10 @@ def _consistency_issue_lines(decision: AgentDecision) -> list[str]:
         "VISUALIZE": {"change_visualization", "present_result"},
         "EXPLORE_SCHEMA": {"list_tables", "search_schema", "get_column_profile"},
         "BUSINESS_CONTEXT": {"get_available_metrics", "get_business_context"},
-        "EXPLAIN": {"explain_existing_result", "present_result", "inspect_result"},
-        "INVESTIGATE": {"analyze_result", "ask_data", "inspect_result"},
+        "EXPLAIN": {"explain_existing_result", "present_result", "inspect_result",
+                    "search_conversation_memory"},
+        "INVESTIGATE": {"analyze_result", "ask_data", "inspect_result",
+                        "search_conversation_memory", "refresh_analysis"},
         "CORRECT": {"check_sql_correctness", "ask_data"},
         "REVIEW_SQL": {"check_sql_correctness"},
         "OPTIMIZE": {"ask_data"},
@@ -310,6 +321,13 @@ def _consistency_issue_lines(decision: AgentDecision) -> list[str]:
     ):
         issues.append(f"tool {decision.tool} is incompatible with intent {decision.intent}")
     tool_input = decision.tool_arguments
+    if tool_input is not None and tool_input.source_run_id and decision.tool != "ask_data":
+        issues.append("source_run_id is only valid for modifying historical SQL through ask_data")
+    if tool_input is not None and tool_input.source_run_id and (
+        decision.intent not in {"MODIFY_QUERY", "CORRECT", "OPTIMIZE"}
+        or tool_input.operation == "NEW_QUERY"
+    ):
+        issues.append("Historical modifications must use a modification intent, not NEW_QUERY")
     if tool_input is not None and tool_input.operation is not None:
         if decision.tool != "ask_data":
             issues.append("tool_arguments.operation is only valid for ask_data")
@@ -411,6 +429,7 @@ class ConversationalAnalyticsAgent:
         investigation_handler: Callable[[ChatRequest], Awaitable[ChatResponse]] | None = None,
         reset_handler: Callable[[str], None] | None = None,
         history_inspector: Callable[[str, str, str], dict[str, Any] | None] | None = None,
+        history_refresher: Callable[[ChatRequest, str], Awaitable[ChatResponse]] | None = None,
     ) -> None:
         self.bridge = bridge
         self.completers = completers
@@ -420,6 +439,7 @@ class ConversationalAnalyticsAgent:
         self.investigation_handler = investigation_handler
         self.reset_handler = reset_handler
         self.history_inspector = history_inspector
+        self.history_refresher = history_refresher
         graph = StateGraph(AgentState)
         graph.add_node("reason", self._reason)
         graph.add_node("act", self._act)
@@ -623,6 +643,13 @@ class ConversationalAnalyticsAgent:
             if item.get("tool") == "change_visualization"
         ]
         latest_chart = chart_observations[-1] if chart_observations else None
+        # An explicit historical source must not be replaced with the latest
+        # accepted analysis by the legacy chart/analytical reconciliation path.
+        if decision.action == "CALL_TOOL" and (
+            decision.tool in {"search_conversation_memory", "inspect_result", "refresh_analysis"}
+            or decision.tool_arguments and decision.tool_arguments.source_run_id
+        ):
+            return decision
 
         if latest_chart and latest_chart[1].get("status") == "REQUERY_REQUIRED":
             chart_index, issue = latest_chart
@@ -986,6 +1013,8 @@ class ConversationalAnalyticsAgent:
             "status": "executed" if generation and generation.accepted else "not_accepted",
             "run_id": response.run_id,
             "question": response.resolved_question,
+            "execution_timestamp":generation.execution_timestamp if generation else None,
+            "source_provenance":response.provenance,
             "columns": generation.columns if generation else [],
             "rows_preview": generation.rows[:10] if generation else [],
             "row_count": generation.row_count if generation else 0,
@@ -1061,7 +1090,7 @@ class ConversationalAnalyticsAgent:
                 for item in state.observations
             )
             if (
-                latest.get("tool") == "ask_data"
+                latest.get("tool") in {"ask_data", "refresh_analysis"}
                 and latest.get("status") == "executed"
                 and wants_chart and not chart_ready and not chart_issues
             ):
@@ -1074,7 +1103,7 @@ class ConversationalAnalyticsAgent:
                 state.base_response.generation is not None
                 and state.base_response.generation.accepted
                 and (
-                    latest.get("tool") == "ask_data" and not wants_chart
+                    latest.get("tool") in {"ask_data", "refresh_analysis"} and not wants_chart
                     or latest.get("tool") == "change_visualization" and chart_ready
                 )
             ):
@@ -1098,6 +1127,8 @@ class ConversationalAnalyticsAgent:
             "question": self._request.message,
             "capabilities": self._capabilities(),
             "previous_question": previous.resolved_question if previous else None,
+            "accepted_analysis_reference": ({"run_id":last.run_id, "result_id":last.result_id}
+                if last else None),
             "accepted_sql_available": bool(previous and previous.last_sql),
             "accepted_result_available": bool(
                 last and last.generation and last.generation.accepted
@@ -1178,10 +1209,25 @@ class ConversationalAnalyticsAgent:
             + "\nTools: list_tables/search_schema/describe_table/get_relationships/"
             "get_column_profile inspect allowlisted metadata; get_available_metrics/"
             "get_business_context return approved definitions; ask_data delegates new or "
-            "modified questions; inspect_result reads historical evidence without restoring "
-            "state: its objective must be the exact known result_id or run_id, never an "
-            "invented ID. Inspect complete=false/page_complete=false rows only as a "
-            "preview, not as a full-result calculation source. ask_data delegates new or "
+            "modified questions; inspect_result/search_conversation_memory retrieve accepted "
+            "SQL and semantic context only, never numerical evidence. Their objective is an "
+            "exact run/result ID, first, latest, or analysis:N (1-based; negative counts from "
+            "newest). Translate 'my first query' into first and 'third analysis' into analysis:3. "
+            "Do not invent IDs. Inspecting history never restores active state. For current "
+            "data from an unchanged prior analysis, use refresh_analysis with the retrieved "
+            "run_id as objective and intent INVESTIGATE; it revalidates and executes SQL "
+            "without a generator "
+            "call. For modifications, use ask_data with source_run_id set to the retrieved "
+            "run_id and operation REFINE/COMPARE/CORRECTION, preserving unaffected metrics, "
+            "joins, filters, aggregation and grain. For chart-only changes, reuse a complete "
+            "cached result instead of refreshing. Refreshed figures are CURRENT data, never "
+            "original historical figures. Exact old figures require a complete timestamped "
+            "snapshot or governed time-travel source; SQL definitions and summaries are not "
+            "numerical proof. Only for explicitly requested old figures, inspect_result "
+            "may use objective snapshot:RUN_ID to request a retained snapshot. An unavailable "
+            "snapshot is a terminal limitation, not permission to relabel refreshed data. "
+            "If unavailable, explain that limitation rather than refresh "
+            "and mislabel it. ask_data delegates new or "
             "modified analytical questions to governed Text-to-SQL; analyze_result/"
             "present_result inspect bounded accepted result rows; check_sql_correctness "
             "reviews accepted SQL; change_visualization reuses or requeries as the "
@@ -1316,18 +1362,17 @@ class ConversationalAnalyticsAgent:
             completed_tools: set[str] = set()
             for item in reversed(state.observations):
                 tool_name = str(item.get("tool") or "")
-                if tool_name not in {"ask_data", "change_visualization"}:
+                if tool_name not in {"ask_data", "change_visualization", "refresh_analysis",
+                                     "inspect_result", "search_conversation_memory"}:
                     continue
                 if tool_name in completed_tools:
                     continue
                 completed_tools.add(tool_name)
-                if (item.get("status") in {"not_accepted", "REQUERY_REQUIRED", "UNSUPPORTED"}
+                if (item.get("status") in {"not_accepted", "REQUERY_REQUIRED", "UNSUPPORTED",
+                                           "UNAVAILABLE"}
                         or item.get("error")):
                     failed_required = item
-            if failed_required is not None and (
-                base.generation is not None and base.generation.accepted
-                or parse_intent(self._request.message).requested
-            ):
+            if failed_required is not None:
                 answer = str(
                     failed_required.get("failure") or failed_required.get("reason")
                     or failed_required.get("error") or "The requested action did not complete."
@@ -1522,7 +1567,7 @@ class ConversationalAnalyticsAgent:
                     "parent_run_id": (
                         None
                         if state.decision.intent == "INVESTIGATE"
-                        else self._request.parent_run_id
+                        else tool_input.source_run_id or self._request.parent_run_id
                     ),
                     "evidence": investigation_evidence,
                     "assistant_operation": assistant_operation,
@@ -1535,7 +1580,8 @@ class ConversationalAnalyticsAgent:
                     ),
                 }
             )
-            if state.base_response and state.base_response.state:
+            request._history_source_run_id = tool_input.source_run_id
+            if state.base_response and state.base_response.state and not tool_input.source_run_id:
                 request._turn_state = previous
                 if state.base_response.state_commit_pending:
                     request._turn_expected_version = state.base_response.state_expected_version
@@ -1562,16 +1608,43 @@ class ConversationalAnalyticsAgent:
                 base = response.model_copy(
                     update={"token_usage": TokenUsage(), "call_ledger": []}
                 )
-        elif tool == "inspect_result":
+        elif tool in {"inspect_result", "search_conversation_memory"}:
             reference = question.strip()
             inspected = None
-            if self.history_inspector and re.fullmatch(r"[A-Za-z0-9_-]{1,100}", reference):
+            if self.history_inspector:
                 inspected = await asyncio.to_thread(
                     self.history_inspector, self._request.session_id,
                     self._request.db_id, reference,
                 )
-            facts = {"tool":tool, "status":"OK" if inspected else "UNAVAILABLE",
-                     "historical_result":inspected}
+            if inspected and not reference.startswith("snapshot:"):
+                inspected = {k:v for k,v in inspected.items()
+                             if k not in {"rows", "rows_preview", "result_sample", "answer"}}
+            unsupported = inspected and inspected.get("evidence_kind") == "SNAPSHOT_UNAVAILABLE"
+            facts = {"tool":tool, "status":"UNSUPPORTED" if unsupported else
+                     "OK" if inspected else "UNAVAILABLE", "historical_result":inspected,
+                     "reason":(inspected or {}).get("limitation") if unsupported else
+                     None if inspected else "No accepted SQL is available for that reference."}
+        elif tool == "refresh_analysis":
+            if self.history_refresher is None:
+                facts = {"tool":tool, "error":"Historical refresh is not configured."}
+            else:
+                refresh_request = self._request.model_copy()
+                if state.base_response and state.base_response.state:
+                    refresh_request._turn_state = previous
+                    refresh_request._turn_expected_version = (
+                        state.base_response.state_expected_version
+                        if state.base_response.state_commit_pending else previous.version
+                        if previous else None
+                    )
+                response = await self.history_refresher(refresh_request, question.strip())
+                facts = {"tool":tool, **self._result_facts(response),
+                         "data_provenance":"REFRESHED_CURRENT_DATA_NOT_HISTORICAL_SNAPSHOT"}
+                downstream_usage = response.token_usage
+                downstream_ledger = response.call_ledger
+                if response.generation and response.generation.accepted:
+                    base = response.model_copy(update={
+                        "token_usage":TokenUsage(), "call_ledger":[],
+                    })
         elif tool in {"get_business_context", "get_available_metrics"}:
             output = self.bridge.get_business_context(
                 MetadataToolInput(

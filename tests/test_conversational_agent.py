@@ -66,6 +66,12 @@ def _agent(
             operation="NEW_QUERY",
             resolved_question=request.message,
             message="The query ran.",
+            generation=GenerateResponse(
+                db_id=request.db_id, question=request.message, provider=request.provider,
+                model=request.model, strategy=StrategyHints(mode="exact"), sql="SELECT 1",
+                accepted=True, execution_status="ACCEPTED", termination_reason="accepted",
+                rows=[[1]], columns=["count"], row_count=1,
+            ),
         )
 
     bridge = ConversationalAnalyticsBridge(
@@ -402,6 +408,12 @@ def test_agent_investigation_uses_distinct_objectives_and_preserves_session(
             operation="NEW_QUERY",
             resolved_question=request.message,
             message="The query ran.",
+            generation=GenerateResponse(
+                db_id=request.db_id, question=request.message, provider=request.provider,
+                model=request.model, strategy=StrategyHints(mode="exact"), sql="SELECT 1",
+                accepted=True, execution_status="ACCEPTED", termination_reason="accepted",
+                rows=[[1]], columns=["count"], row_count=1,
+            ),
             token_usage=TokenUsage(input_tokens=7, output_tokens=3),
             call_ledger=[
                 CallLedgerEntry(
@@ -843,7 +855,7 @@ def test_structured_schema_enumerates_every_allowed_value() -> None:
     assert "run_arbitrary_sql" not in tool_enum
 
     assert arguments_spec["anyOf"][0]["required"] == [  # type: ignore[index]
-        "objective", "operation", "changes"
+        "objective", "operation", "changes", "source_run_id"
     ]
     assert AGENT_DECISION_SCHEMA["required"] == [
         "action", "intent", "tool", "tool_arguments", "instruction", "answer",
@@ -1245,8 +1257,8 @@ def test_add_currency_category_prose_intent_is_repaired_to_modify_query(
         )
     )
     assert calls == ["Add a currency category breakdown"]
-    assert response.message == "The query ran with the currency breakdown."
-    assert len(completer.calls) == 3  # 1 invalid + 1 repaired + 1 final answer
+    assert response.message == "The query ran."
+    assert len(completer.calls) == 3  # Invalid + repaired + final decision.
     assert "Validation issues:" in completer.prompts[1]
 
 

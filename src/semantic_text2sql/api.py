@@ -8,7 +8,7 @@ import os
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from time import monotonic, perf_counter
+from time import monotonic, perf_counter, time
 from typing import Any, cast
 from uuid import uuid4
 
@@ -351,6 +351,7 @@ def create_app(
     provisional_context: ContextVar[tuple[str, ConversationState] | None] = ContextVar(
         "queryflow_provisional_context", default=None
     )
+    history_anchor: ContextVar[str | None] = ContextVar("queryflow_history_anchor", default=None)
 
     def accepted_state(session_id: str) -> ConversationState | None:
         provisional = provisional_context.get()
@@ -2164,6 +2165,8 @@ def create_app(
             response = await process_chat(
                 request, persist_state=persist and branch_context.get() is None
             )
+            if request.parent_run_id:
+                response = response.model_copy(update={"parent_run_id":request.parent_run_id})
             if previous and previous.db_id == request.db_id and response.operation != "NEW_QUERY":
                 response = response.model_copy(update={"previous_sql": previous.last_sql})
             return await save_response(request, response) if persist else response
@@ -2174,6 +2177,15 @@ def create_app(
     async def assistant_sql_handler(request: ChatRequest) -> ChatResponse:
         # The top model still has to produce its final answer. Save the
         # completed turn once, after that answer has been attached.
+        if request._history_source_run_id and runs.sql_memory(
+            request.session_id, request.db_id, request._history_source_run_id,
+            parent_run_id=history_anchor.get(),
+        ) is None:
+            return ChatResponse(
+                session_id=request.session_id, operation="REFINE",
+                resolved_question=request.message,
+                message="The historical analysis is unavailable in this session and database.",
+            )
         token = (
             provisional_context.set((request.session_id, request._turn_state))
             if request._turn_state is not None else None
@@ -2214,10 +2226,49 @@ def create_app(
             recent_results.pop(key, None)
 
     def inspect_assistant_history(session: str, db: str, reference: str) -> dict[str, Any] | None:
-        state = accepted_state(session)
-        if state is None or state.db_id != db:
+        if db not in sqlite.list_ids() and (
+            postgres is None or db not in postgres.configured_ids()
+        ):
             return None
-        return runs.inspect_result(session, db, reference)
+        if reference.startswith("snapshot:"):
+            memory = runs.sql_memory(
+                session, db, reference.removeprefix("snapshot:"),
+                parent_run_id=history_anchor.get(),
+            )
+            if memory is None:
+                return None
+            snapshot = runs.inspect_result(session, db, str(memory["run_id"]), page_size=100)
+            if snapshot is None or not snapshot["calculation_allowed"]:
+                return {"evidence_kind":"SNAPSHOT_UNAVAILABLE", "run_id":memory["run_id"],
+                        "verified_numerical_evidence":False,
+                        "limitation":"No complete snapshot or time-travel source is available."}
+            return {**snapshot, "evidence_kind":"HISTORICAL_SNAPSHOT",
+                    "execution_timestamp":memory["execution_timestamp"],
+                    "verified_numerical_evidence":True}
+        return runs.sql_memory(session, db, reference, parent_run_id=history_anchor.get())
+
+    async def refresh_assistant_history(request: ChatRequest, reference: str) -> ChatResponse:
+        memory = inspect_assistant_history(request.session_id, request.db_id, reference)
+        if memory is None:
+            return ChatResponse(
+                session_id=request.session_id, operation="REFINE",
+                resolved_question=request.message,
+                message="The historical analysis is unavailable.",
+            )
+        try:
+            current = accepted_state(request.session_id)
+            return await refresh_historical_sql(
+                str(memory["run_id"]), request.session_id, persist=False,
+                budget=active_request_budget(),
+                expected_version=(request._turn_expected_version if request._turn_state else
+                    (current.version if current else None)),
+            )
+        except HTTPException:
+            return ChatResponse(
+                session_id=request.session_id, operation="REFINE",
+                resolved_question=request.message,
+                message="The historical SQL cannot be refreshed safely.",
+            )
 
     conversational_agent = ConversationalAnalyticsAgent(
         bridge=bridge,
@@ -2228,6 +2279,7 @@ def create_app(
         sql_handler=assistant_sql_handler,
         investigation_handler=assistant_investigation_handler,
         history_inspector=inspect_assistant_history,
+        history_refresher=refresh_assistant_history,
     )
 
     @app.post("/api/chat", response_model=ChatResponse)
@@ -2245,6 +2297,7 @@ def create_app(
                     request.session_id, parent.state_snapshot, result_from_history(parent),
                     current.version if current else None,
                 ))
+            anchor_token = history_anchor.set(request.parent_run_id)
             try:
                 response = await conversational_agent.run(request)
                 return (
@@ -2252,6 +2305,7 @@ def create_app(
                     else await save_response(request, response)
                 )
             finally:
+                history_anchor.reset(anchor_token)
                 if token is not None:
                     branch_context.reset(token)
         if os.environ.get("TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED", "false").casefold() != "true":
@@ -2264,13 +2318,17 @@ def create_app(
             return outcome.response
         return await save_response(request, outcome.response)
 
-    @app.post("/api/history/{run_id}/rerun", response_model=ChatResponse)
-    async def rerun_history(run_id: str, session_id: str) -> ChatResponse:
+    async def refresh_historical_sql(
+        run_id: str, session_id: str, *, persist: bool = True,
+        budget: RequestBudget | None = None, expected_version: int | None = None,
+    ) -> ChatResponse:
         record = runs.get(run_id, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Conversation turn not found.")
         if not record.accepted or not record.sql or record.state_snapshot is None:
             raise HTTPException(status_code=409, detail="This turn has no accepted SQL to rerun.")
+        if record.state_snapshot.last_sql != record.sql:
+            raise HTTPException(status_code=409, detail="Historical SQL/state identity mismatch.")
         context = (record.response_payload.get("generation") or {}).get("model_context") or {}
         tables = context.get("tables") or context.get("execution_context", {}).get("tables") or {}
         allowed_tables = set(tables) or set(record.state_snapshot.approved_tables)
@@ -2285,7 +2343,10 @@ def create_app(
         )
         original = record.response_payload.get("generation") or {}
         dialect = original.get("dialect", "sqlite")
-        budget = RequestBudget(15, max_model_calls=0, max_database_calls=2)
+        budget = budget or RequestBudget(15, max_model_calls=0, max_database_calls=2)
+        current = conversations.get(session_id)
+        if persist:
+            expected_version = current.version if current else None
         started = perf_counter()
         try:
             checked = await budget.wait(
@@ -2320,8 +2381,10 @@ def create_app(
             model=record.model,
             strategy=route_question(record.resolved_question),
             sql=record.sql if valid else None,
+            semantic_contract=record.state_snapshot.semantic_contract,
             accepted=valid,
             execution_status="EXECUTABLE" if valid else "NOT_EXECUTED",
+            execution_timestamp=time() if valid else None,
             columns=checked.columns,
             rows=checked.rows,
             row_count=checked.row_count,
@@ -2341,33 +2404,34 @@ def create_app(
         )
         response_state = record.state_snapshot
         if valid:
-            current = conversations.get(session_id)
-            response_state = conversations.put(
-                response_state.model_copy(
+            response_state = response_state.model_copy(
                     update={
                         "last_sql": record.sql,
                         "last_columns": checked.columns,
                         "last_row_count": checked.row_count,
                         "last_truncated": checked.truncated,
                     }
-                ),
-                expected_version=current.version if current else None,
             )
-        return await save_response(
-            ChatRequest(
+        refresh_request = ChatRequest(
                 session_id=session_id,
                 db_id=record.db_id,
                 message="Rerun the saved SQL.",
                 parent_run_id=record.run_id,
                 provider=cast(ModelProvider, record.provider),
                 model=record.model,
-            ),
-            ChatResponse(
+            )
+        response = ChatResponse(
                 session_id=session_id,
                 operation="REFINE",
                 resolved_question=record.resolved_question,
                 state=response_state,
                 generation=generated,
+                parent_run_id=record.run_id,
+                result_id=uuid4().hex if valid else None,
+                state_commit_pending=valid,
+                state_expected_version=expected_version,
+                provenance=[f"historical_sql_source_run:{record.run_id}",
+                            "refreshed_current_data_not_historical_snapshot"],
                 message=(
                     f"Reran the saved SQL against current data: {checked.row_count} rows returned."
                     if valid
@@ -2375,8 +2439,12 @@ def create_app(
                 ),
                 timings_ms={"total": elapsed},
                 token_usage=TokenUsage(input_tokens=0, output_tokens=0),
-            ),
-        )
+            )
+        return await save_response(refresh_request, response) if persist else response
+
+    @app.post("/api/history/{run_id}/rerun", response_model=ChatResponse)
+    async def rerun_history(run_id: str, session_id: str) -> ChatResponse:
+        return await refresh_historical_sql(run_id, session_id)
 
     async def run_chat_job(job_id: str, request: ChatRequest) -> None:
         job = chat_jobs[job_id]

@@ -18,6 +18,8 @@ Failures, empty results, unexpected NULLs or correctness reviews
 ```
 
 - **Conversational continuity:** accepted contracts, stable result IDs and scoped history.
+  [SQL-based memory](docs/SQL_MEMORY.md) retrieves analytical definitions on demand;
+  refreshed data is distinguished from original historical snapshots.
 - **Compact context:** hybrid retrieval with optional model-based context selection.
 - **Governed execution:** SQLGlot checks, allowlisted data access and bounded repair.
 - **Interactive results:** Visualization, Data and SQL views; charts reuse sufficient results.

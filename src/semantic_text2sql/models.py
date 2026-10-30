@@ -784,6 +784,7 @@ class ChatRequest(StrictModel):
     # Request-local Top-layer handoff; not accepted from or serialized to API JSON.
     _turn_state: ConversationState | None = PrivateAttr(default=None)
     _turn_expected_version: int | None = PrivateAttr(default=None)
+    _history_source_run_id: str | None = PrivateAttr(default=None)
 
 
 class ConversationState(StrictModel):
@@ -1068,6 +1069,7 @@ class ChatResponse(StrictModel):
 
 
 class GenerateResponse(StrictModel):
+    execution_timestamp: float | None = None
     db_id: str
     question: str
     provider: ModelProvider

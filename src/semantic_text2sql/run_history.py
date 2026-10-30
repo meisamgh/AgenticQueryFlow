@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import time
 from pathlib import Path
@@ -29,6 +30,8 @@ class RunRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     run_id: str
+    result_id: str | None = None
+    execution_timestamp: float | None = None
     session_id: str
     conversation_id: str = ""
     turn_id: str = ""
@@ -93,6 +96,18 @@ class RunHistoryStore:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS query_runs_session_db "
                 "ON query_runs(session_id, json_extract(record_json, '$.db_id'), created_at)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS query_runs_sql_memory ON query_runs "
+                "(session_id, json_extract(record_json, '$.db_id'), created_at, version) "
+                "WHERE json_extract(record_json, '$.accepted') = 1 "
+                "AND json_extract(record_json, '$.sql') IS NOT NULL"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS query_runs_result_identity ON query_runs "
+                "(session_id, json_extract(record_json, '$.db_id'), "
+                "COALESCE(json_extract(record_json, '$.result_id'), "
+                "json_extract(record_json, '$.response_payload.result_id')))"
             )
 
     @classmethod
@@ -262,9 +277,158 @@ class RunHistoryStore:
                 else None
             )
 
+    def sql_memory(
+        self,
+        session_id: str,
+        db_id: str,
+        reference: str,
+        *,
+        parent_run_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Indexed SQL/intent lookup. Rows never enter conversational memory.
+
+        Canonical references are first, latest, analysis:N (1-based; negative
+        from newest), or an exact run/result ID. The LLM selects the reference;
+        this is not a natural-language intent classifier.
+        """
+        position = 1 if reference == "first" else -1 if reference == "latest" else None
+        if match := re.fullmatch(r"analysis:(-?[1-9]\d{0,2})", reference):
+            position = int(match[1])
+        if position is None and not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", reference):
+            return None
+        boundary = self._reset_after.get(session_id, 0.0)
+        with self._lock:
+            if self.path is not None:
+                with self._connect() as connection:
+                    reset = connection.execute(
+                        "SELECT reset_at FROM history_reset_boundaries WHERE session_id = ?",
+                        (session_id,),
+                    ).fetchone()
+                    boundary = float(reset[0]) if reset else boundary
+                    scope = (
+                        "session_id = ? AND json_extract(record_json, '$.db_id') = ? "
+                        "AND json_extract(record_json, '$.accepted') = 1 "
+                        "AND json_extract(record_json, '$.sql') IS NOT NULL "
+                        "AND created_at > ? "
+                    )
+                    params: list[Any] = [session_id, db_id, boundary]
+                    if parent_run_id:
+                        # Explicit branches may only reference their ancestry.
+                        lineage = connection.execute(
+                            "WITH RECURSIVE ancestors(id, depth) AS (SELECT ?, 0 UNION ALL "
+                            "SELECT json_extract(q.record_json, '$.parent_run_id'), a.depth+1 "
+                            "FROM query_runs q JOIN ancestors a ON q.run_id=a.id "
+                            "WHERE q.session_id=? AND a.depth<500) "
+                            "SELECT id FROM ancestors WHERE id IS NOT NULL",
+                            (parent_run_id, session_id),
+                        ).fetchall()
+                        ids = [row[0] for row in lineage]
+                        scope += "AND run_id IN (" + ",".join("?" for _ in ids) + ") "
+                        params.extend(ids)
+                    row = None
+                    if position is None:
+                        row = connection.execute(
+                            "SELECT record_json FROM query_runs WHERE " + scope + "AND run_id=?",
+                            (*params, reference),
+                        ).fetchone()
+                        if row is None:
+                            row = connection.execute(
+                                "SELECT record_json FROM query_runs WHERE "
+                                + scope
+                                + "AND COALESCE(json_extract(record_json, '$.result_id'), "
+                                "json_extract(record_json, '$.response_payload.result_id')) = ? "
+                                "ORDER BY created_at, version LIMIT 1",
+                                (*params, reference),
+                            ).fetchone()
+                    else:
+                        direction = "ASC" if position > 0 else "DESC"
+                        row = connection.execute(
+                            "SELECT record_json FROM query_runs WHERE "
+                            + scope
+                            + "AND json_extract(record_json, '$.operation') != 'VISUALIZE' "
+                            f"ORDER BY created_at {direction}, version {direction} "
+                            "LIMIT 1 OFFSET ?",
+                            (*params, abs(position) - 1),
+                        ).fetchone()
+                    record = RunRecord.model_validate_json(row[0]) if row else None
+            else:
+                records = [
+                    item
+                    for item in self._sessions
+                    if item.session_id == session_id
+                    and item.db_id == db_id
+                    and item.accepted
+                    and item.sql
+                    and item.created_at > boundary
+                ]
+                if parent_run_id:
+                    ancestor_ids: set[str] = set()
+                    cursor = self._by_id.get(parent_run_id)
+                    while (
+                        cursor
+                        and cursor.session_id == session_id
+                        and cursor.run_id not in ancestor_ids
+                    ):
+                        ancestor_ids.add(cursor.run_id)
+                        cursor = self._by_id.get(cursor.parent_run_id or "")
+                    records = [item for item in records if item.run_id in ancestor_ids]
+                if position is None:
+                    record = next(
+                        (
+                            item
+                            for item in reversed(records)
+                            if reference
+                            in {
+                                item.run_id,
+                                item.result_id,
+                                item.response_payload.get("result_id"),
+                            }
+                        ),
+                        None,
+                    )
+                else:
+                    records = sorted(
+                        (r for r in records if r.operation != "VISUALIZE"),
+                        key=lambda r: (r.created_at, r.version),
+                    )
+                    index = position - 1 if position > 0 else position
+                    record = records[index] if -len(records) <= index < len(records) else None
+        if record is None:
+            return None
+        return {
+            "run_id": record.run_id,
+            "result_id": record.result_id
+            or record.response_payload.get("result_id")
+            or record.run_id,
+            "db_id": record.db_id,
+            "original_question": record.original_message,
+            "resolved_question": record.resolved_question,
+            "sql": record.sql,
+            "semantic_contract": record.state_snapshot.semantic_contract.model_dump(mode="json")
+            if record.state_snapshot and record.state_snapshot.semantic_contract
+            else None,
+            "execution_timestamp": record.execution_timestamp or record.created_at,
+            "timestamp_source": "execution" if record.execution_timestamp else "legacy_record_time",
+            "evidence_kind": "SQL_DEFINITION_ONLY",
+            "verified_numerical_evidence": False,
+            "snapshot_available": not record.truncated
+            and not record.preview_truncated
+            and record.execution_status not in {"NOT_EXECUTED", "SAFETY_VALIDATED"}
+            and record.row_count == len(record.rows_preview),
+            "provenance": (
+                "Accepted historical SQL; refreshed execution is current data, not old figures."
+            ),
+        }
+
     def inspect_result(
-        self, session_id: str, db_id: str, reference: str,
-        *, offset: int = 0, page_size: int = 20, conversation_id: str | None = None,
+        self,
+        session_id: str,
+        db_id: str,
+        reference: str,
+        *,
+        offset: int = 0,
+        page_size: int = 20,
+        conversation_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Read retained evidence only; never restore state or execute saved SQL."""
         if offset < 0 or not 1 <= page_size <= 100:
@@ -278,10 +442,18 @@ class RunHistoryStore:
                     (session_id,),
                 ).fetchone()
                 boundary = float(row[0]) if row else boundary
-        record = next((item for item in records if item.db_id == db_id and item.accepted
-            and item.created_at > boundary
-            and (not conversation_id or item.conversation_id == conversation_id)
-            and reference in {item.run_id, item.response_payload.get("result_id")}), None)
+        record = next(
+            (
+                item
+                for item in records
+                if item.db_id == db_id
+                and item.accepted
+                and item.created_at > boundary
+                and (not conversation_id or item.conversation_id == conversation_id)
+                and reference in {item.run_id, item.response_payload.get("result_id")}
+            ),
+            None,
+        )
         if record is None:
             return None
         complete = not record.truncated and record.row_count == len(record.rows_preview)
@@ -289,21 +461,27 @@ class RunHistoryStore:
         return {
             "run_id": record.run_id,
             "result_id": record.response_payload.get("result_id") or record.run_id,
-            "historical": True, "question": record.original_message,
-            "resolved_question": record.resolved_question, "sql": record.sql,
-            "answer": record.presentation_summary, "columns": record.columns,
-            "rows": record.rows_preview[offset:offset + page_size],
-            "row_count": record.row_count, "retained_row_count": len(record.rows_preview),
-            "complete": complete, "truncated": record.truncated,
-            "calculation_allowed": complete and offset == 0
-                and page_size >= record.row_count, "offset": offset,
+            "historical": True,
+            "question": record.original_message,
+            "resolved_question": record.resolved_question,
+            "sql": record.sql,
+            "answer": record.presentation_summary,
+            "columns": record.columns,
+            "rows": record.rows_preview[offset : offset + page_size],
+            "row_count": record.row_count,
+            "retained_row_count": len(record.rows_preview),
+            "complete": complete,
+            "truncated": record.truncated,
+            "calculation_allowed": complete and offset == 0 and page_size >= record.row_count,
+            "offset": offset,
             "page_complete": complete and offset == 0 and page_size >= record.row_count,
             "has_more_retained": offset + page_size < len(record.rows_preview),
             "semantic_contract": state.semantic_contract.model_dump(mode="json")
-                if state and state.semantic_contract else None,
-            "warning": None if complete else (
-                "Retained preview only; do not calculate full-result totals or comparisons."
-            ),
+            if state and state.semantic_contract
+            else None,
+            "warning": None
+            if complete
+            else ("Retained preview only; do not calculate full-result totals or comparisons."),
             "created_at": record.created_at,
         }
 
@@ -419,15 +597,21 @@ def build_run_record(raw: dict[str, Any]) -> RunRecord:
             ),
         )
     payload = response.model_dump(mode="json")
+    preview_limit = max(0, min(int(os.environ.get("TEXT2SQL_HISTORY_PREVIEW_ROWS", "20")), 20))
     if generation:
-        payload["generation"]["rows"] = payload["generation"]["rows"][:MAX_PREVIEW_ROWS]
+        payload["generation"]["rows"] = payload["generation"]["rows"][:preview_limit]
+    chart = (payload.get("presentation") or {}).get("chart_spec")
+    if chart and isinstance(chart.get("data"), list):
+        chart["data"] = chart["data"][:preview_limit]
     # History reopens the real response, including failures, attempts, chart and context.
     # A bounded preview is clearly distinguished from the original returned row count.
     return RunRecord(
         run_id=response.run_id or uuid4().hex,
+        result_id=response.result_id,
+        execution_timestamp=generation.execution_timestamp if generation else None,
         turn_id=response.turn_id or response.run_id or uuid4().hex,
         session_id=response.session_id,
-        parent_run_id=request.parent_run_id if request else None,
+        parent_run_id=response.parent_run_id or (request.parent_run_id if request else None),
         branch_from_parent=request.branch_from_parent if request else False,
         db_id=db_id,
         operation=response.operation,
@@ -448,7 +632,7 @@ def build_run_record(raw: dict[str, Any]) -> RunRecord:
         ),
         sql=generation.sql if generation else None,
         columns=list(generation.columns) if generation else [],
-        rows_preview=list(generation.rows[:MAX_PREVIEW_ROWS]) if generation else [],
+        rows_preview=list(generation.rows[:preview_limit]) if generation else [],
         row_count=generation.row_count if generation else 0,
         truncated=generation.truncated if generation else False,
         latency_ms=int(raw.get("latency_ms", 0)),
@@ -461,5 +645,5 @@ def build_run_record(raw: dict[str, Any]) -> RunRecord:
         presentation_state=response.presentation_state,
         response_payload=payload,
         state_snapshot=state,
-        preview_truncated=bool(generation and len(generation.rows) > MAX_PREVIEW_ROWS),
+        preview_truncated=bool(generation and len(generation.rows) > preview_limit),
     )

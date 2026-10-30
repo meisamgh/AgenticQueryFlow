@@ -26,3 +26,12 @@ Statuses: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_UNVERIFIED, VERIFIED, BLOCKED, N
 | V64-20 | Production session authorization | P1 security | BLOCKED | `api.py`, `run_history.py` | Integrate real identity when provided | Multi-user integration test | Cross-user isolation proven | No deployment identity mechanism configured | BLOCKED |
 | V64-21 | Full SQLite end-to-end regression | P1 | NOT_STARTED | `tests/` | Real execution and multi-turn assertions | 32 required scenarios | State, SQL, chart and provenance verified | Existing tests plus accepted-contract, ranked-metric, stale-period and parent-branch regressions pass; the 32-scenario matrix is still incomplete | IN_PROGRESS |
 | V64-22 | PostgreSQL/live-provider verification | P1 | BLOCKED | `tests/`, provider config | Run optional integration when reachable | Live integration test | Actual provider/DB result | Live synthetic SQLite books run succeeded through Qwen Top decision, JSON fallback, Model 1, SQL generation and read-only execution (fiction=2/history=1). Real debit-card egress was blocked by review; PostgreSQL was NOT RUN | BLOCKED |
+# Historical SQL memory refinement
+
+Acceptance coverage is in `tests/test_sql_memory.py`: indexed ordinal/ID lookup,
+session/database/reset/branch isolation, real SQLite refresh, historical-source
+modification, schema changes, unsafe SQL rejection, concurrent commits and
+bounded snapshot retention. Verification results are recorded in the delivery
+report; live provider and PostgreSQL checks remain NOT RUN.
+SQL-memory acceptance cases: VERIFIED locally (10 cases); full Python suite
+487 passed/1 skipped; frontend 127 passed; Ruff, mypy and diff checks passed.

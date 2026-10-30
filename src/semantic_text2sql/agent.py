@@ -8,7 +8,7 @@ import os
 from collections import Counter
 from collections.abc import Callable, Iterable
 from statistics import median
-from time import perf_counter_ns
+from time import perf_counter_ns, time
 
 from sqlglot import exp, parse_one
 from sqlglot.errors import ParseError
@@ -86,11 +86,32 @@ class TextToSQLAgent:
         if budget:
             budget.claim("database")
         schema = database.inspect(request.db_id)
+        if allowed_columns is not None:
+            live_columns = {table.name.casefold(): {c.name.casefold() for c in table.columns}
+                            for table in schema.tables}
+            allowed_columns = {
+                table: {column for column in names
+                        if column.casefold() in live_columns.get(table.casefold(), set())}
+                for table, names in allowed_columns.items()
+            }
         sql = clean_model_sql(request.sql)
         validation = validate_sql(
             sql, schema, dialect=request.dialect,
             allowed_tables=allowed_tables, allowed_columns=allowed_columns,
         )
+        if validation.valid and allowed_columns is not None:
+            root = parse_one(sql, read=request.dialect)
+            wildcard = any(isinstance(item, exp.Star) for select in root.find_all(exp.Select)
+                           for item in select.expressions)
+            if wildcard and any(
+                not {c.name.casefold() for c in table.columns}.issubset(
+                    {c.casefold() for c in allowed_columns.get(table.name, set())}
+                ) for table in schema.tables if table.name in validation.tables
+            ):
+                validation = validation.model_copy(update={
+                    "valid":False, "code":"SQL_COLUMN_NOT_AUTHORIZED",
+                    "message":"Wildcard output exceeds the saved authorized column scope.",
+                })
         if not validation.valid or not request.execute:
             return CheckResponse(
                 db_id=request.db_id,
@@ -637,6 +658,7 @@ class TextToSQLAgent:
                     sql=request.previous_sql,
                     accepted=True,
                     execution_status="ACCEPTED",
+                    execution_timestamp=time(),
                     attempts=attempts,
                     rows=baseline_rows,
                     columns=baseline_columns,
@@ -683,6 +705,7 @@ class TextToSQLAgent:
                     sql=request.previous_sql,
                     accepted=True,
                     execution_status="ACCEPTED",
+                    execution_timestamp=time(),
                     attempts=attempts,
                     rows=baseline_rows,
                     columns=baseline_columns,
@@ -750,6 +773,7 @@ class TextToSQLAgent:
             sql=final_sql,
             accepted=True,
             execution_status="ACCEPTED" if request.execute else "SAFETY_VALIDATED",
+            execution_timestamp=time() if request.execute else None,
             attempts=attempts,
             rows=rows,
             columns=columns,

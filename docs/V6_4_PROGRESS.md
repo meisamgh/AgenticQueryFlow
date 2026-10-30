@@ -241,3 +241,15 @@ Added renderer tests for cross-renderer series-color stability, reduced motion,
 step geometry and missing-value preservation. Browser screenshot comparison is
 NOT RUN: no browser executable or connected browser is available locally.
 No backend generation, KPI calculations, SQL execution or provider calls changed.
+# SQL-based historical memory refinement — 2026-10-30
+
+Implemented indexed accepted-SQL memory, explicit historical-source delegation,
+validated current-data refresh, snapshot-only historical figures, bounded chart
+preview retention and transactional refresh commits. See `docs/SQL_MEMORY.md`
+and `tests/test_sql_memory.py` for contracts, measurements and acceptance tests.
+Live PostgreSQL/provider verification is NOT RUN. No commit or push requested.
+Verification: Python 487 passed, 1 skipped (12.78s); frontend 127 passed;
+Ruff passed; mypy passed across 59 source files; `git diff --check` passed.
+Ten new SQL-memory acceptance cases pass. Existing dependency deprecation
+warnings remain. Local metadata benchmark: p50 1.602 → 0.090 ms; p95
+1.734 → 0.098 ms, without model or business-database calls.
