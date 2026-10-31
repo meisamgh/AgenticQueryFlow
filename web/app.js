@@ -1548,6 +1548,9 @@ async function appendAssistant(body, elapsed, options = {}) {
   fragment.querySelector(".result-panel-pane").hidden = sqlNotAvailable || explanatory || plotOnly;
 
   const actions = fragment.querySelector(".answer-actions");
+  window.QueryflowDashboard?.mountAction(article,body,{
+    api,sessionId,renderChart:renderChartInto,renderTable,
+  });
   if (accepted && !explanatory && !sqlNotAvailable && !plotOnly) {
     const sqlActions = fragment.querySelector(".sql-actions");
     const runId = body.run_id || options.run?.run_id || null;

@@ -25,6 +25,10 @@ Failures, empty results, unexpected NULLs or correctness reviews
 - **Interactive results:** Visualization, Data and SQL views; charts reuse sufficient results.
 - **Traceability:** tool observations, validation attempts, timings and token accounting.
 
+**Temporary dashboards:** click **Create dashboard** on an accepted result to
+reuse its data for read-only filters, eligible KPIs and up to four charts—without
+new SQL or model calls. See [Phase 1 dashboard](docs/DASHBOARD_MVP.md).
+
 ## Run locally
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).

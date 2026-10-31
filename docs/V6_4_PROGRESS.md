@@ -341,3 +341,22 @@ Verification: frontend 160 passed; Python 508 passed/1 skipped (16.38s);
 Ruff, mypy and diff checks passed. Initial full run had an existing optimizer
 timing-dependent assertion fail; isolated rerun and full rerun passed unchanged.
 Already-discarded old snapshots cannot be reconstructed without an explicit rerun.
+
+## Deterministic dashboard Phase 1 — 2026-10-31
+
+Implemented focused typed dashboard service/models, scoped cache-only API, and
+separate dashboard_view.js module (three-line app integration). Fixed sections
+are filters → KPIs → charts → optional table. No agent/LLM, database or schema
+query capability; existing chart validation/rendering is reused. KPI eligibility
+uses accepted SQL AST, disjoint output groups and retained source-grain metadata,
+not business-name heuristics. Distinct counts, averages of averages, joins and
+insufficient comparison evidence are rejected for reaggregation. See
+`docs/DASHBOARD_MVP.md` for contracts, benchmark evidence and limitations.
+The unrelated working-tree deletion of improvement.md was not modified.
+Verification: Python 528 passed/1 skipped; frontend 170 passed; Ruff, mypy
+(60 source files) and diff checks passed. Local 30-build benchmarks: 4-row p50
+1.139ms/p95 1.398ms, 3,823 JSON bytes; 500-row p50 18.384ms/p95 19.012ms,
+101,027 bytes. These measure backend build cost, not browser/network latency.
+Additional SQL/LLM calls are zero, tested with execution/inspection/generation
+forbidden after initial setup. Browser pixel-level mobile/desktop, PostgreSQL
+and live-provider verification remain NOT RUN. No commit or push requested.

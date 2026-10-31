@@ -45,6 +45,12 @@ from semantic_text2sql.conversation import (
 )
 from semantic_text2sql.conversational_agent import ConversationalAnalyticsAgent
 from semantic_text2sql.conversational_bridge import ConversationalAnalyticsBridge
+from semantic_text2sql.dashboard_service import (
+    DashboardError,
+    DashboardRequest,
+    DashboardSpec,
+    build_dashboard,
+)
 from semantic_text2sql.data_requirement_validator import validate_reusability
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.explanation import deterministic_explanation, explain_turn_detailed
@@ -391,6 +397,30 @@ def create_app(
                 return restored
             break
         return None
+
+    @app.post("/api/dashboards", response_model=DashboardSpec)
+    async def create_dashboard(request: DashboardRequest, response: Response) -> DashboardSpec:
+        response.headers["Cache-Control"] = "no-store"
+        configured = request.db_id in sqlite.list_ids() or (
+            postgres is not None and request.db_id in postgres.configured_ids()
+        )
+        if not configured:
+            raise HTTPException(404, "Database is unavailable.")
+
+        def resolve(session: str, db: str, identity: str) -> RecentResult | None:
+            current = recent_results.get((session, db))
+            if current is not None and current.result_id == identity:
+                return current
+            return next((snapshot for (owner, database, _), snapshot
+                         in reversed(chart_snapshots.items())
+                         if owner == session and database == db
+                         and snapshot.result_id == identity), None)
+
+        try:
+            source = resolve(request.session_id, request.db_id, request.result_id)
+            return await asyncio.to_thread(build_dashboard, request, lambda *_: source)
+        except DashboardError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from exc
 
     @app.post("/api/results/page")
     async def result_page(request: ResultPageRequest) -> dict[str, Any]:
