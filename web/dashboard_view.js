@@ -113,6 +113,7 @@ window.QueryflowDashboard = (() => {
     let spec=null,handle=null,loading=false;
     const host=article.querySelector?.(".response-card") || article;
     toolbar.append(button,label,status,mode);host.append(toolbar,view,edits);
+    window.QueryflowDashboardStudio?.mountSave(edits,()=>spec,{...dependencies,body});
     revise.addEventListener("click",()=>{
       if(revision.value.trim() && dependencies.reviseDashboard) dependencies.reviseDashboard(revision.value.trim());
     });

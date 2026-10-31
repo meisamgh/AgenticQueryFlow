@@ -52,6 +52,8 @@ from semantic_text2sql.dashboard_service import (
     DashboardSpec,
     build_dashboard,
 )
+from semantic_text2sql.dashboard_store import DashboardStore, SavedDashboard
+from semantic_text2sql.dashboard_studio import studio_router
 from semantic_text2sql.data_requirement_validator import validate_reusability
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.explanation import deterministic_explanation, explain_turn_detailed
@@ -194,6 +196,11 @@ def create_app(
         else PostgresRegistry(postgres_databases) if postgres_databases else None
     )
     sqlite = DatabaseRegistry(Path(os.environ.get("TEXT2SQL_DATABASE_ROOT", "data")))
+    if runs.path is not None and any(
+        sqlite.resolve(identity).resolve() == runs.path.resolve() for identity in sqlite.list_ids()
+    ):
+        raise ValueError("History/dashboard storage must not be an exposed business database.")
+    saved_dashboards = DashboardStore(runs.path) if runs.path is not None else None
     if set(sqlite.list_ids()) & set(external_connections):
         raise ValueError("Database IDs must be unique across SQLite and remote connections.")
     profiles = ProfileStore(Path(os.environ.get("TEXT2SQL_PROFILE_ROOT", "profiles")))
@@ -362,6 +369,9 @@ def create_app(
         "queryflow_provisional_context", default=None
     )
     history_anchor: ContextVar[str | None] = ContextVar("queryflow_history_anchor", default=None)
+    studio_context: ContextVar[SavedDashboard | None] = ContextVar(
+        "queryflow_dashboard_studio", default=None
+    )
 
     def accepted_state(session_id: str) -> ConversationState | None:
         provisional = provisional_context.get()
@@ -2391,11 +2401,20 @@ def create_app(
             design_mode="ai", objective=objective,
         )
         previous = dashboard_revisions.get(request.session_id, request.db_id, retained.result_id)
+        saved = studio_context.get()
+        if saved is not None:
+            if retained.result_id != saved.document.source.result_id:
+                raise DashboardError("A saved dashboard cannot silently switch its source result.")
+            previous = saved.document.spec
         expected = previous.revision_id if previous else None
         usage = TokenUsage()
         ledger: list[CallLedgerEntry] = []
         try:
             if undo:
+                if saved is not None:
+                    raise DashboardError(
+                        "Use Undo in Dashboard Studio to restore a saved revision."
+                    )
                 # Validate current source authorization/completeness before undo.
                 build_dashboard(design_request, lambda *_: retained)
                 spec = dashboard_revisions.undo(
@@ -2409,6 +2428,7 @@ def create_app(
                     completer=turn_completers.get(provider), provider=provider, model=model,
                     budget=active_request_budget() or RequestBudget(timeout_seconds=15),
                     previous=previous,
+                    patch_only=saved is not None,
                 )
                 usage, ledger = outcome.usage, list(outcome.ledger)
                 if outcome.spec is None:
@@ -2417,7 +2437,8 @@ def create_app(
                         resolved_question=objective, message=outcome.reason,
                         token_usage=usage, call_ledger=ledger,
                     )
-                spec = dashboard_revisions.commit(request.session_id, outcome.spec, expected)
+                spec = (outcome.spec if saved is not None else
+                        dashboard_revisions.commit(request.session_id, outcome.spec, expected))
             return ChatResponse(
                 session_id=request.session_id, result_id=retained.result_id,
                 operation="VISUALIZE", resolved_question=objective,
@@ -2438,7 +2459,9 @@ def create_app(
             )
 
     def dashboard_summary(session: str, db: str, result: str) -> dict[str, Any] | None:
-        spec = dashboard_revisions.get(session, db, result)
+        saved = studio_context.get()
+        spec = (saved.document.spec if saved is not None
+                else dashboard_revisions.get(session, db, result))
         if spec is None:
             return None
         return {"result_id": result, "revision_id": spec.revision_id, "title": spec.title,
@@ -2461,6 +2484,30 @@ def create_app(
         dashboard_handler=assistant_dashboard_handler,
         dashboard_inspector=dashboard_summary,
     )
+
+    async def edit_saved_dashboard(saved: SavedDashboard, message: str) -> ChatResponse:
+        source = saved.document.source.result()
+        session = f"studio-{saved.dashboard_id}"
+        state = ConversationState(
+            session_id=session, db_id=source.db_id, root_question=source.question,
+            resolved_question=source.question, semantic_contract=source.semantic_contract,
+            last_sql=source.sql, last_columns=source.columns, last_row_count=source.row_count,
+            last_model_context=source.verified_context,
+        )
+        branch_token = branch_context.set((session, state, source, None))
+        studio_token = studio_context.set(saved)
+        request = ChatRequest(session_id=session, db_id=source.db_id, message=message)
+        request._dashboard_snapshot_only = True
+        try:
+            # Same LangGraph, no HTTP recursion or intermediate accepted-state save.
+            return await conversational_agent.run(request)
+        finally:
+            studio_context.reset(studio_token)
+            branch_context.reset(branch_token)
+
+    app.include_router(studio_router(
+        saved_dashboards, dashboard_revisions, dashboard_source, edit_saved_dashboard
+    ))
 
     @app.post("/api/chat", response_model=ChatResponse)
     async def chat(request: ChatRequest) -> ChatResponse:

@@ -345,6 +345,7 @@ async def design_dashboard(
     model: str,
     budget: RequestBudget,
     previous: DashboardSpec | None = None,
+    patch_only: bool = False,
 ) -> DashboardDesignOutcome:
     base, kpis, charts = eligible_catalog(source, request)
     if previous and previous.result_id != source.result_id:
@@ -400,6 +401,8 @@ async def design_dashboard(
                 raise ValueError("Requery requires explicit missing requirements")
             status, spec, reason = "REQUERY_REQUIRED", None, proposal.missing_requirements
         else:
+            if patch_only and previous is not None and proposal.mode != "PATCH":
+                raise ValueError("Saved dashboard edits must preserve unaffected widgets")
             spec = _materialize(proposal, base, kpis, charts, previous)
             status, reason = "READY", "Validated AI dashboard design."
     except asyncio.CancelledError:

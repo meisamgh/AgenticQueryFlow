@@ -1190,6 +1190,7 @@ class ConversationalAnalyticsAgent:
                     }),
                 })
         compact = {
+            "saved_dashboard_snapshot_only": self._request._dashboard_snapshot_only,
             "current_dashboard": (
                 self.dashboard_inspector(
                     self._request.session_id, self._request.db_id, last.result_id
@@ -1248,6 +1249,10 @@ class ConversationalAnalyticsAgent:
             "results, chart state, and corrections. Select the simplest valid execution "
             "path that fully satisfies the user's request.\n\n"
             "Routing rules:\n"
+            "SAVED STUDIO: When saved_dashboard_snapshot_only is true, edit the retained "
+            "dashboard with ai_dashboard_designer. No SQL refresh or metadata DB tools are "
+            "available in this scope. If new analytical data is required, explain that the "
+            "client must run a new governed analysis in Conversations, then Save as New.\n"
             "DASHBOARDS: For dashboard creation or presentation-only revisions use "
             "ai_dashboard_designer with the precise design objective; undo_dashboard "
             "restores the previous design. Both reuse the current complete accepted result. "
@@ -1574,6 +1579,19 @@ class ConversationalAnalyticsAgent:
         question = tool_input.objective
         started = perf_counter()
         facts: dict[str, Any]
+        if self._request._dashboard_snapshot_only and tool not in {
+            "ai_dashboard_designer", "undo_dashboard", "present_result", "analyze_result",
+            "explain_existing_result",
+        }:
+            return state.model_copy(update={
+                "observations": [*state.observations, {"tool": tool, "status": "UNSUPPORTED",
+                    "error": "Saved dashboards use retained data. Run a new governed analysis "
+                    "in Conversations for different data, then save a new dashboard."}],
+                "decision": None, "steps": state.steps + 1,
+                "ledger": [*state.ledger, CallLedgerEntry(
+                    component=f"assistant_tool:{tool}", kind="TOOL", status="FAILED"
+                )],
+            })
         last = (
             state.base_response
             if state.base_response and state.base_response.generation

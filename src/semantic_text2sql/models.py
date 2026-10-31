@@ -720,6 +720,7 @@ class GenerateRequest(StrictModel):
 
 
 class ChatRequest(StrictModel):
+    _dashboard_snapshot_only: bool = PrivateAttr(default=False)
     model_config = ConfigDict(extra="forbid", validate_default=True)
     session_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")

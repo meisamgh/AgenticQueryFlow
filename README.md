@@ -32,6 +32,11 @@ bounded specialist call, supports design revisions and undo, and never changes
 the source SQL. See [Phase 1](docs/DASHBOARD_MVP.md) and
 [AI dashboard designer](docs/AI_DASHBOARD_DESIGNER.md).
 
+**Dashboard Studio:** save private drafts, collaborate on design, explicitly
+approve versions, and reopen saved snapshots from the Library after restart—no
+SQL rerun or model call. Includes version history, undo and conflict-safe saves.
+External sharing remains disabled. [Setup and security](docs/DASHBOARD_STUDIO.md).
+
 ## Run locally
 
 Requires Python 3.12+ and [uv](https://docs.astral.sh/uv/).

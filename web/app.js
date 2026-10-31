@@ -62,6 +62,7 @@ async function api(path, options = {}) {
 }
 
 async function initialize() {
+  window.QueryflowDashboardStudio?.install({api,renderChart:renderChartInto,renderTable});
   hydrateIcons();
   if (window.matchMedia("(max-width: 760px)").matches) {
     document.body.classList.add("sidebar-collapsed");
