@@ -522,6 +522,7 @@ def test_public_post_surface_contains_only_current_workflow() -> None:
         "/api/results/page",
         "/api/results/inspect",
         "/api/dashboards",
+        "/api/dashboards/undo",
         "/api/sql/diff",
         "/api/voice/transcribe",
         "/api/history/{run_id}/continue",

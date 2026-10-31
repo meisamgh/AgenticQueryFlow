@@ -46,3 +46,15 @@ the integrated/malformed/chart-only cases in `test_v63_conversation.py` validate
 proposal schema, safe fallback, call counts and source identities. The historical
 refresh integration runs with and without an embedded proposal. No claim that
 all grain/unit/business semantics are provable; existing unresolved states remain.
+
+### Phase 2 dashboard specialist (2026-10-31)
+
+VERIFIED locally: typed eligible-catalog selection; exact result lineage; one-call
+specialist budget; deterministic fallback; no-SQL design/undo; patch preservation
+and revision CAS; Top → missing-data → governed SQL → resumed design; fixed
+section ordering and existing renderer reuse. Evidence: 15 tests in
+test_ai_dashboard_designer.py, existing test_dashboard.py, and 12 frontend cases
+in dashboard_view.cjs. Full checks are recorded in V6_4_PROGRESS.md.
+NOT RUN: live provider, PostgreSQL and pixel-level browser verification for this
+feature. This does not change older V6.4 requirement statuses or claim production
+tenant authentication/durable multi-worker dashboard state.

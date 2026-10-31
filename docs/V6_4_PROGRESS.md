@@ -360,3 +360,54 @@ Verification: Python 528 passed/1 skipped; frontend 170 passed; Ruff, mypy
 Additional SQL/LLM calls are zero, tested with execution/inspection/generation
 forbidden after initial setup. Browser pixel-level mobile/desktop, PostgreSQL
 and live-provider verification remain NOT RUN. No commit or push requested.
+
+## CTE authorization and PostgreSQL timeout hardening — 2026-10-31
+
+Replaced global CTE-name exclusion with lexical scope resolution on a normalized
+AST copy, preserving actual SQL identifiers. Remote preparation independently
+checks each physical table against its allowlist in addition to existing schema
+and catalog checks. Fanout analysis uses the same physical-source classification.
+Added adversarial tests for qualified CTE shadowing, nested/forward/self scopes,
+quoted alias case, qualified identities and permissive-validator defense in depth
+across four scripted adapters; positive CTE cases remain supported.
+
+Replaced bound SET LOCAL with parameterized transaction-local set_config and
+tested clamping plus query binding. Real PostgreSQL 15.19/Psycopg 3 verification
+passed against an isolated UTF-8 database and unprivileged role: timeout settings,
+read-only mode, cancellation, recovery and no session-setting leakage. Server
+stopped afterward. Full suite: 556 passed/1 skipped; final PostgreSQL focused
+run: 8 passed/1 skipped; frontend: 170 passed; Ruff/mypy/diff checks passed.
+See `docs/SECURITY_REGRESSIONS.md`. No production DB, commit or push was changed;
+the unrelated improvement.md deletion remains untouched.
+
+## Phase 2 AI dashboard designer — 2026-10-31
+
+Added a one-call dashboard specialist under the existing Top-layer LangGraph
+assistant. Typed proposals select eligible KPI IDs and validated chart candidates
+from bounded result profiles, with deterministic materialization, lineage checks,
+unchanged data, fixed section order and safe fallback. Revisions use patches to
+preserve unaffected widgets; scoped RAM revision history supports undo and
+compare-and-set commits. Missing analytical data returns REQUERY_REQUIRED to the
+Top layer; an accepted governed requery resumes the original dashboard goal.
+
+The explicit UI now offers deterministic/AI design, inline design-change requests,
+automatic validated previews and undo. Existing Plotly/ECharts/table callbacks
+remain the only renderers. Config is documented in .env.example; no local .env
+was edited. Source modules: ai_dashboard_designer, dashboard_service, runtime,
+conversational_agent, api, models and task budgets in llm; frontend dashboard_view,
+small app integration, styles and cache-busted index. See AI_DASHBOARD_DESIGNER.md.
+
+Acceptance coverage: 15 designer tests plus existing Phase 1 tests; frontend
+dashboard coverage expanded to 12 tests. Full Python run: 570 passed/2 skipped;
+frontend: 172 passed. Ruff, mypy (61 modules) and git diff --check passed.
+30 identical four-row scripted builds measured Phase 1 p50/p95 1.266/1.662 ms
+and Phase 2 2.868/4.173 ms. These exclude live inference/network/browser time.
+Top design acceptance uses one Top call + one specialist call, no final-answer
+call or SQL; initial invalid designs do not retry. API integration forbids DB
+execution/inspection/generation after its original real SQLite query.
+
+Limitations: live-provider/PostgreSQL checks and pixel-level desktop/mobile QA
+NOT RUN for this phase; no new multi-user authentication, durable dashboard
+storage or editable global filters. Conservative annotation validation can reject
+legitimate numbered titles/aliases. Existing security fixes and unrelated
+improvement.md deletion were preserved. No commit or push was requested.

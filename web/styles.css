@@ -1385,6 +1385,14 @@ body.sidebar-collapsed .sidebar { display:none; }
 .dashboard-view { margin-top:16px; padding:18px; background:var(--surface); border:1px solid var(--border);
   border-radius:16px; color:var(--text); }
 .dashboard-view[hidden] { display:none; }
+.dashboard-actions[hidden] { display:none; }
+.dashboard-actions select,.dashboard-revision-input { background:var(--surface); color:var(--text);
+  border:1px solid var(--border); padding:8px 10px; border-radius:8px; min-width:0; }
+.dashboard-revision-input { flex:1 1 220px; }
+.dashboard-view[data-theme="neutral"] { border-color:var(--border); box-shadow:none; }
+.dashboard-view[data-theme="neutral"] .dashboard-title { color:var(--text); }
+.dashboard-view[data-theme="contrast"] .dashboard-chart-card { border-width:2px; }
+.dashboard-view[data-theme="contrast"] .dashboard-title { font-weight:750; }
 .dashboard-title { font-size:18px; line-height:1.4; margin:0 0 18px; overflow-wrap:anywhere; }
 .dashboard-section { margin-bottom:20px; }
 .dashboard-section-title { font-size:13px; margin:0 0 10px; font-weight:600; }

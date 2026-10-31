@@ -27,7 +27,10 @@ Failures, empty results, unexpected NULLs or correctness reviews
 
 **Temporary dashboards:** click **Create dashboard** on an accepted result to
 reuse its data for read-only filters, eligible KPIs and up to four charts—without
-new SQL or model calls. See [Phase 1 dashboard](docs/DASHBOARD_MVP.md).
+new SQL or model calls. Optional **AI design** chooses verified widgets with one
+bounded specialist call, supports design revisions and undo, and never changes
+the source SQL. See [Phase 1](docs/DASHBOARD_MVP.md) and
+[AI dashboard designer](docs/AI_DASHBOARD_DESIGNER.md).
 
 ## Run locally
 
