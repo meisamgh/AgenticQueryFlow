@@ -129,10 +129,10 @@ window.QueryflowDashboard = (() => {
         } else if (kind === "kpis") {
           const grid = node("div", "dashboard-kpi-grid");
           section.append(grid);
-          const count = spec.kpis?.length || 0;
+          const kpiCount = spec.kpis?.length || 0;
           grid.style.setProperty(
             "--dashboard-kpi-span",
-            String(count === 1 ? 12 : count === 2 ? 6 : count === 3 ? 4 : 3),
+            String(kpiCount === 1 ? 12 : kpiCount === 2 ? 6 : kpiCount === 3 ? 4 : 3),
           );
           for (const metric of spec.kpis || []) {
             const card = node("article", "chart-kpi-card dashboard-kpi");
@@ -176,6 +176,29 @@ window.QueryflowDashboard = (() => {
             }
             grid.append(card);
           }
+          // Reuse the existing semantic icon/sparkline component. All authoritative
+          // values and chronological observations come from the validated backend.
+          if (window.QueryflowKpis?.render && spec.kpis?.length) {
+            const decorated = spec.kpis.map(metric => ({
+              ...metric,
+              calculation: metric.calculation === "PERIOD_GROWTH" ? "PERIOD_CHANGE" : metric.calculation,
+              formatted_value: window.QueryflowKpis.format(metric.value, metric.unit),
+              sparkline: metric.sparkline || [],
+              evidence: {result_id: metric.result_id, column: metric.metric, row_count: count(metric.result_id)},
+              comparison: metric.calculation === "PERIOD_GROWTH" && metric.baseline > 0
+                && metric.current != null && metric.periods?.length === 2
+                ? {baseline: metric.periods[0], current: metric.periods[1], change: metric.value} : null,
+              comparison_evidence: metric.calculation === "PERIOD_GROWTH"
+                ? {baseline_value: metric.baseline, current_value: metric.current, sparkline: [], unit: undefined} : null,
+              badge: (metric.periods || []).join(" → "),
+            }));
+            window.QueryflowKpis.render(grid, decorated);
+            [...grid.children].forEach((card, index) => {
+              card.classList.add("dashboard-kpi");
+              card.dataset.widgetId = spec.kpis[index].kpi_id || "";
+              if (onSelectWidget) card.addEventListener("click", () => onSelectWidget(spec.kpis[index].kpi_id));
+            });
+          }
           if (!spec.kpis?.length) {
             section.append(
               node(
@@ -193,9 +216,8 @@ window.QueryflowDashboard = (() => {
             card.style.setProperty(
               "--dashboard-span",
               String(
-                [4, 6, 8, 12].includes(widget.column_span)
-                  ? widget.column_span
-                  : 6,
+                spec.design_mode === "ai" && [4, 6, 8, 12].includes(widget.column_span)
+                  ? widget.column_span : 12,
               ),
             );
             card.dataset.resultId = widget.result_id;

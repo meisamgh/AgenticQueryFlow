@@ -7,6 +7,7 @@ from time import time
 
 import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 from test_dashboard_store import document
 
 from semantic_text2sql.agent import TextToSQLAgent
@@ -189,379 +190,161 @@ def test_pending_context_is_bounded_without_discarding_persisted_discussion(tmp_
     assert all(len(message) <= 400 for message in saved.summary()["discussion"])
 
 
-@pytest.mark.parametrize("fail_finalization", [False, True])
-def test_restart_approval_uses_snapshots_without_sql_or_designer(
-    registry, tmp_path, monkeypatch, fail_finalization
-):
-    from dataclasses import replace
-
-    from test_dashboard import snapshot
-
-    from semantic_text2sql.dashboard_service import DashboardRequest, build_dashboard
-    from semantic_text2sql.dashboard_store import DashboardDocument, DashboardSnapshot
-
-    monkeypatch.setenv("TEXT2SQL_ASSISTANT_PROVIDER", "agentrouter")
-    monkeypatch.setenv("TEXT2SQL_ASSISTANT_MODEL", "script")
-    monkeypatch.setenv("TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED", "true")
-    path = tmp_path / "history.sqlite"
-    source = replace(snapshot(), db_id="shop")
-    spec = build_dashboard(
-        DashboardRequest(session_id="owner", db_id="shop", result_id="result"), lambda *_: source
-    )
-    candidate = propose(
-        DashboardDocument(spec=spec, source=DashboardSnapshot.capture(source)),
-        "Revenue trend",
-        "Compare retained periods.",
-    )
-    proposal = ProposalStore(DashboardStore(path)).save_candidate("owner", "shop", candidate, None)
-
-    class SQL:
-        async def generate(self, **kwargs):
-            pytest.fail("Approval must not generate SQL")
-
-    class Top:
-        calls = 0
-
-        async def complete_detailed(self, model, prompt):
-            self.calls += 1
-            context = json.loads(prompt.split("\nContext: ")[1])
-            pending = context["current_dashboard"]["pending_proposal"]
-            assert pending["version"] >= proposal.version
-            return json.dumps(
-                {
-                    "action": "CALL_TOOL",
-                    "intent": "VISUALIZE",
-                    "tool": "ai_dashboard_designer",
-                    "tool_arguments": {
-                        "objective": "Approve retained design",
-                        "design_action": "APPROVE",
-                        "proposal_id": pending["proposal_id"],
-                        "proposal_version": pending["version"],
-                        "approval_quote": context["question"],
-                    },
-                }
-            ), TokenUsage()
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("Approval must not inspect or execute against the business database")
-
-    model = Top()
-    if fail_finalization:
-        transition = ProposalStore.transition
-        failed = False
-
-        def injected_failure(self, session, database, identity, expected, status, **kwargs):
-            nonlocal failed
-            if status == "READY" and not failed:
-                failed = True
-                raise DashboardError("Injected durable finalization failure")
-            return transition(self, session, database, identity, expected, status, **kwargs)
-
-        monkeypatch.setattr(ProposalStore, "transition", injected_failure)
-    app = create_app(
-        TextToSQLAgent(registry, SQL()),
-        conversation_completers={"agentrouter": model},
-        run_history=RunHistoryStore(path),
-    )
-    monkeypatch.setattr(registry, "inspect", forbidden)
-    monkeypatch.setattr(registry, "execute", forbidden)
-    client = TestClient(app)
-    response = client.post(
-        "/api/chat",
-        json={
-            "session_id": "owner",
-            "db_id": "shop",
-            "provider": "agentrouter",
-            "model": "script",
-            "message": "I confirm this design",
-        },
-    )
-    assert response.status_code == 200, response.text
-    body = response.json()
-    if fail_finalization:
-        assert body["dashboard"] is None
-        assert body["dashboard_design_proposal"]["status"] == "FAILED"
-        assert (
-            ProposalStore(DashboardStore(path)).get("owner", "shop").document == candidate.document
-        )
-        response = client.post(
-            "/api/chat",
-            json={
-                "session_id": "owner",
-                "db_id": "shop",
-                "provider": "agentrouter",
-                "model": "script",
-                "message": "I confirm, please retry",
-            },
-        )
-        assert response.status_code == 200, response.text
-        body = response.json()
-    assert body["dashboard"] and body["result_id"] == "result", body
-    assert model.calls == (2 if fail_finalization else 1)
-    assert ProposalStore(DashboardStore(path)).get("owner", "shop").status == "READY"
-
-
-@pytest.mark.parametrize("valid", [True, False])
-def test_layout_revision_requires_new_confirmation_and_never_runs_sql(
-    registry, tmp_path, monkeypatch, valid
-):
-    from dataclasses import replace
-
-    from test_dashboard import snapshot
-
-    from semantic_text2sql.dashboard_service import DashboardRequest, build_dashboard
-    from semantic_text2sql.dashboard_store import DashboardDocument, DashboardSnapshot
-
-    monkeypatch.setenv("TEXT2SQL_ASSISTANT_PROVIDER", "agentrouter")
-    monkeypatch.setenv("TEXT2SQL_DASHBOARD_PROVIDER", "agentrouter")
-    monkeypatch.setenv("TEXT2SQL_ASSISTANT_MODEL", "script")
-    monkeypatch.setenv("TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED", "true")
-    path = tmp_path / "history.sqlite"
-    source = replace(snapshot(), db_id="shop")
-    spec = build_dashboard(
-        DashboardRequest(session_id="owner", db_id="shop", result_id="result"), lambda *_: source
-    )
-    pending = propose(
-        DashboardDocument(spec=spec, source=DashboardSnapshot.capture(source)),
-        "Revenue performance",
-        "Compare observed periods.",
-    )
-    store = ProposalStore(DashboardStore(path))
-    original = store.save_candidate("owner", "shop", pending, None)
-
-    class Model:
-        top_calls = 0
-        design_calls = 0
-
-        async def complete_detailed(self, model, prompt):
-            self.top_calls += 1
-            context = json.loads(prompt.split("\nContext: ")[1])
-            proposal = context["current_dashboard"]["pending_proposal"]
-            return json.dumps(
-                {
-                    "action": "CALL_TOOL",
-                    "intent": "VISUALIZE",
-                    "tool": "ai_dashboard_designer",
-                    "tool_arguments": {
-                        "objective": "Widen the first chart only",
-                        "design_action": "REVISE",
-                        "proposal_id": proposal["proposal_id"],
-                        "proposal_version": proposal["version"],
-                    },
-                }
-            ), TokenUsage()
-
-        async def complete_task(self, model, prompt, task, **kwargs):
-            if task != "dashboard":
-                return await self.complete_detailed(model, prompt)
-            self.design_calls += 1
-            return json.dumps(
-                {
-                    "result_id": "result",
-                    "mode": "PATCH",
-                    "charts": [
-                        {
-                            "candidate_id": original.document.spec.widgets[0].widget_id
-                            if valid
-                            else "invented",
-                            "column_span": 12,
-                        }
-                    ],
-                }
-            ), TokenUsage()
-
-    class SQL:
-        async def generate(self, **kwargs):
-            pytest.fail("Layout changes cannot generate SQL")
-
-    def forbidden(*args, **kwargs):
-        pytest.fail("Layout changes cannot query or inspect the business database")
-
-    model = Model()
-    app = create_app(
-        TextToSQLAgent(registry, SQL()),
-        conversation_completers={"agentrouter": model},
-        run_history=RunHistoryStore(path),
-    )
-    monkeypatch.setattr(registry, "inspect", forbidden)
-    monkeypatch.setattr(registry, "execute", forbidden)
-    client = TestClient(app)
-    response = client.post(
-        "/api/chat",
-        json={
-            "session_id": "owner",
-            "db_id": "shop",
-            "provider": "agentrouter",
-            "model": "script",
-            "message": "Make the first chart wider",
-        },
-    )
-    assert response.status_code == 200, response.text
-    body = response.json()
-    assert (
-        body["dashboard"] is None
-        and body["dashboard_design_proposal"]
-        and body["dashboard_design_proposal"]["status"] == "AWAITING_APPROVAL"
-    ), body
-    revised = store.get("owner", "shop")
-    if valid:
-        assert revised.version == original.version + 3
-        assert revised.document.spec.widgets[0].column_span == 12
-        assert revised.document.spec.widgets[1:] == original.document.spec.widgets[1:]
-        assert revised.document.source == original.document.source
-        assert revised.objective == original.objective and model.design_calls == 1
-    else:
-        assert revised == original and model.design_calls == 2
-    assert model.top_calls == 1
-
-
-def test_design_action_validation_rejects_missing_references_or_approval_quote():
-    from pydantic import ValidationError
-
+@pytest.mark.parametrize("action", ["APPROVE", "REJECT"])
+def test_legacy_pending_proposals_are_not_used_or_mutated(registry, tmp_path, monkeypatch, action):
     from semantic_text2sql.conversational_agent import ToolInput
 
-    for action in ("APPROVE", "REVISE", "REJECT"):
-        with pytest.raises(ValidationError):
-            ToolInput(objective="Change design", design_action=action)
+    monkeypatch.setenv("TEXT2SQL_ASSISTANT_PROVIDER", "agentrouter")
+    monkeypatch.setenv("TEXT2SQL_ASSISTANT_MODEL", "script")
+    monkeypatch.setenv("TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED", "true")
+    path = tmp_path / "history.sqlite"
+    store, proposal = seed(path)
+
+    class SQL:
+        async def generate(self, **kwargs):
+            pytest.fail("Legacy approval cannot generate SQL")
+
+    class Top:
+        async def complete_detailed(self, model, prompt):
+            context = json.loads(prompt.split("\nContext: ")[1])
+            assert not (context.get("current_dashboard") or {}).get("pending_proposal")
+            return json.dumps({
+                "action": "CALL_TOOL", "intent": "VISUALIZE", "tool": "ai_dashboard_designer",
+                "tool_arguments": ToolInput(
+                    objective="Use archived proposal", design_action=action,
+                    proposal_id=proposal.proposal_id, proposal_version=proposal.version,
+                    approval_quote=context["question"] if action == "APPROVE" else None,
+                ).model_dump(),
+            }), TokenUsage()
+
+    app = create_app(TextToSQLAgent(registry, SQL()),
+                     conversation_completers={"agentrouter": Top()},
+                     run_history=RunHistoryStore(path))
+    response = TestClient(app).post("/api/chat", json={
+        "session_id": "owner", "db_id": "sales", "provider": "agentrouter", "model": "script",
+        "message": "Confirm the old design",
+    })
+    assert response.status_code == 200
+    assert response.json()["dashboard"] is None
+    assert response.json()["dashboard_design_proposal"] is None
+    assert store.get("owner", "sales") == proposal
+
+
+def test_revise_has_no_approval_dependency_and_legacy_approval_stays_strict():
+    from semantic_text2sql.conversational_agent import ToolInput
+
+    assert ToolInput(objective="Improve layout", design_action="REVISE").proposal_id is None
     with pytest.raises(ValidationError):
-        ToolInput(
-            objective="Approve design", design_action="APPROVE", proposal_id="p", proposal_version=3
-        )
-    with pytest.raises(ValidationError, match="require REVISE"):
-        ToolInput(
-            objective="Approve but add a plot",
-            design_action="APPROVE",
-            proposal_id="p",
-            proposal_version=3,
-            approval_quote="Approve but add a plot",
-            changes=[{"operation": "CHANGE_VISUALIZATION", "target": "plot", "new_value": "bar"}],
-        )
+        ToolInput(objective="Approve", design_action="APPROVE")
 
 
-def test_approved_missing_evidence_uses_governed_sql_then_requests_new_mapping_review(
-    registry, tmp_path, monkeypatch
+@pytest.mark.parametrize("concurrent", [False, True])
+def test_missing_evidence_is_requeried_then_dashboard_built_without_confirmation(
+    registry, tmp_path, monkeypatch, concurrent
 ):
-    from dataclasses import replace
+    from semantic_text2sql import api
+    from semantic_text2sql.ai_dashboard_designer import DashboardRevisions
 
-    from test_dashboard import snapshot
+    # A competing edit finishes while the model is awaited. The handler must
+    # retain its pre-await expected revision, not reread and overwrite the winner.
+    instances = []
+    initialize = DashboardRevisions.__init__
 
-    from semantic_text2sql.dashboard_service import DashboardRequest, build_dashboard
-    from semantic_text2sql.dashboard_store import DashboardDocument, DashboardSnapshot
+    def capture(self):
+        initialize(self)
+        instances.append(self)
 
-    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    monkeypatch.setattr(DashboardRevisions, "__init__", capture)
+    actual_design = api.design_dashboard
+    winner = None
+
+    async def racing_design(**kwargs):
+        nonlocal winner
+        outcome = await actual_design(**kwargs)
+        if concurrent and outcome.status == "READY":
+            spec = outcome.spec.model_copy(update={"title": "Concurrent winner"})
+            winner = instances[-1].commit("owner", spec, None)
+        return outcome
+
+    monkeypatch.setattr(api, "design_dashboard", racing_design)
     for setting in ("ASSISTANT", "DASHBOARD"):
         monkeypatch.setenv(f"TEXT2SQL_{setting}_PROVIDER", "agentrouter")
         monkeypatch.setenv(f"TEXT2SQL_{setting}_MODEL", "script")
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
     monkeypatch.setenv("TEXT2SQL_CONTEXT_MODE", "retrieval")
     monkeypatch.setenv("TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED", "true")
-    path = tmp_path / "history.sqlite"
-    source = replace(snapshot(), db_id="shop")
-    spec = build_dashboard(
-        DashboardRequest(session_id="owner", db_id="shop", result_id="result"), lambda *_: source
-    )
-    candidate = propose(
-        DashboardDocument(spec=spec, source=DashboardSnapshot.capture(source)),
-        "Revenue and order status",
-        "Compare retained periods.",
-    )
-    candidate.missing_requirements = ["Count orders by status"]
-    ProposalStore(DashboardStore(path)).save_candidate("owner", "shop", candidate, None)
+    goal = "Dashboard showing order status and spending by customer"
 
     class SQL:
         calls = 0
-
         async def generate(self, **kwargs):
             self.calls += 1
-            return "SELECT status, COUNT(*) AS orders FROM orders GROUP BY status", 1
+            return (
+                "SELECT status, COUNT(*) AS order_count FROM orders GROUP BY status"
+                if self.calls == 1 else
+                "SELECT customer_id, SUM(amount) AS spending FROM orders GROUP BY customer_id"
+            ), 1
 
     class Model:
         top_calls = 0
         design_calls = 0
-
         async def complete_detailed(self, model, prompt):
             self.top_calls += 1
             context = json.loads(prompt.split("\nContext: ")[1])
-            pending = context["current_dashboard"]["pending_proposal"]
-            if pending["status"] == "AWAITING_APPROVAL":
-                arguments = {
-                    "objective": pending["objective"],
-                    "design_action": "APPROVE",
-                    "proposal_id": pending["proposal_id"],
-                    "proposal_version": pending["version"],
-                    "approval_quote": context["question"],
-                }
-                tool, intent = "ai_dashboard_designer", "VISUALIZE"
-            elif not context["dashboard_evidence"]:
-                arguments = {
-                    "objective": "Count orders by status",
-                    "operation": "NEW_QUERY",
-                    "dashboard_goal": pending["objective"],
-                }
-                tool, intent = "ask_data", "NEW_QUERY"
-            else:
-                arguments = {
-                    "objective": "Add the verified order status plot",
-                    "design_action": "REVISE",
-                    "proposal_id": pending["proposal_id"],
-                    "proposal_version": pending["version"],
-                    "source_result_ids": ["result", context["dashboard_evidence"][0]["result_id"]],
-                }
-                tool, intent = "ai_dashboard_designer", "VISUALIZE"
-            return json.dumps(
-                {"action": "CALL_TOOL", "intent": intent, "tool": tool, "tool_arguments": arguments}
-            ), TokenUsage()
+            if self.top_calls in {1, 3}:
+                return json.dumps({
+                    "action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
+                    "tool_arguments": {
+                        "objective": ("Count orders by status" if self.top_calls == 1
+                                      else "Sum order amount by customer_id"),
+                        "operation": "NEW_QUERY", "dashboard_goal": goal,
+                    },
+                }), TokenUsage()
+            return json.dumps({
+                "action": "CALL_TOOL", "intent": "VISUALIZE", "tool": "ai_dashboard_designer",
+                "tool_arguments": {"objective": goal, "source_result_ids": [
+                    item["result_id"] for item in context["dashboard_evidence"]
+                ]},
+            }), TokenUsage()
 
         async def complete_task(self, model, prompt, task, **kwargs):
             if task != "dashboard":
                 return await self.complete_detailed(model, prompt)
             self.design_calls += 1
-            context = json.loads(
-                prompt.split(
-                    "Verified context (profiles/sample are bounded, not the entire result): "
-                )[1]
-            )
-            chart = next(c for c in context["chart_catalog"] if c["result_id"] != "result")
-            return json.dumps(
-                {
-                    "result_id": context["result_id"],
-                    "mode": "PATCH",
-                    "charts": [
-                        {
-                            "candidate_id": chart["candidate_id"],
-                            "reason": "Compare the observed order statuses.",
-                        }
-                    ],
-                }
-            ), TokenUsage()
+            context = json.loads(prompt.split(
+                "Verified context (profiles/sample are bounded, not the entire result): "
+            )[1])
+            if self.design_calls == 1:
+                return json.dumps({"result_id": context["result_id"],
+                                   "mode": "REQUERY_REQUIRED",
+                                   "missing_requirements": "Sum order amount by customer_id"
+                                   }), TokenUsage()
+            seen = set()
+            charts = []
+            for item in context["chart_catalog"]:
+                if item["result_id"] not in seen:
+                    seen.add(item["result_id"])
+                    charts.append({"candidate_id": item["candidate_id"], "column_span": 12})
+            return json.dumps({"result_id": context["result_id"], "charts": charts}), TokenUsage()
 
     sql, model = SQL(), Model()
-    client = TestClient(
-        create_app(
-            TextToSQLAgent(registry, sql),
-            conversation_completers={"agentrouter": model},
-            run_history=RunHistoryStore(path),
-        )
-    )
-    payload = {
-        "session_id": "owner",
-        "db_id": "shop",
-        "provider": "agentrouter",
-        "model": "script",
-        "message": "I confirm; proceed with the proposed analysis",
-    }
-    response = client.post("/api/chat", json=payload)
+    client = TestClient(create_app(
+        TextToSQLAgent(registry, sql), conversation_completers={"agentrouter": model},
+        run_history=RunHistoryStore(tmp_path / "runs.sqlite"),
+    ))
+    response = client.post("/api/chat", json={
+        "session_id": "owner", "db_id": "shop", "provider": "agentrouter",
+        "model": "script", "message": goal,
+    })
     assert response.status_code == 200, response.text
     body = response.json()
-    assert (
-        body["dashboard"] is None
-        and body["dashboard_design_proposal"]
-        and body["dashboard_design_proposal"]["status"] == "AWAITING_APPROVAL"
-    ), (body["message"], body["call_ledger"], model.top_calls, sql.calls, model.design_calls)
-    assert sql.calls == 1 and model.top_calls == 3 and model.design_calls == 1
-    assert len(body["dashboard_design_proposal"]["source_requirements"]) == 2
-    assert body["dashboard_design_proposal"]["missing_requirements"] == []
-    response = client.post(
-        "/api/chat", json={**payload, "message": "I confirm the verified design"}
-    )
-    assert response.status_code == 200 and response.json()["dashboard"], response.text
-    assert sql.calls == 1 and model.top_calls == 4 and model.design_calls == 1
+    if concurrent:
+        assert body["dashboard"] is None
+        assert "concurrently" in body["message"]
+        assert instances[-1].get("owner", "shop", winner.result_id) == winner
+        assert sql.calls == 2 and model.top_calls == 4 and model.design_calls == 2
+        return
+    assert body["dashboard"], (body["message"], body["call_ledger"])
+    assert body["dashboard_design_proposal"] is None
+    assert len(body["dashboard"]["sources"]) == 2
+    assert sql.calls == 2 and model.top_calls == 4 and model.design_calls == 2

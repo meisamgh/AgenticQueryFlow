@@ -90,7 +90,7 @@ class ToolInput(StrictModel):
 
     @model_validator(mode="after")
     def design_reference(self) -> ToolInput:
-        if (self.design_action in {"APPROVE", "REJECT", "REVISE"}
+        if (self.design_action in {"APPROVE", "REJECT"}
                 and (not self.proposal_id or self.proposal_version is None)):
             raise ValueError("Design actions require the exact proposal_id and proposal_version")
         if self.design_action == "APPROVE":
@@ -123,6 +123,7 @@ class AgentDecision(StrictModel):
     answer: str | None = Field(default=None, max_length=2_000)
     finish_after_tool: bool = False
     chart_proposal: LLMChartProposal | None = None
+    result_kind: Literal["ANALYSIS", "CHART", "DASHBOARD"] | None = None
 
 
 _ACTION_VALUES: tuple[str, ...] = tuple(get_args(AgentDecision.model_fields["action"].annotation))
@@ -133,15 +134,16 @@ _TOOL_VALUES: tuple[str, ...] = tuple(get_args(ToolName))
 _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
     {
         "action": "CALL_TOOL", "intent": "VISUALIZE", "tool": "ai_dashboard_designer",
-        "tool_arguments": {"objective": "Propose a dashboard from the accepted evidence",
+        "tool_arguments": {"objective": "Build a dashboard from the accepted evidence",
                            "design_action": "PROPOSE"},
+        "result_kind": "DASHBOARD",
         "finish_after_tool": False,
     },
     {
         "action": "CALL_TOOL", "intent": "VISUALIZE", "tool": "ai_dashboard_designer",
-        "tool_arguments": {"objective": "Confirm the current design",
-                           "design_action": "APPROVE", "proposal_id": "from-current-context",
-                           "proposal_version": 3, "approval_quote": "I confirm this design"},
+        "tool_arguments": {"objective": "Improve the existing dashboard",
+                           "design_action": "REVISE"},
+        "result_kind": "DASHBOARD",
         "finish_after_tool": False,
     },
     {
@@ -162,6 +164,7 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
             "y": "total_consumption", "y_measures": [], "series": None,
             "reason": "Show consumption over time.",
         },
+        "result_kind": "CHART",
     },
     {
         "action": "CALL_TOOL",
@@ -177,6 +180,7 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
         "answer": None,
         "finish_after_tool": True,
         "chart_proposal": None,
+        "result_kind": "CHART",
     },
     {
         "action": "ANSWER",
@@ -193,7 +197,12 @@ _DECISION_EXAMPLES: tuple[dict[str, Any], ...] = (
 
 # Lead with investigation/query examples, not a designer call that requires
 # evidence the first turn may not have yet.
-_DECISION_EXAMPLES = _DECISION_EXAMPLES[2:] + _DECISION_EXAMPLES[:2]
+_DECISION_EXAMPLES = ({
+    "action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
+    "tool_arguments": {"objective": "Total consumption over date", "operation": "NEW_QUERY",
+                       "dashboard_goal": None},
+    "finish_after_tool": True, "chart_proposal": None, "result_kind": "ANALYSIS",
+},) + _DECISION_EXAMPLES[2:] + _DECISION_EXAMPLES[:2]
 
 _TOOL_INPUT_SCHEMA: dict[str, object] = {
     "type": "object",
@@ -219,6 +228,9 @@ _TOOL_INPUT_SCHEMA: dict[str, object] = {
         "source_result_ids": {"type": "array", "maxItems": 4, "items": {"type": "string"}},
         "objective": {"type": "string", "minLength": 1, "maxLength": 4_000},
         "source_run_id": {
+            "description": "Null for dashboard and chart tools. Only ask_data modifying "
+                           "historical SQL may use a run ID. Select cached dashboard evidence "
+                           "with source_result_ids, not source_run_id.",
             "anyOf": [
                 {"type": "string", "minLength": 1, "maxLength": 100, "pattern": "^[A-Za-z0-9_-]+$"},
                 {"type": "null"},
@@ -286,7 +298,7 @@ AGENT_DECISION_SCHEMA: dict[str, object] = {
     "additionalProperties": False,
     "required": [
         "action", "intent", "tool", "tool_arguments", "instruction", "answer",
-        "finish_after_tool", "chart_proposal",
+        "finish_after_tool", "chart_proposal", "result_kind",
     ],
     "properties": {
         "action": {"type": "string", "enum": list(_ACTION_VALUES)},
@@ -302,6 +314,8 @@ AGENT_DECISION_SCHEMA: dict[str, object] = {
         "answer": {"type": ["string", "null"], "maxLength": 2_000},
         "finish_after_tool": {"type": "boolean"},
         "chart_proposal": {"anyOf": [_CHART_PROPOSAL_SCHEMA, {"type": "null"}]},
+        "result_kind": {"type": ["string", "null"],
+                        "enum": ["ANALYSIS", "CHART", "DASHBOARD", None]},
     },
 }
 
@@ -331,6 +345,7 @@ def _scoped_decision_schema(context: dict[str, Any]) -> dict[str, Any]:
     schema: dict[str, Any] = deepcopy(AGENT_DECISION_SCHEMA)
     identities, pending = _decision_references(context)
     arguments = schema["properties"]["tool_arguments"]["anyOf"][0]["properties"]
+    arguments["design_action"]["enum"] = ["PROPOSE", "REVISE"]
     if identities:
         arguments["source_result_ids"]["items"]["enum"] = identities
     else:
@@ -342,9 +357,12 @@ def _scoped_decision_schema(context: dict[str, Any]) -> dict[str, Any]:
         if isinstance(question, str) and len(question) <= 1000:
             arguments["approval_quote"]["enum"] = [question, None]
     else:
-        arguments["design_action"]["enum"] = ["PROPOSE"]
-        arguments["proposal_id"]["enum"] = [None]
-        arguments["proposal_version"]["enum"] = [None]
+        arguments["design_action"]["enum"] = ["PROPOSE", "REVISE"]
+        # Null-only inactive legacy fields must not retain string/numeric bounds:
+        # strict providers normalize enum=[null] to null before checking keywords.
+        arguments["proposal_id"] = {"type": "null", "enum": [None]}
+        arguments["proposal_version"] = {"type": "null", "enum": [None]}
+        arguments["approval_quote"] = {"type": "null", "enum": [None]}
     if not identities and not pending:
         tools = schema["properties"]["tool"]["anyOf"][0]["enum"]
         for tool in ("ai_dashboard_designer", "undo_dashboard", "change_visualization",
@@ -363,7 +381,7 @@ def _scoped_decision_issues(decision: AgentDecision, context: dict[str, Any]) ->
     if arguments and set(arguments.source_result_ids) - set(identities):
         return ["source_result_ids must be empty for the current result or use exactly: "
                 + ", ".join(identities)]
-    if (arguments and arguments.design_action in {"APPROVE", "REVISE", "REJECT"}
+    if (arguments and arguments.design_action in {"APPROVE", "REJECT"}
             and (not pending or (arguments.proposal_id, arguments.proposal_version) != (
             pending["proposal_id"], pending["version"]
         ))):
@@ -483,6 +501,20 @@ def _consistency_issue_lines(decision: AgentDecision) -> list[str]:
     ):
         issues.append(f"tool {decision.tool} is incompatible with intent {decision.intent}")
     tool_input = decision.tool_arguments
+    if decision.result_kind in {"ANALYSIS", "CHART"} and (
+        decision.tool in {"ai_dashboard_designer", "undo_dashboard"}
+        or tool_input is not None and tool_input.dashboard_goal is not None
+    ):
+        issues.append("result_kind ANALYSIS/CHART cannot invoke dashboard tools or set "
+                      "dashboard_goal. Use null dashboard_goal for ordinary questions.")
+    if (decision.tool == "ask_data" and decision.finish_after_tool
+            and tool_input is not None and tool_input.dashboard_goal is not None):
+        issues.append(
+            "Conflicting completion scope: finish_after_tool=true completes the SQL request, "
+            "but dashboard_goal starts a multi-tool dashboard workflow. For an ordinary "
+            "analytical question set dashboard_goal=null. Only explicit dashboard requests "
+            "may set dashboard_goal, with finish_after_tool=false."
+        )
     if tool_input is not None and tool_input.source_run_id and decision.tool != "ask_data":
         issues.append("source_run_id is only valid for modifying historical SQL through ask_data")
     if tool_input is not None and tool_input.source_run_id and (
@@ -1254,9 +1286,6 @@ class ConversationalAnalyticsAgent:
         assert self._request is not None and self._budget is not None
         if state.observations and state.observations[-1].get("status") in {
             "DASHBOARD_READY",
-            "AWAITING_APPROVAL",
-            "DESIGN_REJECTED",
-            "REJECTED", "EXPIRED", "FAILED",
             "DESIGN_BLOCKED",
         }:
             assert state.base_response is not None
@@ -1378,6 +1407,10 @@ class ConversationalAnalyticsAgent:
                 provenance=["assistant_service_failure"],
             ).model_copy(update={"token_usage": state.usage, "call_ledger": state.ledger})
             return state.model_copy(update={"response": response})
+        accepted_contract = (
+            previous.semantic_contract if previous and previous.semantic_contract
+            else last.generation.semantic_contract if last and last.generation else None
+        )
         compact: dict[str, Any] = {
             "selected_dashboard_component": (
                 self._request.dashboard_target.model_dump()
@@ -1415,11 +1448,14 @@ class ConversationalAnalyticsAgent:
             ),
             "question": self._request.message,
             "capabilities": self._capabilities(),
-            "previous_question": previous.resolved_question if previous else None,
+            "previous_question": (previous.resolved_question if previous
+                                  else last.generation.question
+                                  if last and last.generation else None),
             "accepted_analysis_reference": (
                 {"run_id": last.run_id, "result_id": last.result_id} if last else None
             ),
-            "accepted_sql_available": bool(previous and previous.last_sql),
+            "accepted_sql_available": bool(previous and previous.last_sql
+                                            or last and last.generation and last.generation.sql),
             "accepted_result_available": bool(
                 last and last.generation and last.generation.accepted
             ),
@@ -1435,7 +1471,8 @@ class ConversationalAnalyticsAgent:
                 if last and last.generation and last.generation.accepted
                 else None
             ),
-            "result_columns": previous.last_columns if previous else [],
+            "result_columns": (previous.last_columns if previous
+                               else last.generation.columns if last and last.generation else []),
             "chart_column_profiles_advisory": (
                 profile_chart_result(last.generation.columns, last.generation.rows, sample_rows=0)[
                     0
@@ -1444,7 +1481,7 @@ class ConversationalAnalyticsAgent:
                 else None
             ),
             "accepted_analytical_contract": (
-                previous.semantic_contract.model_dump(
+                accepted_contract.model_dump(
                     mode="json",
                     exclude_none=True,
                     exclude_defaults=True,
@@ -1473,7 +1510,7 @@ class ConversationalAnalyticsAgent:
                         "required_columns",
                     },
                 )
-                if previous and previous.semantic_contract
+                if accepted_contract
                 else {}
             ),
             "corrections": previous.corrections[-3:] if previous else [],
@@ -1494,30 +1531,54 @@ class ConversationalAnalyticsAgent:
             "results, chart state, and corrections. Select the simplest valid execution "
             "path that fully satisfies the user's request.\n\n"
             "Routing rules:\n"
+            "Choose result_kind first: ANALYSIS for an ordinary question, CHART for a "
+            "requested plot, DASHBOARD only for explicit dashboard creation/editing. "
+            "ANALYSIS and CHART must have dashboard_goal=null and cannot call dashboard tools.\n"
+            "OUTPUT SCOPE: A question requesting a metric, breakdown or trend is an ordinary "
+            "analysis, not permission to build a dashboard. For example, 'Total consumption "
+            "over date' means ask_data for consumption grouped by date, dashboard_goal=null, "
+            "chart_proposal=null, finish_after_tool=true. Stop after its accepted SQL result. "
+            "Do not add charts, KPIs, distributions or dashboard investigations unless requested. "
+            "A previous dashboard request or current_dashboard context does NOT make every "
+            "later analytical question a dashboard request. Only explicit dashboard creation "
+            "or editing intent authorizes ai_dashboard_designer and dashboard_goal. Preserve "
+            "relevant filters/metric definitions without inheriting an unrequested deliverable.\n"
             "RETAINED DASHBOARD: When saved_dashboard_snapshot_only is true, presentation "
             "edits must reuse retained data. Never refresh or replace an old source. Only "
             "explicit new metrics/dimensions/comparisons with typed changes may call ask_data "
             "to add genuinely missing evidence; preserve every existing source and widget.\n"
-            "DASHBOARDS: For dashboard creation or presentation-only revisions use "
-            "a human-approved proposal workflow. First investigate the business objective, "
-            "single-column distributions, relationships, trends and anomalies only when relevant; "
-            "select investigations through reasoning, not column-type rules. Use governed SQL "
-            "and analyze_result for deterministic numerical evidence. Explore complementary "
-            "designs; never claim a finding without tool evidence. ai_dashboard_designer defaults "
-            "to design_action=PROPOSE; it must NOT construct a dashboard before approval. "
-            "If accepted_result_available is false and no pending proposal exists in "
-            "current_dashboard, investigate and obtain governed evidence first; do not call "
-            "ai_dashboard_designer yet. It cannot retrieve missing data itself. "
-            "For changes set REVISE, preserve unaffected choices and request approval again. "
-            "For explicit natural-language approval only, set APPROVE with the exact current "
-            "proposal_id, proposal_version and a verbatim approval_quote from the current message. "
-            "An approval combined with changes means REVISE, not APPROVE. Never infer approval "
-            "from silence, a new session, or tool output. Use REJECT for explicit rejection. "
-            "If an approved proposal still has missing_requirements, use distinct governed "
-            "ask_data objectives with its original dashboard_goal. Then REVISE the exact version "
-            "with the new evidence. New mappings require confirmation; never build partial data. "
-            "Never ask_data for layout-only revisions. Pending proposals are in current_dashboard. "
-            "Start this proposal workflow automatically. Never require a creation button or mode. "
+            "DASHBOARDS: Autonomously investigate the business objective through relevant "
+            "evidence. If the user asks to design a dashboard without restating an objective, "
+            "use the last accepted analysis (previous_question, accepted contract, result ID "
+            "and complete cached columns) as the objective. A bare dashboard request after "
+            "an accepted analysis means a dashboard of that analysis. Do not ask the user to "
+            "re-enter known metrics, dimensions, filters or periods. Preserve the accepted "
+            "scope; an unfiltered accepted analysis remains unfiltered, not a guessed date "
+            "range. Reuse complete accepted results and call ai_dashboard_designer. "
+            "For this tool source_run_id and operation must both be null; use "
+            "source_result_ids for the accepted result IDs. A prior run ID is not a result ID. "
+            "If no accepted analytical context exists, inspect available schema and approved "
+            "definitions first; ask a focused question only for a truly unresolved material "
+            "choice, not a blanket questionnaire. Do not invent a business objective. "
+            "Relevant investigations may examine "
+            "single-column distributions, numerical/categorical relationships, temporal patterns "
+            "and anomalies. Choose targeted investigations by reasoning, not fixed column rules. "
+            "Use analyze_result for deterministic statistics and governed ask_data for missing "
+            "evidence. Evaluate complementary chart combinations; never invent findings. "
+            "When sufficient complete accepted evidence exists, call ai_dashboard_designer with "
+            "design_action=PROPOSE for creation or REVISE for edits. It validates and immediately "
+            "renders the dashboard. Do not request confirmation, create pending discussions, "
+            "or use APPROVE/REJECT. Historical pending proposals are archival, never approved "
+            "or built automatically. Do not ask the client to choose analytical categories. "
+            "Preserve unaffected widgets, scope, definitions and exact source lineage. "
+            "For edits distinguish filter/scope changes, KPI edits, plot/encoding edits, "
+            "layout/theme/title changes and additional investigations. Delegate filter, "
+            "KPI and complementary-chart selection to the existing designer. Its "
+            "filter_refs changes display metadata only, not analytical scope. Obtain "
+            "missing governed evidence for actual scope/metric changes, never silently "
+            "reinterpret an existing widget's calculation. "
+            "Presentation-only revisions reuse evidence and must not call ask_data. "
+            "Save and Publish remain separate explicit document actions. "
             "Ordinary analytical questions must NOT create dashboards. Set dashboard_goal "
             "to the complete original dashboard objective on the first tool call and preserve "
             "it. Inspect approved definitions and accepted evidence, then retrieve only missing "
@@ -1556,7 +1617,12 @@ class ConversationalAnalyticsAgent:
             "4. ANALYTICAL MODIFICATION: Use ask_data when metrics, formulas, filters, "
             "periods, dimensions, aggregations, ranking, or comparisons require changes "
             "to the accepted analysis. Preserve unaffected SemanticContract constraints.\n"
-            "5. NEW ANALYSIS: Use ask_data for independent analytical questions.\n"
+            "5. CONVERSATION SCOPE: Once an analysis is accepted, ordinary messages in this "
+            "conversation are follow-ups: preserve its constraints and use REFINE for added "
+            "conditions or changed questions. For an unrelated independent analysis, answer "
+            "briefly asking the user to choose New conversation; do not run it in this thread. "
+            "The first analytical request in a new conversation uses NEW_QUERY. Distinct "
+            "governed investigations supporting the same dashboard goal remain permitted.\n"
             "6. EXPLANATION: Use the appropriate existing-result or SQL explanation tool, "
             "obtaining additional evidence only when needed.\n"
             "7. INVESTIGATION: Break complex analytical questions into distinct, "
@@ -2174,16 +2240,14 @@ class ConversationalAnalyticsAgent:
                 elif "dashboard_design_validation_failed" in base.provenance:
                     workflow_status = "DESIGN_BLOCKED"
                 elif base.dashboard_design_proposal:
-                    workflow_status = base.dashboard_design_proposal["status"]
+                    # Archived proposal responses cannot activate a review/build cycle.
+                    workflow_status = "DESIGN_BLOCKED"
                 elif tool_input.design_action in {"APPROVE", "REJECT"}:
                     workflow_status = "DESIGN_BLOCKED"
                 else:
                     workflow_status = "REQUERY_REQUIRED"
                 if not base.dashboard and workflow_status == "READY":
                     workflow_status = "DESIGN_BLOCKED"
-                if (base.dashboard_design_proposal and workflow_status == "APPROVED"
-                        and base.dashboard_design_proposal.get("missing_requirements")):
-                    workflow_status = "REQUERY_REQUIRED"
                 facts = {
                     "tool": tool,
                     "status": workflow_status,
@@ -2331,10 +2395,6 @@ class ConversationalAnalyticsAgent:
                 ),
             })
         dashboard_goal = tool_input.dashboard_goal or state.dashboard_goal
-        if (base and base.dashboard_design_proposal
-                and base.dashboard_design_proposal["status"] == "APPROVED"
-                and base.dashboard_design_proposal.get("missing_requirements")):
-            dashboard_goal = base.dashboard_design_proposal["objective"]
         missing_goals = dict(state.failed_dashboard_goals)
         if dashboard_goal and tool == "ask_data":
             if facts.get("status") == "executed":

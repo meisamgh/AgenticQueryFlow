@@ -33,9 +33,9 @@ class Element {
     return this.listeners.click?.();
   }
 }
-function setup() {
+function setup(kpis = null) {
   const context = vm.createContext({
-    window: {},
+    window: {QueryflowKpis: kpis},
     document: {
       createElement: (tag) => new Element(tag),
       createTextNode: (text) => ({ textContent: text }),
@@ -139,8 +139,36 @@ test("sections preserve authoritative KPI values, chart data and table rows", ()
   assert.equal(charts, 1);
   assert.equal(tables, 1);
   assert.equal(JSON.stringify(data), before);
+  const chartCard = walk(container).find(e => e.dataset.widgetId === 'chart-0');
+  assert.equal(chartCard.style['--dashboard-span'], '12');
   handle.dispose();
   assert.equal(disposed, 1);
+});
+test('dashboard reuses KPI renderer with verified evidence and no source mutation', () => {
+  let received;
+  const view = setup({format: value => String(value), render(grid, metrics) {
+    received = metrics;
+    grid.replaceChildren(...metrics.map(() => new Element('button')));
+  }});
+  const data = spec();
+  data.kpis[0].sparkline = [100, 200];
+  const before = JSON.stringify(data);
+  view.render(new Element('div'), data, {renderChart() {}, renderTable() {}});
+  assert.deepEqual(received[0].sparkline, [100, 200]);
+  assert.equal(received[0].comparison, null);
+  assert.equal(received[0].evidence.result_id, data.result_id);
+  assert.equal(JSON.stringify(data), before);
+});
+test('AI layout widths are honored without putting two plots in the same row', () => {
+  const data = spec();
+  data.design_mode = 'ai';
+  data.widgets[0].column_span = 4;
+  const container = new Element('div');
+  setup().render(container, data, {renderChart() {}, renderTable() {}});
+  const card = walk(container).find(e => e.dataset.widgetId === 'chart-0');
+  assert.equal(card.style['--dashboard-span'], '4');
+  const css = fs.readFileSync('web/styles.css', 'utf8');
+  assert.ok(css.includes('grid-column:1 / span var(--dashboard-span,12)'));
 });
 test("ordinary analytical answers have no dashboard creation controls or calls", () => {
   const article = new Element("article");
@@ -331,6 +359,7 @@ test("responsive layout reuses existing rendering engines without new frameworks
   const css = fs.readFileSync("web/styles.css", "utf8");
   assert.ok(css.includes("grid-template-columns:repeat(12,minmax(0,1fr))"));
   assert.ok(css.includes(".dashboard-chart-card { grid-column:span 12;"));
+  assert.ok(css.includes("grid-column:1 / span var(--dashboard-span,12)"));
   assert.equal(source.includes("Plotly.newPlot"), false);
   assert.equal(source.includes("echarts.init"), false);
 });

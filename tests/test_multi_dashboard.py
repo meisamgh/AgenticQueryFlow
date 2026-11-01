@@ -122,6 +122,15 @@ def test_one_targeted_correction_is_metered_and_no_third_call():
 
         async def complete_task(self, model, prompt, task, **kwargs):
             self.calls += 1
+            context = json.loads(prompt.split(
+                "Verified context (profiles/sample are bounded, not the entire result): "
+            )[1])
+            profiles = {item["result_id"]: item for item in context["source_profiles"]}
+            assert profiles["customers"]["behavior"] == {"reference": "primary context"}
+            revenue = next(item for item in profiles["result"]["behavior"]["column_profiles"]
+                           if item["column"] == "revenue")
+            assert revenue["distribution"]["mean"] == 175
+            assert profiles["result"]["row_count"] == 4
             if self.calls == 2:
                 assert "Unknown eligible metric" in prompt
             proposal = (
@@ -253,7 +262,7 @@ def test_conversation_three_governed_queries_then_design_save_and_reopen(
                     "action": "CALL_TOOL",
                     "intent": "NEW_QUERY",
                     "tool": "ask_data",
-                    "finish_after_tool": True,
+                    "finish_after_tool": False,
                     "tool_arguments": {
                         "objective": objectives[self.top_calls - 1],
                         "operation": "NEW_QUERY",
@@ -324,23 +333,9 @@ def test_conversation_three_governed_queries_then_design_save_and_reopen(
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["dashboard"] is None
-    assert body["dashboard_design_proposal"]["status"] == "AWAITING_APPROVAL"
-    assert sql.calls == 3 and model.top_calls == 4 and model.design_calls == 1
-    response = client.post(
-        "/api/chat",
-        json={
-            "session_id": "owner",
-            "db_id": "shop",
-            "provider": "agentrouter",
-            "model": "script",
-            "message": "I confirm this design",
-        },
-    )
-    assert response.status_code == 200, response.text
-    body = response.json()
     assert body["dashboard"], body
-    assert sql.calls == 3 and model.top_calls == 5 and model.design_calls == 1
+    assert body["dashboard_design_proposal"] is None
+    assert sql.calls == 3 and model.top_calls == 4 and model.design_calls == 1
     assert body["dashboard"]["schema_version"] == 2 and len(body["dashboard"]["sources"]) == 3
     saved = client.post(
         "/api/studio",
@@ -478,19 +473,13 @@ def test_saved_dashboard_adds_missing_evidence_without_refreshing_existing_resul
     )
     assert response.status_code == 200, response.text
     preview = response.json()
-    assert preview["preview_id"] is None and preview["design_proposal"]
-    response = client.post(
-        f"/api/studio/{saved.dashboard_id}/edit",
-        json={"expected_version": 1, "message": "Confirm this design"},
-    )
-    assert response.status_code == 200, response.text
-    preview = response.json()
+
     assert preview["preview_id"], (preview, model.calls, model.tasks, sql.calls)
     assert len(preview["spec"]["sources"]) == 3
     assert preview["spec"]["widgets"][: len(spec.widgets)] == [
         w.model_dump(mode="json") for w in spec.widgets
     ]
-    assert sql.calls == 1 and model.calls == ["top", "top", "design", "top"]
+    assert sql.calls == 1 and model.calls == ["top", "top", "design"]
     committed = client.post(
         f"/api/studio/{saved.dashboard_id}/save",
         json={"expected_version": 1, "preview_id": preview["preview_id"]},

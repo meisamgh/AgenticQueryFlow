@@ -80,6 +80,28 @@ def test_ai_selects_real_candidates_width_theme_and_keeps_source():
     assert budget.database_calls == 0
 
 
+def test_incomplete_design_requests_evidence_instead_of_rendering():
+    _, _, _, _, charts = setup()
+    outcome, model, budget = run({
+        "result_id": "result", "charts": [{"candidate_id": next(iter(charts))}],
+        "missing_requirements": "Need comparable previous-year data",
+    })
+    assert outcome.status == "REQUERY_REQUIRED" and outcome.spec is None
+    assert outcome.reason
+    assert model.calls == budget.model_calls == 1
+    assert budget.database_calls == 0
+
+
+def test_optional_future_analyses_do_not_force_an_unrequested_requery():
+    _, _, _, _, charts = setup()
+    outcome, model, budget = run({
+        "result_id": "result", "charts": [{"candidate_id": next(iter(charts))}],
+        "further_analyses": ["Optionally inspect spending by country later"],
+    })
+    assert outcome.status == "READY" and outcome.spec
+    assert model.calls == budget.model_calls == 1 and budget.database_calls == 0
+
+
 @pytest.mark.parametrize("bad", [
     {"kpis": [{"kpi_id": "invented"}]},
     {"result_id": "another-result"},
@@ -147,6 +169,126 @@ def test_bounded_context_and_incomplete_source_rejected_before_model():
         asyncio.run(design_dashboard(source=replace(source, truncated=True), request=request,
             completer=model, provider="test", model="test", budget=RequestBudget(2)))
     assert model.calls == 0
+
+
+def test_designer_receives_bounded_distribution_and_relationship_evidence():
+    source, _, base, *_ = setup()
+    source = replace(source, columns=["x", "y", "constant", "customer_id"],
+                     rows=[[1, 2, 7, 10], [2, 4, 7, 11], [4, 8, 7, 12],
+                           [1000, 2000, 7, 13]], chart_spec=None)
+    context = design_context(source, base, {}, {}, None)
+    profiles = {item["column"]: item for item in context["column_profiles"]}
+    assert profiles["x"]["distribution"]["iqr_outlier_count"] == 1
+    assert profiles["x"]["distribution"]["q25"] == 1.75
+    assert profiles["constant"]["distribution"]["stddev_population"] == 0
+    assert "distribution" not in profiles["customer_id"]
+    relationship = next(item for item in context["relationship_evidence"]
+                        if item["x"] == "x" and item["y"] == "y")
+    assert relationship["pearson_r"] == 1 and relationship["paired_rows"] == 4
+    assert all(item["pearson_r"] is None for item in context["relationship_evidence"]
+               if item["y"] == "constant")
+    assert len(context["relationship_evidence"]) <= 6
+    assert context["sample"] == [] and "returned rows only" in context["evidence_scope"]
+    with pytest.raises(DashboardError):
+        design_context(replace(source, truncated=True), base, {}, {}, None)
+
+
+def test_statistical_context_excludes_nonfinite_values_and_reports_missingness():
+    source, _, base, *_ = setup()
+    source = replace(source, columns=["measure"], rows=[[1.0], [float("nan")],
+                     [float("inf")], [None]], chart_spec=None)
+    context = design_context(source, base, {}, {}, None)
+    profile = context["column_profiles"][0]
+    assert profile["non_finite_count"] == 2 and profile["nulls"] == 1
+    assert profile["distribution"]["count"] == 1
+    assert profile["distribution"]["mean"] == 1
+    assert context["relationship_evidence"] == []
+    json.dumps(context, allow_nan=False)
+
+
+def test_same_schema_different_behavior_can_support_different_model_selections():
+    class EvidenceDesigner(Designer):
+        async def complete_task(self, model, prompt, task, **kwargs):
+            self.calls += 1
+            context = json.loads(prompt.split(
+                "Verified context (profiles/sample are bounded, not the entire result): "
+            )[1])
+            assert "LAYER 1" in prompt and "LAYER 2" in prompt and "LAYER 3" in prompt
+            assert "NOT mandatory sections" in prompt
+            distribution = next(p["distribution"] for p in context["column_profiles"]
+                                if p["column"] == "revenue")
+            candidate = context["chart_catalog"][1 if distribution["iqr_outlier_count"] else 0]
+            return json.dumps({"result_id": context["result_id"],
+                               "charts": [{"candidate_id": candidate["candidate_id"]}]
+                               }), TokenUsage()
+
+    source, request, *_ = setup()
+    changed = replace(source, result_id="different-result", chart_spec=None,
+                      rows=[[row[0], row[1], value] for row, value
+                            in zip(source.rows, [0, 0, 0, 1000], strict=True)])
+    selected = []
+    for item in (source, changed):
+        model = EvidenceDesigner({})
+        budget = RequestBudget(2, max_model_calls=1, max_database_calls=0)
+        outcome = asyncio.run(design_dashboard(
+            source=item, request=request.model_copy(update={"result_id": item.result_id}),
+            completer=model, provider="test", model="script", budget=budget,
+        ))
+        assert outcome.status == "READY" and outcome.spec
+        assert len(outcome.spec.widgets) == 1  # No four-perspective quota.
+        assert not outcome.spec.kpis  # No KPI quota either.
+        selected.append(outcome.spec.widgets[0].chart_spec.chart_type)
+        assert budget.model_calls == model.calls == 1 and budget.database_calls == 0
+    assert selected[0] != selected[1]
+
+
+def test_filter_metadata_selection_preserves_actual_scope_and_kpi_definitions():
+    from semantic_text2sql.ai_dashboard_designer import DashboardProposal, _materialize
+    from semantic_text2sql.dashboard_service import DashboardFilterMetadata
+
+    source, _, base, kpis, charts = setup()
+    metadata = DashboardFilterMetadata(field="country", source="stored_result", result_id="result")
+    base = base.model_copy(update={"verified_filter_metadata": [metadata]})
+    key = next(iter(kpis))
+    proposal = DashboardProposal(result_id="result", filter_refs=["filter-0"],
+                                 kpis=[{"kpi_id": key}])
+    outcome = _materialize(proposal, base, kpis, charts, None)
+    assert outcome.verified_filter_metadata == [metadata]
+    assert outcome.applied_constraints == base.applied_constraints
+    assert outcome.kpis[0].definition == kpis[key].definition
+    context = design_context(source, base, kpis, charts, None)
+    assert context["kpi_catalog"][0]["definition"] == kpis[key].definition
+    invalid = proposal.model_copy(update={"filter_refs": ["unknown"]})
+    with pytest.raises(ValueError, match="Unknown verified filter"):
+        _materialize(invalid, base, kpis, charts, None)
+
+
+def test_patch_replacements_removals_order_and_width_preserve_other_widgets():
+    _, _, _, kpis, charts = setup()
+    ids = list(charts)
+    keys = list(kpis)
+    first, *_ = run({"result_id": "result", "charts": [
+        {"candidate_id": ids[0]}, {"candidate_id": ids[1]}],
+        "kpis": [{"kpi_id": keys[0]}, {"kpi_id": keys[1]}]})
+    assert first.spec
+    previous = first.spec
+    patch, *_ = run({"result_id": "result", "mode": "PATCH",
+                     "remove_ids": [keys[0]],
+                     "kpis": [{"kpi_id": keys[2]}],
+                     "charts": [{"candidate_id": ids[2], "replaces_widget_id": ids[0],
+                                 "column_span": 12, "order": 1},
+                                {"candidate_id": ids[1], "order": 0}]}, previous=previous)
+    assert patch.status == "READY" and patch.spec
+    assert patch.spec.widgets[0].widget_id == ids[1]
+    assert patch.spec.widgets[0].chart_spec == previous.widgets[1].chart_spec
+    assert patch.spec.widgets[1].widget_id == ids[0]  # Stable replacement identity.
+    assert patch.spec.widgets[1].column_span == 12
+    assert patch.spec.kpis[0] == previous.kpis[1]
+    assert patch.spec.result_id == previous.result_id
+    invalid, *_ = run({"result_id": "result", "mode": "PATCH", "charts": [
+        {"candidate_id": ids[0], "order": 0}, {"candidate_id": ids[1], "order": 0}
+    ]}, previous=previous)
+    assert invalid.status == "FALLBACK" and invalid.spec.widgets == previous.widgets
 
 
 def test_provider_retry_cannot_exceed_one_specialist_call():

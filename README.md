@@ -28,11 +28,15 @@ Failures, empty results, unexpected NULLs or correctness reviews
 **Conversational dashboards:** ask “Build a sales performance dashboard.” The
 existing Top-layer agent reuses accepted evidence, retrieves missing analyses
 through governed SQL, and invokes the bounded dashboard designer. Widgets keep
-their own source IDs, scopes and grain. It proposes the design first and builds
-only after explicit confirmation of that version. No creation button or mode selection.
+their own source IDs, scopes and grain. Validated designs render immediately,
+without a proposal-confirmation step, creation button or mode selection.
 Select a component and choose **Edit with AI**, or describe a whole-dashboard change.
-Changes require confirmation again; Save and Publish remain separate actions.
-[Approval workflow](docs/DASHBOARD_DESIGN_APPROVAL.md) · [Limits](docs/AGENTIC_DASHBOARDS.md).
+Changes update the validated preview directly; Save and Publish remain separate actions.
+[Autonomous workflow](docs/AUTONOMOUS_DASHBOARDS.md) · [Limits](docs/AGENTIC_DASHBOARDS.md).
+
+Design follows verified **filters → KPIs → complementary plots**, with bounded
+statistical evidence and source-preserving conversational edits.
+[Designer details](docs/INTELLIGENT_DASHBOARD_DESIGN.md).
 
 **Dashboard Studio:** save private drafts, collaborate on design, explicitly
 approve versions, and reopen saved snapshots from the Library after restart—no

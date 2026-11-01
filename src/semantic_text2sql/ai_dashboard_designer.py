@@ -10,7 +10,7 @@ import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from statistics import median
+from statistics import StatisticsError, correlation, mean, median, pstdev
 from time import perf_counter
 from typing import Annotated, Any, Literal
 
@@ -124,6 +124,35 @@ def eligible_catalog(
     return base, kpis, catalog
 
 
+def _numeric_behavior(values: list[int | float]) -> dict[str, Any]:
+    """Describe finite observations only; never derive authoritative business KPIs."""
+    ordered = sorted(values)
+
+    def percentile(fraction: float) -> float:
+        position = (len(ordered) - 1) * fraction
+        low = int(position)
+        high = min(low + 1, len(ordered) - 1)
+        weight = position - low
+        return (1 - weight) * ordered[low] + weight * ordered[high]
+
+    q1, q3 = percentile(.25), percentile(.75)
+    spread = q3 - q1
+    result: dict[str, Any] = {
+        "count": len(ordered), "q25": q1, "q75": q3,
+        "percentile_method": "linear interpolation",
+        "iqr_outlier_count": sum(value < q1 - 1.5 * spread or value > q3 + 1.5 * spread
+                                 for value in ordered),
+    }
+    for name, calculate in (("mean", mean), ("stddev_population", pstdev)):
+        try:
+            value = calculate(ordered)
+            if math.isfinite(value):
+                result[name] = value
+        except (OverflowError, StatisticsError):
+            pass
+    return result
+
+
 def design_context(
     source: RecentResult,
     base: DashboardSpec,
@@ -131,10 +160,15 @@ def design_context(
     charts: dict[str, DashboardWidget],
     previous: DashboardSpec | None,
 ) -> dict[str, Any]:
+    if (source.truncated or source.row_count != len(source.rows)
+            or any(len(row) != len(source.columns) for row in source.rows)):
+        raise DashboardError("Complete, consistent accepted rows are required for design evidence.")
     profiles = []
+    relationship_columns: list[tuple[int, str]] = []
     for index, column in enumerate(source.columns[:24]):
         values = [row[index] for row in source.rows]
-        numeric = [v for v in values if type(v) in {int, float}]
+        raw_numeric = [v for v in values if type(v) in {int, float}]
+        numeric = [v for v in raw_numeric if math.isfinite(v)]
         nonnull = [v for v in values if v is not None]
         item: dict[str, Any] = {
             "column": column,
@@ -142,10 +176,13 @@ def design_context(
             "cardinality": len({repr(v) for v in nonnull}),
         }
         identifier = bool(re.search(r"(?:id$|_id$|email|phone|name|token|password)", column, re.I))
-        if numeric and len(numeric) == len(nonnull) and not identifier:
-            item.update(
-                type="numeric", minimum=min(numeric), maximum=max(numeric), median=median(numeric)
-            )
+        if raw_numeric and len(raw_numeric) == len(nonnull) and not identifier:
+            item.update(type="numeric", non_finite_count=len(raw_numeric) - len(numeric))
+            if numeric:
+                item.update(minimum=min(numeric), maximum=max(numeric), median=median(numeric))
+                item["distribution"] = _numeric_behavior(numeric)
+            if len(numeric) == len(raw_numeric) and len(relationship_columns) < 4:
+                relationship_columns.append((index, column))
         else:
             item.update(
                 type="numeric" if numeric and len(numeric) == len(nonnull) else "text",
@@ -154,7 +191,26 @@ def design_context(
                     Counter(repr(v) for v in nonnull).values(), reverse=True
                 )[:5],
             )
+            if nonnull:
+                largest = max(Counter(repr(v) for v in nonnull).values())
+                item["largest_category_share"] = largest / len(nonnull)
         profiles.append(item)
+    relationships = []
+    for left, (left_index, left_name) in enumerate(relationship_columns):
+        for right_index, right_name in relationship_columns[left + 1:]:
+            pairs = [(row[left_index], row[right_index]) for row in source.rows
+                     if row[left_index] is not None and row[right_index] is not None]
+            if len(pairs) < 3:
+                continue
+            try:
+                coefficient = correlation([a for a, _ in pairs], [b for _, b in pairs])
+                value = round(coefficient, 6) if math.isfinite(coefficient) else None
+            except (StatisticsError, OverflowError):
+                value = None
+            relationships.append({"x": left_name, "y": right_name, "paired_rows": len(pairs),
+                                  "pearson_r": value,
+                                  "limitation": "Descriptive association, not causation; "
+                                                "undefined for constant measures."})
     contract = source.semantic_contract
     return {
         "result_id": source.result_id,
@@ -163,6 +219,9 @@ def design_context(
         "complete": True,
         "rows_count": source.row_count,
         "column_profiles": profiles,
+        "relationship_evidence": relationships,
+        "evidence_scope": "Complete returned rows only, at the accepted SQL grain; "
+                          "not a database-wide population study.",
         "roles": profile_chart_result(
             source.columns[:24], [row[:24] for row in source.rows], sample_rows=0
         )[0],
@@ -182,6 +241,8 @@ def design_context(
                     "calculation",
                     "unit",
                     "source_grain",
+                    "definition",
+                    "periods",
                 }
             )
             for k in kpis.values()
@@ -218,7 +279,8 @@ def design_context(
                 "title": previous.title,
                 "description": previous.description,
                 "theme": previous.theme,
-                "kpis": [{"kpi_id": k.kpi_id, "column_span": k.column_span} for k in previous.kpis],
+                "kpis": [k.model_dump(include={"kpi_id", "column_span", "title", "result_id",
+                                              "metric", "calculation"}) for k in previous.kpis],
                 "charts": [
                     {
                         "candidate_id": w.widget_id,
@@ -234,30 +296,82 @@ def design_context(
     }
 
 
-_PROMPT = """You are the AI dashboard design specialist, not a conversational router or SQL agent.
-This is a proposal for client review, not permission to build. Give each choice a concise
-analytical_objective and reason. Compare alternative combinations and avoid redundant views.
-Only describe findings supported by the supplied evidence; missing analyses need governed SQL.
-Design for the client's objective using ONLY verified KPI IDs and validated chart candidate IDs.
-Independently select the most useful eligible KPIs, primary chart and complementary supporting
-charts; do not repeat a fixed template. Choose order, widths, readable titles/labels and theme.
-Sections are always read-only global filters, KPIs, charts, optional source data in that order.
-Use REPLACE for initial design; PATCH for revisions, listing only changed/added entries and
-explicit remove_ids. Preserve all unmentioned widgets, encodings, filters, definitions and data.
-To replace a selected widget with another eligible metric/chart, use replaces_widget_id;
-the existing widget identity/order is retained while its validated source may change.
-The first chart is the primary visualization. Select at most four KPIs and four charts.
-Axes must exactly match the selected candidate; never invent an alias, metric, formula or data.
-Do not add HTML, JavaScript, Python, executable options, numerical findings or causal claims.
-Descriptions/rationale explain design decisions only. Titles/labels must preserve metric meaning.
-Applied SQL constraints always remain visible. filter_refs select optional verified metadata only;
-global filter editing/recalculation is NOT enabled. Approved themes: green, neutral, contrast.
-If the requested data/metric/breakdown is not in the catalogs, return REQUERY_REQUIRED and precise
-missing_requirements. Never substitute an unrelated KPI or silently request different data.
-Only the existing Top-layer assistant can decide to invoke governed Text-to-SQL.
-If selected_widget_id is present, return PATCH affecting only that exact widget;
-preserve other widgets and all global settings. repair_feedback is a deterministic
-validation error: correct that issue without inventing new data or changing scope.
+_PROMPT = """You are Queryflow's Senior BI Analyst, Exploratory Data Scientist and Dashboard
+Design Architect. You are a bounded LLM specialist called by the existing LangGraph
+orchestrator, not another autonomous agent, SQL generator or chart-template router.
+
+Design an evidence-driven dashboard in THREE decision layers, in this order:
+
+LAYER 1 — FILTERS AND SCOPE
+Select only exact eligible filter_catalog refs that help explain the business objective.
+Remove redundant optional metadata, never the source's applied SQL constraints.
+filter_refs controls displayed verified metadata only: it does NOT change SQL scope,
+filter values, refresh data or enable global interactive filtering. If the requested
+scope is unsupported by retained results, return precise essential missing requirements.
+
+LAYER 2 — KPIs
+Select only exact validated kpi_catalog IDs. Evaluate each definition, source grain,
+units, scope, aggregation behavior, decision usefulness and complementarity.
+Do not infer distinct customers, additive metrics, baselines or formulas from names.
+Include only useful metrics; do not fill slots or impose a minimum KPI count.
+Preserve approved business definitions and never change a calculation through a title.
+
+LAYER 3 — VISUALIZATIONS
+Internally evaluate FOUR perspectives:
+A. PRIMARY ANALYSIS — the most important supported business question or finding.
+B. COMPARISON — meaningful differences across categories, segments, periods or groups.
+C. DISTRIBUTION — observed spread, concentration, skewness, variability and outliers.
+D. RELATIONSHIP — supported associations between measures and business dimensions.
+These are reasoning perspectives, NOT mandatory sections or client choices.
+Use only those that contribute useful information. Multiple comparisons and no
+relationship chart are valid. Never enforce one plot per perspective.
+
+Use actual analytical evidence: complete returned-row profiles, quartiles, variability,
+IQR outliers, concentration, supplied temporal findings, pairwise associations,
+approved metric definitions, semantic grain, filters and provenance.
+An identical schema with different observed behavior may justify different selections.
+Profiles describe the returned SQL grain, not the entire database population.
+A correlation is descriptive, not causal, and may reflect aggregated group behavior.
+Do not invent findings when evidence is absent; optional future ideas are not facts.
+
+Compare COMBINATIONS as an analytical story: relevance, information value,
+complementarity, stakeholder interpretability, evidence quality and faithful encoding.
+Prefer the smallest useful combination, at most four charts and four KPIs.
+Choose a primary chart first, followed by nonredundant supporting plots.
+Choose only exact validated chart_catalog candidate IDs and their actual axes/series.
+Do not select charts merely because of a column name, type or format.
+
+CREATION
+Understand the objective, evaluate evidence, select filters and KPIs, explore the four
+perspectives internally, compare combinations, and return REPLACE using the supplied
+DashboardProposal schema. The application validates and renders automatically.
+Do not ask for approval, create a pending discussion or ask clients to select categories.
+
+EDITING
+Classify the requested change internally: filter/scope; KPI addition/removal/replacement;
+plot addition/removal/replacement; chart type/encoding; layout/order/size/theme/title;
+or further analytical investigation. Prefer PATCH and preserve all unmentioned widgets,
+IDs, snapshots, definitions and scope. remove_ids explicitly removes existing widgets.
+Use replaces_widget_id to replace an existing widget while retaining its identity.
+For layout/style edits reuse evidence; never request SQL just to alter presentation.
+For analytical edits reuse compatible eligible evidence, otherwise return REQUERY_REQUIRED
+to the existing orchestrator. You cannot execute SQL independently.
+If selected_widget_id is present, PATCH only that widget; preserve global settings.
+
+OUTPUT AND SAFETY
+Sections stay verified filters/scope → KPIs → analytical charts → optional source data.
+Use the existing responsive 12-column grid. Each plot has its own row; prefer full width
+(column_span=12) unless a supported narrower width is explicitly useful or requested.
+KPIs may share a row. Preserve actual units, grain and per-widget source result IDs.
+Supported themes: green, neutral, contrast. No new chart types or executable chart code.
+Never join independent sources, transform data, invent values, rename a metric's meaning
+or claim causality. Essential missing evidence requires REQUERY_REQUIRED with precise
+missing_requirements. Optional future investigations belong in further_analyses and
+must not force unrequested SQL. repair_feedback is a validation error: correct only it.
+Keep output compact: omit optional defaults and unselected candidates. Use short reasons
+and one concise rationale explaining the selected combination, without numerical claims.
+Save and Publish remain separate explicit actions, not design confirmation.
+
 Return ONLY JSON matching this schema: {schema}
 Client objective: {objective}
 Verified context (profiles/sample are bounded, not the entire result): {context}
@@ -315,6 +429,9 @@ def _materialize(
         if any(key not in catalog_keys for key in ids):
             raise ValueError("Unknown eligible metric or chart candidate")
     for choices, key_name in ((proposal.kpis, "kpi_id"), (proposal.charts, "candidate_id")):
+        explicit_order = [c.order for c in choices if c.order is not None]
+        if len(set(explicit_order)) != len(explicit_order):
+            raise ValueError("Widget order positions must be unambiguous")
         targets = [c.replaces_widget_id or getattr(c, key_name) for c in choices]
         if len(targets) != len(set(targets)) or set(targets).intersection(proposal.remove_ids):
             raise ValueError("Duplicate or contradictory widget target")
@@ -501,11 +618,20 @@ async def design_dashboard(
     context["selected_widget_id"] = target_widget_id
     context["repair_feedback"] = repair_feedback
     if sources:
+        def behavior(item: RecentResult) -> dict[str, Any]:
+            if item.result_id == source.result_id:
+                return {"reference": "primary context"}
+            secondary = design_context(item, base, {}, {}, None)
+            return {key: secondary[key] for key in (
+                "column_profiles", "relationship_evidence", "evidence_scope",
+            )}
+
         context["source_profiles"] = [
             {
                 "result_id": identity,
                 "db_id": item.db_id,
                 "row_count": item.row_count,
+                "behavior": behavior(item),
                 "roles": profile_chart_result(
                     item.columns[:24], [row[:24] for row in item.rows], sample_rows=0
                 )[0],
@@ -574,10 +700,11 @@ async def design_dashboard(
         proposal = DashboardProposal.model_validate_json(raw)
         if proposal.result_id != source.result_id:
             raise ValueError("Wrong result ID")
-        if proposal.mode == "REQUERY_REQUIRED":
-            if not proposal.missing_requirements.strip():
+        if proposal.mode == "REQUERY_REQUIRED" or proposal.missing_requirements.strip():
+            missing = proposal.missing_requirements.strip()
+            if not missing:
                 raise ValueError("Requery requires explicit missing requirements")
-            status, spec, reason = "REQUERY_REQUIRED", None, proposal.missing_requirements
+            status, spec, reason = "REQUERY_REQUIRED", None, missing
         else:
             if patch_only and previous is not None and proposal.mode != "PATCH":
                 raise ValueError("Saved dashboard edits must preserve unaffected widgets")

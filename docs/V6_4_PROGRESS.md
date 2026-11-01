@@ -1,5 +1,125 @@
 # V6.4 progress checkpoint
 
+## 2026-11-01 — Intelligent three-layer dashboard design and editing
+
+Read the supplied Intelligent BI Dashboard Design & Editing task and reused the
+existing Top-layer agent, specialist, candidate catalogs, PATCH materializer and
+renderers. Reworked specialist prompt into verified filters/scope, eligible KPIs,
+then complementary visualizations. Primary/comparison/distribution/relationship
+are internal perspectives, not mandatory sections or a chart/KPI slot quota.
+
+Extended existing profiles with finite-only quartiles, mean, population deviation,
+IQR outliers, category concentration and up to six paired correlations from four
+non-identifier numeric columns. No samples or categorical literals were added.
+Evidence remains per-result, at returned SQL grain, descriptive/noncausal. Added
+KPI definitions/period metadata and previous widget meaning to the compact context.
+No new model/database calls, agents or independent SQL execution paths.
+
+Explicit edit instructions separate actual scope/metric changes from metadata,
+style/layout or encoding edits. PATCH preserves unmentioned components; conflicting
+explicit order positions now fail validation. AI chart widths are honored with
+each plot anchored in a separate grid row; deterministic defaults remain full
+width and mobile rendering stays bounded. Existing API/schema limits are retained.
+
+New acceptance tests cover behavior-sensitive scripted selections under identical
+schemas, finite/missing/constant statistics, filter/KPI eligibility, stable widget
+replacement IDs, removal/reorder/width, per-source evidence and renderer sizing.
+Existing saved/legacy/multi-turn/read-only/repair tests remain passing.
+652 Python passed/2 skipped (21.47s), 187 frontend/voice passed (509ms),
+Ruff/mypy (65 source files)/diff checks passed. Local context-only benchmark:
+0.0268 → 0.0468 ms median, 2,453 → 3,321 JSON bytes (101 runs, four-row fixture).
+This is added bounded evidence cost, not a production latency/token improvement.
+No live provider or browser pixel QA for this change; no server restart, .env
+changes, commit or push. Details: INTELLIGENT_DASHBOARD_DESIGN.md.
+
+## 2026-11-01 — Bare dashboard request inherits accepted analysis
+
+Confirmed the latest user request "design a dashboard" followed an accepted
+consumption-by-date result in the same session. The model unnecessarily asked for
+the complete objective/metrics/filters again. Top-layer instructions now resolve
+that follow-up from the accepted question/contract/result. Compact context falls
+back to the accepted cache's question, columns and semantic contract if the
+separate conversation state is absent. Cached references still pass existing
+scope and completeness checks. No second classifier or blanket default metric.
+
+Added a regression exercising bare dashboard creation with a cached accepted
+analysis, no ConversationState, no SQL calls, one Top-layer call, unchanged source
+identity and preserved comparison periods. The dashboard handler is simulated;
+existing designer/multi-result/Studio integration tests remain in the full suite.
+Live two-turn check: initial query accepted 21 rows; dashboard routing initially
+filled source_run_id incorrectly, and the bounded correction hit Groq HTTP 429.
+Added explicit field/prompt instructions to use source_result_ids for dashboards
+and null source_run_id/operation. Full live dashboard success is NOT VERIFIED.
+Existing port 8001 and its accepted state remain untouched; no provider/key changes.
+
+Checks: 647 Python passed/2 skipped (22.04s), Ruff/mypy (65 source files) passed.
+
+## 2026-11-01 — Groq strict-schema rejection corrected
+
+Latest run failed before tools with HTTP 400 invalid_request_error. A minimal
+live request confirmed Groq rejected proposal_version/minimum after the scoped
+schema restricted that inactive legacy field to enum=[null]. This was an invalid
+wire-schema constraint, not a missing key or unavailable model. Null-only inactive
+proposal ID/version/approval quote now use plain null schemas without irrelevant
+string/numeric bounds. The canonical Pydantic constraints remain unchanged.
+No validation weakening, plain-JSON workaround, provider/model or .env edits.
+
+Live verification: minimal Groq native-schema request accepted; isolated full
+consumption-by-date API request accepted, 21 rows, no dashboard, one Groq Top-layer
+call and one Groq SQL-generation call, 2.40s. No history writes to the running
+8001 server and no restart, honoring the user's request to restart it personally.
+Regression: scoped inactive legacy fields are null-only while canonical minimum
+remains 1; existing provider schema and native-grammar suites remain covered.
+Checks: 646 Python passed/2 skipped (21.95s), 186 frontend/voice passed (508ms),
+Ruff/mypy/diff checks passed. No commit or push.
+
+## 2026-11-01 — Native artifact routing fixes blocked query path
+
+Latest persisted failure: Top Llama returned a completion/dashboard-goal conflict
+twice, so SQL never ran. A completion-only grammar experiment avoided that pair
+but allowed an ongoing false dashboard goal and repeated SQL. Both failed tests
+are retained as diagnostic evidence, not reported as successful query execution.
+
+Implemented typed optional result_kind on the existing AgentDecision, with native
+Ollama branches decoded artifact-first. Ordinary analysis/chart calls cannot set
+dashboard_goal or invoke dashboard tools. Dashboard workflow remains supported;
+legacy responses without result_kind parse compatibly. Existing canonical scope
+validation and bounded repair remain, with no second router or autonomous agent.
+
+Full isolated live API check using actual configured providers and debit-card DB:
+accepted total consumption grouped/ordered by Date, 21 rows, one Top-layer call,
+one SQL-generation call, no dashboard calls/retries, 16.34s. In-memory test history
+only; the user explicitly declined restart of the current 8001 server, which was
+left running unchanged. Reload is needed before that process uses the fix.
+Checks: 646 Python passed/2 skipped (23.57s), 186 frontend/voice passed (597ms),
+Ruff, mypy (65 source files), diff checks passed. No commit/push or .env changes.
+
+## 2026-11-01 — Plain analytical question incorrectly escalated to dashboard
+
+Read the latest local run for "Total consumption over date": governed SQL
+succeeded, then the Top layer invoked the dashboard designer. Optional future
+analyses caused a requery; later designer responses stopped at 2,048 output tokens
+and failed JSON parsing. No stored results were edited during diagnosis.
+
+Added a leading SQL-only example and explicit output-scope prompt rules: earlier
+dashboards do not authorize a new dashboard for every later metric question.
+Added deterministic decision consistency validation: an ask_data decision cannot
+simultaneously finish after SQL and start a dashboard goal. The existing one-repair
+path fixes this before tool execution; no competing intent router was added.
+Optional further_analyses are now suggestions rather than mandatory requery;
+essential missing_requirements still block incomplete designs. Designer output
+instructions are more compact; completion limits/providers remain unchanged.
+
+Isolated live local Llama check initially exposed the contradictory dashboard_goal.
+After the guard, it returned ask_data / NEW_QUERY / dashboard_goal=null /
+finish_after_tool=true in two model calls (one repair), zero DB calls, 8.66s.
+No actual SQL, session writes or dashboard build ran in this live routing check.
+The existing 8001 server was not restarted, preserving its accepted RAM state.
+Regression evidence: ordinary trend with prior dashboard context, contradictory
+scope repair before SQL, optional future suggestions, multi-source dashboard flow.
+Final checks: 645 Python passed, 2 skipped (23.53s); 186 frontend/voice passed
+(591ms); Ruff, mypy (65 source files), and diff checks passed. No commit/push.
+
 Local KPI comparison-bubble continuation: removed the visible Understood-as strip
 and its response-render call. Each KPI now has a neutral value-side comparison
 bubble. Existing PERIOD_CHANGE cards use exact retained baseline/current evidence,
@@ -700,3 +820,48 @@ API test session, not the browser's active conversation or Dashboard Library.
 Its supporting proposal remains durable; it was not saved/published. No .env
 model changes, commit or push. Production auth/sharing and browser visual QA
 remain outside this verification.
+
+## 2026-11-01 — Compact progress and design-review presentation
+
+Follow-up refinement: conversational scope prompt directs unrelated questions to
+New conversation; dashboard investigation subgoals remain supported. Designer
+requests three supported KPIs where eligible, never a fabricated minimum quota.
+Full-width chart rows and shared KPI icons/sparklines/comparison rendering are
+implemented. Backend observations require proved additive single-time grain.
+642 Python passed/2 skipped, 187 frontend/voice passed, Ruff/mypy/diff passed.
+No live provider or browser QA; backend prompt changes require process reload.
+
+Baseline committed as `5ce519b` before presentation changes. Added five visible
+business stages while preserving inspector timings and raw activity events.
+Added a compact evidence-backed proposal card with explicit confirmation and a
+composer-focused Request changes action. Restored/stale approval controls are
+disabled. Waiting is informational, not a running build. No provider/model or
+SQL execution changes. No push performed.
+
+Checks: 641 Python passed, 2 skipped (22.05s); 186 frontend/voice passed (548ms);
+Ruff and mypy (65 source files) passed. Browser visual QA and live-provider
+rechecks were not run for this presentation-only change.
+## 2026-11-01 — Autonomous dashboard design supersedes approval
+
+Implemented the two supplied autonomous-dashboard specifications. Existing Top
+LangGraph investigation, governed SQL, numerical tools, bounded designer repair,
+typed candidate validation and permanent Studio are reused. Validated designs and
+edits now render immediately. No active confirmation/version-approval dependency;
+legacy proposal tables remain archival and do not seed sources or build authority.
+Historical UI cards have no approval controls. Save/Undo/Versions/Publish remain
+explicit. The designer prompt is the supplied senior BI/EDA/design prompt with
+existing schema and application layout constraints attached.
+
+Incomplete analytical requirements return to the Top layer for bounded governed
+requery. Fallback/invalid designs are terminal structured failures, not completed
+dashboards. Expected revision is captured before model awaits; a racing edit wins
+without being overwritten. Ready dashboards bypass ordinary chart-unavailable UI.
+
+Evidence: 643 Python passed, 2 skipped (21.50s); 186 frontend/voice passed (515ms);
+Ruff, mypy (65 source files), diff checks passed. Tests cover automatic multi-source
+build/save/reopen, saved layout edits with zero SQL, requery/build without approval,
+legacy immutable pending records, failed edits and concurrent revision conflicts.
+Replaced obsolete live-approval integration expectations with archival safeguards;
+legacy store transition tests remain. See AUTONOMOUS_DASHBOARDS.md for scripted
+before/after call counts. No live provider/PostgreSQL/browser pixel QA was run,
+no model/environment changes, no commit/push or backend restart performed.

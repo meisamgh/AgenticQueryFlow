@@ -157,6 +157,11 @@ class OllamaCompleter:
 def _ollama_decision_actions(schema: dict[str, object]) -> dict[str, object]:
     """Constrain action/tool agreement in the grammar, not just after decoding."""
     props = cast(dict[str, object], schema.get("properties", {}))
+    if "result_kind" in props:
+        # Decide the requested artifact before emitting free-text tool arguments.
+        props = {"result_kind": props["result_kind"],
+                 **{key: value for key, value in props.items() if key != "result_kind"}}
+        schema = {**schema, "properties": props}
     if not {"action", "tool", "tool_arguments", "answer", "chart_proposal"}.issubset(props):
         return schema
     answer = {**schema, "properties": {**props, "action": {"type": "string", "enum": ["ANSWER"]},
@@ -166,7 +171,35 @@ def _ollama_decision_actions(schema: dict[str, object]) -> dict[str, object]:
         "tool": cast(dict[str, Any], props["tool"])["anyOf"][0],
         "tool_arguments": cast(dict[str, Any], props["tool_arguments"])["anyOf"][0],
         "answer": {"type": "null"}, "instruction": {"type": "null"}}}
-    return {**schema, "anyOf": [answer, call]}
+    if "finish_after_tool" not in props:
+        return {**schema, "anyOf": [answer, call]}
+    call_props = cast(dict[str, Any], call["properties"])
+    arguments = cast(dict[str, Any], call_props["tool_arguments"])
+    argument_props = arguments.get("properties", {})
+    if "dashboard_goal" not in argument_props:
+        return {**schema, "anyOf": [answer, call]}
+    if "result_kind" in props:
+        ordinary = {**call, "properties": {**call_props,
+            "result_kind": {"type": "string", "enum": ["ANALYSIS", "CHART"]},
+            "tool": {**cast(dict[str, Any], call_props["tool"]), "enum": [
+                tool for tool in cast(dict[str, Any], call_props["tool"])["enum"]
+                if tool not in {"ai_dashboard_designer", "undo_dashboard"}
+            ]},
+            "tool_arguments": {**arguments, "properties": {**argument_props,
+                "dashboard_goal": {"type": "null"}}}}}
+        dashboard = {**call, "properties": {**call_props,
+            "result_kind": {"type": "string", "enum": ["DASHBOARD"]},
+            "finish_after_tool": {"type": "boolean", "enum": [False]}}}
+        return {**schema, "anyOf": [answer, ordinary, dashboard]}
+    # A completed single-tool request cannot also start an unfinished dashboard.
+    # Separate native branches prevent small models emitting that contradiction.
+    finished = {**call, "properties": {**call_props,
+        "finish_after_tool": {"type": "boolean", "enum": [True]},
+        "tool_arguments": {**arguments, "properties": {**argument_props,
+            "dashboard_goal": {"type": "null"}}}}}
+    ongoing = {**call, "properties": {**call_props,
+        "finish_after_tool": {"type": "boolean", "enum": [False]}}}
+    return {**schema, "anyOf": [answer, finished, ongoing]}
 
 
 def _ollama_wire_schema(value: object) -> object:

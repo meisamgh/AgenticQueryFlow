@@ -46,7 +46,7 @@ from semantic_text2sql.conversation import (
 )
 from semantic_text2sql.conversational_agent import ConversationalAnalyticsAgent
 from semantic_text2sql.conversational_bridge import ConversationalAnalyticsBridge
-from semantic_text2sql.dashboard_proposals import ProposalStore, proposal_message, propose
+from semantic_text2sql.dashboard_proposals import ProposalStore
 from semantic_text2sql.dashboard_service import (
     DashboardError,
     DashboardRequest,
@@ -2420,154 +2420,15 @@ def create_app(
     async def assistant_dashboard_handler(
         request: ChatRequest, objective: str, source: RecentResult | ChatResponse | None, undo: bool
     ) -> ChatResponse:
-        pending = (
-            design_proposals.get(request.session_id, request.db_id) if design_proposals else None
-        )
-        if not undo and design_proposals is None:
-            return ChatResponse(
-                session_id=request.session_id,
-                operation="VISUALIZE",
-                resolved_question=objective,
-                message="Dashboard design requires persistent history storage.",
-            )
+        # Legacy proposals remain stored for audit, but never seed or authorize a build.
         if request._dashboard_design_action in {"APPROVE", "REJECT"}:
-            try:
-                if not pending or not design_proposals:
-                    raise DashboardError("No pending dashboard design is available.")
-                if request._dashboard_design_action == "REJECT":
-                    rejected = design_proposals.transition(
-                        request.session_id,
-                        request.db_id,
-                        request._dashboard_proposal_id or "",
-                        request._dashboard_proposal_version or 0,
-                        "REJECTED",
-                    )
-                    return ChatResponse(
-                        session_id=request.session_id,
-                        operation="VISUALIZE",
-                        resolved_question=objective,
-                        message="The design was not built. Tell me what you would like to change.",
-                        dashboard_design_proposal=rejected.summary(),
-                    )
-                quote = request._dashboard_approval_quote
-                if not quote or quote.strip() != request.message.strip():
-                    raise DashboardError(
-                        "Please explicitly confirm the proposed design without additional changes."
-                    )
-                saved_context = studio_context.get()
-                if pending.saved_dashboard_id and (
-                    saved_context is None
-                    or saved_context.dashboard_id != pending.saved_dashboard_id
-                    or saved_context.version != pending.saved_version
-                ):
-                    raise DashboardError(
-                        "The saved dashboard changed. Reopen it and review the design.", 409
-                    )
-                current = dashboard_revisions.get(
-                    request.session_id, request.db_id, pending.document.spec.result_id
-                )
-                if current is not None and current.revision_id != pending.base_revision_id:
-                    raise DashboardError("The dashboard changed. Review a revised proposal.", 409)
-                approved = design_proposals.transition(
-                    request.session_id,
-                    request.db_id,
-                    request._dashboard_proposal_id or "",
-                    request._dashboard_proposal_version or 0,
-                    "APPROVED",
-                    statement=quote,
-                )
-                if approved.missing_requirements:
-                    return ChatResponse(session_id=request.session_id, operation="VISUALIZE",
-                        resolved_question=approved.objective,
-                        message="The design is approved in principle, but needs these analyses: "
-                        + "; ".join(approved.missing_requirements)
-                        + ". Gather evidence, then present the verified mappings for review.",
-                        dashboard_design_proposal=approved.summary())
-                building = design_proposals.transition(
-                    request.session_id,
-                    request.db_id,
-                    approved.proposal_id,
-                    approved.version,
-                    "BUILDING",
-                )
-                built_revision = None
-                bundle_key = (request.session_id, request.db_id, building.document.spec.result_id)
-                prior_bundle = dashboard_bundles.get(bundle_key)
-                try:
-                    building.document.verify()
-                    spec = building.document.spec
-                    current = dashboard_revisions.get(
-                        request.session_id, request.db_id, spec.result_id
-                    )
-                    spec = dashboard_revisions.commit(
-                        request.session_id, spec, current.revision_id if current else None
-                    )
-                    built_revision = spec
-                    approved_evidence = {
-                        key: value.result() for key, value in building.document.results().items()
-                    }
-                    dashboard_bundles[bundle_key] = approved_evidence
-                    design_proposals.transition(
-                        request.session_id,
-                        request.db_id,
-                        building.proposal_id,
-                        building.version,
-                        "READY",
-                    )
-                except Exception:
-                    if built_revision is not None:
-                        dashboard_revisions.rollback(request.session_id, built_revision)
-                    if prior_bundle is None:
-                        dashboard_bundles.pop(bundle_key, None)
-                    else:
-                        dashboard_bundles[bundle_key] = prior_bundle
-                    design_proposals.transition(
-                        request.session_id,
-                        request.db_id,
-                        building.proposal_id,
-                        building.version,
-                        "FAILED",
-                    )
-                    raise
-                retained = building.document.source.result()
-                response = ChatResponse(
-                    session_id=request.session_id,
-                    result_id=spec.result_id,
-                    operation="VISUALIZE",
-                    resolved_question=objective,
-                    generation=retained.generation,
-                    dashboard=spec.model_dump(mode="json"),
-                    message="Your approved dashboard is ready.",
-                    state=accepted_state(request.session_id),
-                )
-                response._dashboard_evidence = approved_evidence
-                return response
-            except DashboardError as exc:
-                blocked = (design_proposals.get(request.session_id, request.db_id)
-                           if design_proposals else None)
-                return ChatResponse(
-                    session_id=request.session_id,
-                    operation="VISUALIZE",
-                    resolved_question=objective,
-                    message=str(exc),
-                    dashboard_design_proposal=blocked.summary() if blocked else None,
-                )
-        if source is None and pending:
-            source = pending.document.source.result()
-        if pending and not undo and request._dashboard_design_action == "REVISE" and (
-            request._dashboard_proposal_id != pending.proposal_id
-            or request._dashboard_proposal_version != pending.version
-        ):
-            return ChatResponse(session_id=request.session_id, operation="VISUALIZE",
+            return ChatResponse(
+                session_id=request.session_id, operation="VISUALIZE",
                 resolved_question=objective,
-                message="The proposal changed. Review the latest design before revising it.",
-                dashboard_design_proposal=pending.summary())
-        if pending and not undo and pending.status == "AWAITING_APPROVAL" and (
-            request._dashboard_design_action == "PROPOSE"
-        ):
-            return ChatResponse(session_id=request.session_id, operation="VISUALIZE",
-                resolved_question=objective,
-                message=proposal_message(pending), dashboard_design_proposal=pending.summary())
+                message="Dashboard design no longer needs approval. Request a new dashboard "
+                        "or edit an existing dashboard; historical proposals are unchanged.",
+                provenance=["dashboard_design_validation_failed"],
+            )
         if source is None:
             return ChatResponse(
                 session_id=request.session_id,
@@ -2585,8 +2446,7 @@ def create_app(
             design_mode="ai", objective=objective,
         )
         previous = dashboard_revisions.get(request.session_id, request.db_id, retained.result_id)
-        if pending and pending.status not in {"READY", "REJECTED"}:
-            previous = pending.document.spec
+
         if previous is None:
             for prior_id in request._dashboard_source_ids:
                 candidate = dashboard_revisions.get(request.session_id, request.db_id, prior_id)
@@ -2597,10 +2457,7 @@ def create_app(
         evidence: dict[str, RecentResult] = dict(dashboard_bundles.get(
             (request.session_id, request.db_id, retained.result_id), {}
         ))
-        if pending:
-            evidence.update(
-                {key: value.result() for key, value in pending.document.results().items()}
-            )
+
         if previous:
             evidence.update(dashboard_bundles.get(
                 (request.session_id, request.db_id, previous.result_id), {}
@@ -2616,12 +2473,7 @@ def create_app(
             retained = saved.document.source.result()
             assert retained.result_id is not None
             design_request = design_request.model_copy(update={"result_id": retained.result_id})
-            previous = (
-                pending.document.spec
-                if pending and pending.saved_dashboard_id == saved.dashboard_id
-                and pending.saved_version == saved.version and pending.status != "READY"
-                else saved.document.spec
-            )
+            previous = saved.document.spec
         if request._dashboard_source_ids:
             selected = set(request._dashboard_source_ids)
             for identity in selected - set(evidence):
@@ -2655,14 +2507,17 @@ def create_app(
             else:
                 provider = os.environ.get("TEXT2SQL_DASHBOARD_PROVIDER") or request.provider
                 model = os.environ.get("TEXT2SQL_DASHBOARD_MODEL") or request.model
+                # Capture the expected revision before awaiting model work. Never
+                # overwrite an edit that arrived while the designer was running.
+                expected = dashboard_revisions.get(
+                    request.session_id, request.db_id, retained.result_id
+                )
                 outcome = await design_dashboard(
                     source=retained, request=design_request,
                     completer=turn_completers.get(provider), provider=provider, model=model,
                     budget=active_request_budget() or RequestBudget(timeout_seconds=15),
                     previous=previous,
-                    patch_only=saved is not None or (
-                        pending is not None and pending.status != "READY"
-                    ),
+                    patch_only=previous is not None,
                     sources=evidence,
                     repair=True,
                     target_widget_id=request._dashboard_widget_id,
@@ -2673,78 +2528,32 @@ def create_app(
                     return ChatResponse(
                         session_id=request.session_id, operation="VISUALIZE",
                         resolved_question=objective, message=outcome.reason,
+                        provenance=([] if outcome.status == "REQUERY_REQUIRED"
+                                    else ["dashboard_design_validation_failed"]),
                         token_usage=usage, call_ledger=ledger,
                     )
                 spec = outcome.spec
-                assert design_proposals is not None
-                document = DashboardDocument(
-                    spec=spec,
-                    source=DashboardSnapshot.capture(retained),
-                    sources={
-                        key: DashboardSnapshot.capture(value) for key, value in evidence.items()
-                    }
-                    if spec.schema_version == 2
-                    else {},
-                )
                 if outcome.status == "FALLBACK":
-                    return ChatResponse(session_id=request.session_id, operation="VISUALIZE",
+                    return ChatResponse(
+                        session_id=request.session_id, operation="VISUALIZE",
                         resolved_question=objective,
-                        message="The design was not validated. The previous proposal is unchanged.",
+                        message="The design was not validated. "
+                                "The previous dashboard is unchanged.",
                         provenance=["dashboard_design_validation_failed"],
-                        dashboard_design_proposal=pending.summary() if pending else None,
-                        token_usage=usage, call_ledger=ledger)
-                proposal = propose(document, objective, outcome.reason, pending, outcome.choices)
-                proposal.investigation_evidence = [
-                    item for item in [*(pending.investigation_evidence if pending else []),
-                                      *request._dashboard_investigation_evidence]
-                    if item.get("result_id") in document.results()
-                ][-8:]
-                for observation in proposal.investigation_evidence:
-                    for column, values in list(observation.get("columns", {}).items())[:2]:
-                        if len(proposal.supported_findings) >= 9:
-                            break
-                        proposal.supported_findings.append(
-                            f"Within an analyzed result, {column} ranged from "
-                            f"{values['minimum']:,.4g} to {values['maximum']:,.4g} "
-                            f"across {values['count']} observed values."
-                        )
-                proposal.discussion = [
-                    *(pending.discussion if pending else []), request.message[:800]
-                ][-20:]
-                if pending and request._dashboard_design_action == "REVISE":
-                    proposal.objective = pending.objective
-                current = dashboard_revisions.get(
-                    request.session_id, request.db_id, retained.result_id
+                        token_usage=usage, call_ledger=ledger,
+                    )
+                # Validate snapshots before exposing a revision or replacing retained evidence.
+                document = DashboardDocument(
+                    spec=spec, source=DashboardSnapshot.capture(retained),
+                    sources={key: DashboardSnapshot.capture(value)
+                             for key, value in evidence.items()}
+                    if spec.schema_version == 2 else {},
                 )
-                proposal.base_revision_id = current.revision_id if current else None
-                proposal.saved_dashboard_id = saved.dashboard_id if saved else None
-                proposal.saved_version = saved.version if saved else None
-                proposal = design_proposals.save_candidate(
-                    request.session_id,
-                    request.db_id,
-                    proposal,
-                    pending.version if pending else None,
+                document.verify()
+                spec = dashboard_revisions.commit(
+                    request.session_id, spec, expected.revision_id if expected else None
                 )
-                return ChatResponse(
-                    session_id=request.session_id,
-                    result_id=retained.result_id,
-                    operation="VISUALIZE",
-                    resolved_question=objective,
-                    message=proposal_message(proposal),
-                    dashboard_design_proposal=proposal.summary(),
-                    token_usage=usage,
-                    call_ledger=ledger,
-                    generation=source.generation if isinstance(source, ChatResponse) else None,
-                    state=source.state
-                    if isinstance(source, ChatResponse)
-                    else accepted_state(request.session_id),
-                    state_commit_pending=source.state_commit_pending
-                    if isinstance(source, ChatResponse)
-                    else False,
-                    state_expected_version=source.state_expected_version
-                    if isinstance(source, ChatResponse)
-                    else None,
-                )
+                dashboard_bundles[(request.session_id, request.db_id, spec.result_id)] = evidence
             response = ChatResponse(
                 session_id=request.session_id, result_id=retained.result_id,
                 operation="VISUALIZE", resolved_question=objective,
@@ -2764,12 +2573,11 @@ def create_app(
             return ChatResponse(
                 session_id=request.session_id, operation="VISUALIZE", resolved_question=objective,
                 message=str(exc), token_usage=usage, call_ledger=ledger,
+                provenance=["dashboard_design_validation_failed"],
             )
 
     def dashboard_summary(session: str, db: str, result: str) -> dict[str, Any] | None:
-        pending = design_proposals.get(session, db) if design_proposals else None
-        if pending and pending.status != "READY":
-            return {"pending_proposal": pending.summary()}
+
         saved = studio_context.get()
         spec = (saved.document.spec if saved is not None
                 else dashboard_revisions.get(session, db, result))

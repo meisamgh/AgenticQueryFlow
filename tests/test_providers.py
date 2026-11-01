@@ -763,7 +763,7 @@ def test_agent_decision_schema_enumerates_every_allowed_value() -> None:
     properties = schema["properties"]
     assert schema["required"] == [
         "action", "intent", "tool", "tool_arguments", "instruction", "answer",
-        "finish_after_tool", "chart_proposal",
+        "finish_after_tool", "chart_proposal", "result_kind",
     ]
     assert properties["action"]["enum"] == [
         "ANSWER",
@@ -806,9 +806,9 @@ def test_agent_decision_schema_enumerates_every_allowed_value() -> None:
     ]
     assert schema["additionalProperties"] is False
     from semantic_text2sql.conversational_agent import _DECISION_EXAMPLES
-    assert len(_DECISION_EXAMPLES) == 5
+    assert len(_DECISION_EXAMPLES) == 6
     assert {example["tool_arguments"]["design_action"] for example in _DECISION_EXAMPLES
-            if example.get("tool") == "ai_dashboard_designer"} == {"PROPOSE", "APPROVE"}
+            if example.get("tool") == "ai_dashboard_designer"} == {"PROPOSE", "REVISE"}
 
 
 def test_groq_native_structured_output_carries_full_json_schema() -> None:
@@ -964,7 +964,7 @@ def test_justdowork_structured_output_uses_forced_tool_schema() -> None:
     schema: dict[str, Any] = forced_tool["input_schema"]
     assert schema["required"] == [
         "action", "intent", "tool", "tool_arguments", "instruction", "answer",
-        "finish_after_tool", "chart_proposal",
+        "finish_after_tool", "chart_proposal", "result_kind",
     ]
     assert schema["properties"]["action"]["enum"] == [
         "ANSWER",

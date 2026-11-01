@@ -2,16 +2,15 @@
 
 ## Client workflow
 
-1. Ask Queryflow to design a dashboard; review its proposal and explicitly confirm
-   the version before it is built. Phase 4 handles evidence retrieval and design.
+1. Ask Queryflow to design a dashboard; the existing agent investigates, validates
+   and displays it immediately. No design confirmation is required.
 2. Choose **Save**, name it, and explicitly retain a private **Draft**.
 3. Open **Dashboard Library** in the sidebar. Saved dashboards reopen from their
    retained snapshot, even after a server restart, without a model or business
    database query.
 4. Request design changes using **Edit with AI**. The existing LangGraph Top
-   layer invokes the existing bounded AI dashboard designer. It discusses proposed
-   changes first; confirmation creates the unsaved preview. Pending discussions
-   survive restart, and revisions preserve unaffected choices. No new agent exists.
+   layer invokes the existing bounded AI dashboard designer and displays a validated
+   unsaved preview directly. Revisions preserve unaffected choices. No new agent exists.
 5. **Save** retains the preview as a new draft revision; **Save as New** creates
    an independent dashboard. **Approve & publish** requires explicit confirmation
    of the saved version. It does not publish a public link.

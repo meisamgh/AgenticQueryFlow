@@ -45,6 +45,7 @@ class KPISpec(StrictModel):
     baseline: float | None = None
     current: float | None = None
     periods: list[str] = Field(default_factory=list, max_length=2)
+    sparkline: list[float] = Field(default_factory=list, max_length=500)
 
 
 class DashboardWidget(StrictModel):
@@ -353,6 +354,16 @@ def eligible_kpis(
                                     "explicit periods with matching group populations.",
                                 ),
                             )
+    chart = source.chart_spec or temporal_chart
+    if (chart and chart.time_format in {"month", "year", "day"}
+            and grain == [chart.x] and chart.x in source.columns):
+        position = source.columns.index(chart.x)
+        ordered = sorted(source.rows, key=lambda row: str(row[position]))
+        if len({str(row[position]) for row in ordered}) == len(ordered):
+            for metric in result:
+                if metric.calculation in {"TOTAL", "AVERAGE"} and metric.metric in additive:
+                    index = source.columns.index(metric.metric)
+                    metric.sparkline = [float(row[index]) for row in ordered]
     return result[:limit]
 
 

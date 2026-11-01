@@ -1,4 +1,11 @@
-# Human-reviewed dashboard design
+# Historical implementation — superseded
+
+The workflow below is archived. Dashboard creation and edits now render
+automatically after validation; see [AUTONOMOUS_DASHBOARDS.md](AUTONOMOUS_DASHBOARDS.md).
+Historical pending designs are never silently approved, built or published.
+Save and Publish remain separate explicit actions.
+
+## Human-reviewed dashboard design (historical)
 
 The existing LangGraph assistant is the only conversational orchestrator. It
 chooses relevant investigations, reuses accepted evidence, and delegates missing
@@ -163,3 +170,41 @@ adds per-choice reasoning. `dashboard_studio.py`/`dashboard_store.py` expose
 authorized pending discussions while preserving existing saved documents.
 `models.py` adds only additive response/private request metadata. Frontend changes
 are confined to existing app/Studio presentation, CSS and cache-version tags.
+
+### Client design review presentation
+
+The chat shows five compact stages: Understand, Investigate, Review design,
+Build, Ready. Only observed stages are marked completed; unused stages stay gray.
+The inspector retains detailed technical timings. Live activity and elapsed time
+come from existing job events, without estimated percentages.
+
+`web/design_review.js` renders actual proposal items, reasons, supported findings
+and missing evidence. Waiting for approval is an amber, non-spinning pause.
+Confirm design sends the existing conversational approval message; Request changes
+only focuses the composer. No additional planning or SQL path is introduced.
+Restored historical cards cannot approve a stale version, and starting a new turn
+disables earlier confirmation buttons. Request a current proposal to confirm it.
+Axis mappings are not fabricated when absent from the compact proposal metadata.
+
+Verified: 641 Python tests passed, 2 skipped; 186 frontend/voice tests passed;
+Ruff, mypy and diff checks passed. Browser pixel-level review is not verified.
+
+### Follow-up scope and dashboard arrangement
+
+The Top-layer prompt now treats ordinary messages after an accepted analysis as
+follow-ups and directs independent questions to New conversation. It remains the
+sole natural-language decision-maker; this is a model instruction, not a second
+classifier. Separate governed evidence requests within one dashboard goal remain
+permitted. The designer recommends scope/filters, then at least three eligible
+KPIs when supported, followed by complementary single-/multi-column charts.
+Missing KPI evidence must be explained rather than invented.
+
+Every dashboard chart renders full-width on its own row. KPIs reuse the existing
+semantic icon and comparison component. Typed backend sparkline observations are
+provided only for proved additive measures at a single, unique temporal grain;
+multidimensional results are not silently aggregated to invent a trend.
+Percentage bubbles use existing explicit comparison-period evidence only.
+No additional SQL or LLM calls are introduced by this rendering change.
+
+Checks: 642 Python passed, 2 skipped; 187 frontend/voice passed; Ruff/mypy/diff
+checks passed. Live local-model adherence and browser visual QA were not rerun.

@@ -235,7 +235,7 @@ test("editing is an explicit unsaved preview; save and publish require separate 
   assert.equal(posts[2][1].approve, true);
   assert.equal(posts[2][1].expected_version, 2);
 });
-test("a design proposal stays conversational until explicit confirmation", async () => {
+test("a failed edit preserves the dashboard and a valid edit renders without confirmation", async () => {
   const record = saved(), posts = [];
   const env = setup(async (path, options) => {
     if (!options) return path === "/api/studio"
@@ -244,8 +244,7 @@ test("a design proposal stays conversational until explicit confirmation", async
     posts.push(JSON.parse(options.body));
     if (posts.length === 1) return {
       preview_id: null,
-      message: "Proposed design: higher contrast. Would you like to confirm?",
-      design_proposal: { status: "AWAITING_APPROVAL", proposal_id: "design", version: 3 },
+      message: "Design validation failed. The existing dashboard is unchanged.",
     };
     return { preview_id: "approved", spec: { ...record.document.spec, theme: "contrast" } };
   });
@@ -254,15 +253,15 @@ test("a design proposal stays conversational until explicit confirmation", async
   const input = all(env.body).find((e) => e["aria-label"] === "Saved dashboard design change");
   input.value = "Use higher contrast";
   await find(env.body, "Edit with AI").click();
-  assert.equal(env.renders(), 1, "proposal must not replace or construct a chart");
-  assert.ok(all(env.body).some((e) => e.textContent?.includes("Would you like to confirm?")));
+  assert.equal(env.renders(), 1, "a failed edit must not replace the chart");
+  assert.ok(all(env.body).some((e) => e.textContent?.includes("Design validation failed")));
   assert.equal(record.version, 1);
-  input.value = "I confirm this design";
+  input.value = "Use higher contrast and preserve the data";
   await find(env.body, "Edit with AI").click();
   assert.equal(env.renders(), 2);
   assert.equal(posts.length, 2);
-  assert.equal(posts[1].message, "I confirm this design");
-  assert.equal(record.version, 1, "approval must not implicitly save or publish");
+  assert.equal(posts[1].message, "Use higher contrast and preserve the data");
+  assert.equal(record.version, 1, "design edits must not implicitly save or publish");
 });
 
 test("viewer controls are read-only and the studio retains responsive layout", async () => {

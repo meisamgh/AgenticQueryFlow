@@ -1,12 +1,15 @@
 # AI dashboard designer (Phase 2)
 
+Current three-layer reasoning and editing rules:
+[Intelligent BI dashboard design](INTELLIGENT_DASHBOARD_DESIGN.md).
+
 The existing LangGraph assistant owns conversation and analytical changes. Its
 `ai_dashboard_designer` tool is a bounded specialist, not another agent. The
 Phase 1 deterministic dashboard remains the backend fallback. Phase 4 removes
 manual creation/design-mode controls; see AGENTIC_DASHBOARDS.md for the current UX.
-Conversational designs now require explicit human review and confirmation before
-rendering. See DASHBOARD_DESIGN_APPROVAL.md; the legacy explicit API remains a
-compatibility interface rather than the conversational approval entry point.
+Conversational designs render immediately after deterministic validation, without
+client approval. See AUTONOMOUS_DASHBOARDS.md. The legacy explicit API remains a
+compatibility interface; Save and Publish are still separate explicit actions.
 
 ## Usage
 

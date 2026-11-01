@@ -9,8 +9,8 @@ There is no Create dashboard button or business-user design-mode selector.
 
 User objective → Top decision → accepted evidence/business definitions → distinct
 governed `ask_data` objectives for missing evidence → existing dashboard designer
-→ deterministic validation → persisted design proposal → explicit human approval
-→ automatic conversation preview. [Detailed approval protocol](DASHBOARD_DESIGN_APPROVAL.md).
+→ deterministic validation → automatic conversation preview.
+[Autonomous design](AUTONOMOUS_DASHBOARDS.md).
 
 `ToolInput.dashboard_goal` preserves the original goal across tools; bounded
 request-local results retain each accepted SQL/contract/result ID. Independent
@@ -22,8 +22,8 @@ the final assistant from claiming a completed dashboard.
 The designer remains a specialist, not an autonomous agent. It independently
 chooses eligible KPI/chart IDs, order, widths, titles/labels and approved theme.
 Newly selected analyses must be represented by a KPI or chart; the Top layer must
-not retrieve unrelated evidence. The conversational approval path does not present
-a fallback as an approved AI design; failed edits retain the previous proposal.
+not retrieve unrelated evidence. The conversational path does not present
+a fallback as a validated AI design; failed edits retain the previous dashboard.
 The legacy explicit specialist API retains its fallback compatibility. A repairable proposal error
 permits **one** targeted correction, with both calls/failed usage in the ledger.
 Provider/deadline failures do not trigger an unbounded loop or SQL refresh.
@@ -63,7 +63,7 @@ SQLite revision payload. The anchor remains for backward compatibility. No new
 database is introduced: versioned JSON accepts legacy single-result records and
 new multi-result documents. Additive migration 3 retains proposal discussions and
 their evidence in the same history database. Restart/open validates retained
-evidence without SQL or an LLM. Pending discussions persist before approval;
+evidence without SQL or an LLM. Historical proposal discussions remain archival;
 permanent dashboard Library entries still require Save. Role/version changes during model work reject stale
 or unauthorized previews. External sharing remains disabled; see
 [Studio security](DASHBOARD_STUDIO.md).
@@ -105,10 +105,9 @@ Measured scripted call counts (not live-provider timing):
 
 | Scenario | Top calls | SQL generation calls | Designer calls |
 |---|---:|---:|---:|
-| Three-query proposal | 4 | 3 | 1 |
-| Confirm complete proposal | 1 | 0 | 0 |
-| Add missing metric proposal to saved dashboard | 2 | 1 | 1 |
-| Valid selected-widget proposal with retained data | 1 | 0 | 1 |
+| Three-query automatic dashboard | 4 | 3 | 1 |
+| Add missing metric to saved dashboard | 2 | 1 | 1 |
+| Valid selected-widget edit with retained data | 1 | 0 | 1 |
 | Repair an invalid proposal | outside specialist | 0 | 2 maximum |
 | Saved reopen | 0 | 0 | 0 |
 

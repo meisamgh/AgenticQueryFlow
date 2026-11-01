@@ -58,12 +58,17 @@ def test_schema_scopes_sources_and_proposals_without_mutating_canonical_schema()
     )
     empty = _scoped_decision_schema({})
     assert "ai_dashboard_designer" not in empty["properties"]["tool"]["anyOf"][0]["enum"]
+    inactive = empty["properties"]["tool_arguments"]["anyOf"][0]["properties"]
+    for name in ("proposal_id", "proposal_version", "approval_quote"):
+        assert inactive[name] == {"type": "null", "enum": [None]}
+    original = AGENT_DECISION_SCHEMA["properties"]["tool_arguments"]["anyOf"][0]["properties"]
+    assert original["proposal_version"]["minimum"] == 1
 
 
 def test_native_llama_grammar_couples_action_and_tool_fields():
     schema = _ollama_wire_schema(_scoped_decision_schema({}))
     consistent = _ollama_decision_actions(schema)
-    answer, tool = consistent["anyOf"]
+    answer, tool, ongoing = consistent["anyOf"]
     assert answer["properties"]["action"]["enum"] == ["ANSWER"]
     assert answer["properties"]["tool"] == {"type": "null"}
     assert answer["properties"]["tool_arguments"] == {"type": "null"}
@@ -72,6 +77,17 @@ def test_native_llama_grammar_couples_action_and_tool_fields():
     assert tool["properties"]["tool_arguments"]["type"] == "object"
     assert tool["properties"]["answer"] == {"type": "null"}
     assert "ai_dashboard_designer" not in tool["properties"]["tool"]["enum"]
+    assert "undo_dashboard" not in tool["properties"]["tool"]["enum"]
+    assert next(iter(tool["properties"])) == "result_kind"
+    assert tool["properties"]["result_kind"]["enum"] == ["ANALYSIS", "CHART"]
+    assert tool["properties"]["tool_arguments"]["properties"]["dashboard_goal"] == {
+        "type": "null",
+    }
+    assert ongoing["properties"]["result_kind"]["enum"] == ["DASHBOARD"]
+    assert ongoing["properties"]["finish_after_tool"]["enum"] == [False]
+    assert ongoing["properties"]["tool_arguments"]["properties"]["dashboard_goal"]["type"] == [
+        "string", "null",
+    ]
 
 
 def test_invalid_source_reference_is_repaired_before_any_tool_executes(registry, tmp_path):

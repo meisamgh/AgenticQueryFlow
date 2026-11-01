@@ -108,6 +108,111 @@ def test_agent_answers_greeting_with_one_model_call_and_no_sql(
     assert calls == []
 
 
+def test_plain_trend_question_stops_after_sql_even_with_a_previous_dashboard(
+    registry: Any, tmp_path: Any,
+) -> None:
+    calls: list[str] = []
+    completer = Completer([{
+        "action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
+        "tool_arguments": {"objective": "Total consumption over date",
+                           "operation": "NEW_QUERY", "dashboard_goal": None},
+        "finish_after_tool": True,
+    }])
+    agent = _agent(registry, tmp_path, completer, calls)
+    agent.dashboard_inspector = lambda *_: {
+        "title": "Earlier dashboard", "source_result_ids": ["old-result"],
+    }
+
+    async def forbidden(*args: Any, **kwargs: Any) -> ChatResponse:
+        pytest.fail("An ordinary metric question must not invoke the dashboard designer")
+
+    agent.dashboard_handler = forbidden
+    response = asyncio.run(agent.run(ChatRequest(
+        session_id="ordinary", db_id="shop", message="Total consumption over date",
+    )))
+    assert response.generation and response.generation.accepted
+    assert response.dashboard is None and response.dashboard_design_proposal is None
+    assert calls == ["Total consumption over date"]
+    assert completer.calls == 1
+    assert "does NOT make every" in completer.prompts[0]
+    assert "dashboard_goal=null" in completer.prompts[0]
+
+
+def test_bare_dashboard_request_uses_accepted_cached_analysis_without_requery(
+    registry: Any, tmp_path: Any,
+) -> None:
+    from dataclasses import replace
+
+    from test_dashboard import snapshot
+
+    from semantic_text2sql.dashboard_service import DashboardRequest, build_dashboard
+
+    source = replace(snapshot(), db_id="shop")
+    calls: list[str] = []
+    completer = Completer([{
+        "action": "CALL_TOOL", "intent": "VISUALIZE", "tool": "ai_dashboard_designer",
+        "result_kind": "DASHBOARD",
+        "tool_arguments": {"objective": source.question, "source_result_ids": [source.result_id]},
+    }])
+    agent = _agent(registry, tmp_path, completer, calls)
+    agent.get_last_response = lambda *_: source
+    received = []
+
+    async def design(request, objective, retained, undo):
+        received.append((objective, retained.result_id))
+        spec = build_dashboard(DashboardRequest(
+            session_id=request.session_id, db_id="shop", result_id=source.result_id,
+        ), lambda *_: source)
+        return ChatResponse(session_id=request.session_id, operation="VISUALIZE",
+                            resolved_question=objective,
+                            result_id=source.result_id, generation=source.generation,
+                            dashboard=spec.model_dump(mode="json"), message="Dashboard ready")
+
+    agent.dashboard_handler = design
+    response = asyncio.run(agent.run(ChatRequest(
+        session_id="cached-dashboard", db_id="shop", message="design a dashboard",
+    )))
+    assert response.dashboard and response.result_id == source.result_id, (
+        response.message, response.call_ledger, received,
+    )
+    assert received == [(source.question, source.result_id)]
+    assert calls == [] and completer.calls == 1
+    context = json.loads(completer.prompts[0].split("\nContext: ")[1])
+    assert context["previous_question"] == source.question
+    assert context["result_columns"] == source.columns
+    assert context["accepted_analytical_contract"]["comparison_periods"] == ["202601", "202602"]
+    assert "Do not ask the user to re-enter known metrics" in completer.prompts[0]
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_ordinary_query_repairs_contradictory_dashboard_goal_before_running_tools(
+    registry: Any, tmp_path: Any, typed: bool,
+) -> None:
+    calls: list[str] = []
+    decision = {
+        "action": "CALL_TOOL", "intent": "NEW_QUERY", "tool": "ask_data",
+        "tool_arguments": {"objective": "Total consumption over date",
+                           "operation": "NEW_QUERY", "dashboard_goal": None},
+        "finish_after_tool": True,
+    }
+    bad = {**decision, "tool_arguments": {
+        **decision["tool_arguments"], "dashboard_goal": "Total consumption over date",
+    }}
+    if typed:
+        bad.update(result_kind="ANALYSIS", finish_after_tool=False)
+        decision["result_kind"] = "ANALYSIS"
+    completer = Completer([bad, decision])
+    agent = _agent(registry, tmp_path, completer, calls)
+    response = asyncio.run(agent.run(ChatRequest(
+        session_id="completion-scope", db_id="shop", message="Total consumption over date",
+    )))
+    assert response.generation and response.generation.accepted
+    assert response.dashboard is None
+    assert calls == ["Total consumption over date"] and completer.calls == 2
+    assert "dashboard_goal" in completer.prompts[1]
+    assert response.call_ledger[0].status == "FAILED"
+
+
 def test_agent_inspects_historical_reference_without_sql(registry: Any, tmp_path: Any) -> None:
     calls: list[str] = []
     completer = Completer([
@@ -860,7 +965,7 @@ def test_structured_schema_enumerates_every_allowed_value() -> None:
     ]
     assert AGENT_DECISION_SCHEMA["required"] == [
         "action", "intent", "tool", "tool_arguments", "instruction", "answer",
-        "finish_after_tool", "chart_proposal",
+        "finish_after_tool", "chart_proposal", "result_kind",
     ]
 
     from semantic_text2sql.conversational_agent import _DECISION_EXAMPLES, AgentDecision, ToolInput

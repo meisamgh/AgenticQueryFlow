@@ -162,6 +162,18 @@ test('pending dashboard designs are discussion, not chart failures or executed d
   }
   assert.equal(context.responseStatus({operation:'EXPLAIN_RESULT',
     provenance:['assistant_service_failure']}, []).status, 'ASSISTANT UNAVAILABLE');
+  for (const pending of [null, {status:'AWAITING_APPROVAL'}]) {
+    const body = {operation:'VISUALIZE', provenance:['dashboard_design_validation_failed'],
+      dashboard_design_proposal: pending, presentation_state:{mode:'chart'}};
+    assert.equal(context.responseStatus(body, []).status, 'DESIGN NOT VALIDATED');
+    assert.equal(context.responseStatus(body, []).explanatory, true);
+    assert.equal(context.presentationMode(body), 'explanation');
+  }
+  const ready = {operation: 'VISUALIZE', dashboard: {result_id: 'accepted'},
+    generation: {accepted: true}, presentation_state: {mode: 'chart'}};
+  assert.equal(context.presentationMode(ready), 'explanation');
+  assert.equal(context.responseStatus(ready, []).status, 'DASHBOARD READY');
+  assert.equal(context.responseStatus(ready, []).explanatory, true);
 });
 test('database is configured privately and the header hides the session ID', () => {
   const composer = markup.split('<form class="composer"')[1].split('</form>')[0];
@@ -350,6 +362,19 @@ test('pipeline bars represent measured stage time and leave missing stages unmea
   assert.ok(labels.includes('Model calls'));
   assert.ok(!labels.includes('Configured models'));
   assert.equal(call.className, 'pipeline-run pipeline-model-call');
+  const repeated = {kind: 'MODEL', component: 'conversational_agent', task: 'decision',
+    provider: 'ollama', effective_model: 'llama', latency_ms: 100, input_tokens: 10, output_tokens: 2};
+  pipeline(fragment, {}, {call_ledger: [repeated, {...repeated, latency_ms: 200},
+    {kind: 'MODEL', component: 'recovery_reasoning_1', latency_ms: 50, input_tokens: 3},
+    {kind: 'MODEL', component: 'recovery_reasoning_2', status: 'FAILED'},
+    {...repeated, effective_model: 'different'}]}, {});
+  const grouped = container.children.filter(row => row.className === 'pipeline-run pipeline-model-call');
+  assert.equal(grouped.length, 3);
+  assert.ok(grouped[0].children[1].textContent.includes('2 calls · 300 ms · 24 tokens'));
+  assert.equal(grouped[1].children[0].textContent, 'recovery_reasoning');
+  assert.ok(grouped[1].children[1].textContent.includes('50 ms (partial)'));
+  assert.ok(grouped[1].children[1].textContent.includes('3 tokens (partial)'));
+  assert.ok(grouped[1].children[1].textContent.includes('1 failed'));
 });
 test('context inspector follows the flat prototype layout using live response facts', () => {
   assert.ok(markup.includes('<span>Context inspector</span>'));
@@ -1062,21 +1087,21 @@ test('Map tab requires a map request and complete valid coordinates', () => {
 vm.runInContext(source.slice(source.indexOf('function visiblePipelineStage('), source.indexOf('async function send(')), context);
 test('progress supports recovery tools without marking unobserved stages complete', () => {
   const classes = new Map();
-  const stages = ['retrieval', 'generation', 'recovery'].map(stage => ({
+  const stages = ['conversation', 'investigation', 'build'].map(stage => ({
     dataset: { stage },
     classList: { toggle(name, enabled) { classes.set(`${stage}:${name}`, enabled); } },
   }));
   const progress = { dataset: {}, querySelectorAll: () => stages };
   context.updatePipeline(progress, 'generation', 'running');
   context.updatePipeline(progress, 'recovery_values', 'running');
-  assert.equal(classes.get('recovery:active'), true);
-  assert.equal(classes.get('generation:complete'), true);
-  assert.equal(classes.get('retrieval:complete'), false);
+  assert.equal(classes.get('investigation:active'), true);
+  assert.equal(classes.get('investigation:complete'), false);
+  assert.equal(classes.get('build:complete'), false);
 });
 
 test('progress colors fast stages captured only in backend event history', () => {
   const classes = new Map();
-  const stages = ['conversation', 'retrieval', 'grounding', 'generation'].map(stage => ({
+  const stages = ['conversation', 'investigation', 'build'].map(stage => ({
     dataset: { stage },
     classList: { toggle(name, enabled) { classes.set(`${stage}:${name}`, enabled); } },
   }));
@@ -1088,12 +1113,12 @@ test('progress colors fast stages captured only in backend event history', () =>
     { stage: 'generation' },
   ]);
   assert.equal(classes.get('conversation:complete'), true);
-  assert.equal(classes.get('grounding:complete'), true);
-  assert.equal(classes.get('generation:active'), true);
+  assert.equal(classes.get('investigation:active'), true);
+  assert.equal(classes.get('build:complete'), false);
 });
-test('successful result colors review and marks unused recovery as not needed', () => {
+test('successful result marks unused design and build stages as not needed', () => {
   const classes = new Map();
-  const stages = ['execution', 'result_review', 'recovery'].map(stage => ({
+  const stages = ['investigation', 'design_review', 'build', 'completed'].map(stage => ({
     dataset: { stage },
     classList: { toggle(name, enabled) { classes.set(`${stage}:${name}`, enabled); } },
   }));
@@ -1101,10 +1126,23 @@ test('successful result colors review and marks unused recovery as not needed', 
   context.updatePipeline(progress, 'completed', 'completed', [
     { stage: 'execution' },
   ], { generation: { accepted: true } });
-  assert.equal(classes.get('result_review:complete'), false);
-  assert.equal(classes.get('result_review:skipped'), true);
-  assert.equal(classes.get('recovery:skipped'), true);
-  assert.equal(classes.get('recovery:complete'), false);
+  assert.equal(classes.get('investigation:complete'), true);
+  assert.equal(classes.get('design_review:skipped'), true);
+  assert.equal(classes.get('build:skipped'), true);
+  assert.equal(classes.get('build:complete'), false);
+  assert.equal(classes.get('completed:complete'), true);
+});
+test('approval pause is amber and does not claim a ready dashboard', () => {
+  const classes = new Map();
+  const stages = ['investigation', 'design_review', 'build', 'completed'].map(stage => ({
+    dataset: {stage}, classList: {toggle(name, enabled) { classes.set(`${stage}:${name}`, enabled); }},
+  }));
+  context.updatePipeline({dataset: {}, querySelectorAll: () => stages}, 'completed', 'completed', [],
+    {dashboard_design_proposal: {status: 'AWAITING_APPROVAL'}});
+  assert.equal(classes.get('design_review:awaiting'), true);
+  assert.equal(classes.get('design_review:active'), false);
+  assert.equal(classes.get('completed:complete'), false);
+  assert.equal(classes.get('build:complete'), false);
 });
 vm.runInContext(source.slice(source.indexOf('function usageTotal('), source.indexOf('function renderAttempts(')), context);
 for (const [name, body, generation, expected] of [
