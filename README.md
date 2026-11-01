@@ -2,7 +2,9 @@
 
 Queryflow is a conversational analytics app for **SQLite** and allowlisted **PostgreSQL** databases. Ask questions in natural language, inspect the generated read-only SQL and actual results, refine an analysis through follow-up questions, or visualize an accepted result.
 
-[Watch the demo] (https://github.com/user-attachments/assets/5b4ff125-4aac-4301-9cff-1d15e5996555)
+[Watch the demo] 
+
+https://github.com/user-attachments/assets/5b4ff125-4aac-4301-9cff-1d15e5996555
 
 <p align="center">
   <img src="Arch-pic.png" alt="Queryflow architecture" width="900" />
