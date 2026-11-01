@@ -9,6 +9,7 @@ from test_dashboard import snapshot
 
 from semantic_text2sql.ai_dashboard_designer import (
     DashboardRevisions,
+    dashboard_timeout,
     design_context,
     design_dashboard,
     eligible_catalog,
@@ -16,6 +17,20 @@ from semantic_text2sql.ai_dashboard_designer import (
 from semantic_text2sql.dashboard_service import DashboardError, DashboardRequest
 from semantic_text2sql.models import TokenUsage
 from semantic_text2sql.runtime import RequestBudget, active_request_budget
+
+
+def test_local_designer_timeout_honors_shared_deadline_and_configuration(monkeypatch):
+    monkeypatch.delenv("TEXT2SQL_DASHBOARD_TIMEOUT_SECONDS", raising=False)
+    budget = RequestBudget(180)
+    assert dashboard_timeout("ollama", budget) == 120
+    assert dashboard_timeout("groq", budget) == 12
+    monkeypatch.setenv("TEXT2SQL_DASHBOARD_TIMEOUT_SECONDS", "90")
+    assert dashboard_timeout("ollama", budget) == 90
+    short = RequestBudget(3)
+    assert 0 < dashboard_timeout("ollama", short) <= 3
+    monkeypatch.setenv("TEXT2SQL_DASHBOARD_TIMEOUT_SECONDS", "nan")
+    with pytest.raises(ValueError, match="positive finite"):
+        dashboard_timeout("ollama", budget)
 
 
 class Designer:

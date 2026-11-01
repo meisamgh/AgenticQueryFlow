@@ -60,8 +60,20 @@ MODEL_CATALOG = (
 
 
 def configured_model_options() -> list[ModelOption]:
-    return [spec.option() for spec in MODEL_CATALOG]
+    options = [spec.option() for spec in MODEL_CATALOG]
+    options.extend(ModelOption(provider="ollama", model=model, local=True, configured=True)
+                   for model in _configured_ollama_models())
+    return options
+
+
+def _configured_ollama_models() -> list[str]:
+    return sorted({os.environ[f"TEXT2SQL_{role}_MODEL"].strip()
+                   for role in ("SQL", "ASSISTANT", "CONTEXT", "DASHBOARD", "PLOTTING")
+                   if os.environ.get(f"TEXT2SQL_{role}_PROVIDER") == "ollama"
+                   and os.environ.get(f"TEXT2SQL_{role}_MODEL", "").strip()})
 
 
 def supports_model(provider: ModelProvider, model: str) -> bool:
+    if provider == "ollama":
+        return model in _configured_ollama_models()
     return any(spec.provider == provider and spec.model == model for spec in MODEL_CATALOG)

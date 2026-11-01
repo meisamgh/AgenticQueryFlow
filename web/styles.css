@@ -1453,4 +1453,14 @@ body.sidebar-collapsed .sidebar { display:none; }
 }
 .speaker.ai .avatar { background:transparent; border:0; box-shadow:none; }
 .speaker.ai .avatar img { display:block; width:36px; height:36px; }
+.dashboard-design-discussion:not(:empty) {
+  white-space: pre-line;
+  padding: 14px 16px;
+  margin: 8px 0 14px;
+  border: 1px solid var(--border, #c5e5d0);
+  border-radius: 12px;
+  color: var(--text, #0f172a);
+  background: var(--surface, #fff);
+  line-height: 1.6;
+}
 @media(max-width:600px) { .result-panel-pane { } .data-header-tools .data-search { flex:1 1 140px; width:140px; } .speaker.ai .avatar img { width:30px; height:30px; } }

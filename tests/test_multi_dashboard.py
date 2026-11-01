@@ -232,6 +232,22 @@ def test_conversation_three_governed_queries_then_design_save_and_reopen(
         async def complete_detailed(self, model, prompt):
             self.top_calls += 1
             context = json.loads(prompt.split("\nContext: ")[1])
+            pending = (context.get("current_dashboard") or {}).get("pending_proposal")
+            if pending:
+                return json.dumps(
+                    {
+                        "action": "CALL_TOOL",
+                        "intent": "VISUALIZE",
+                        "tool": "ai_dashboard_designer",
+                        "tool_arguments": {
+                            "objective": goal,
+                            "design_action": "APPROVE",
+                            "proposal_id": pending["proposal_id"],
+                            "proposal_version": pending["version"],
+                            "approval_quote": context["question"],
+                        },
+                    }
+                ), TokenUsage()
             if self.top_calls <= 3:
                 decision = {
                     "action": "CALL_TOOL",
@@ -308,8 +324,23 @@ def test_conversation_three_governed_queries_then_design_save_and_reopen(
     )
     assert response.status_code == 200, response.text
     body = response.json()
-    assert body["dashboard"], body
+    assert body["dashboard"] is None
+    assert body["dashboard_design_proposal"]["status"] == "AWAITING_APPROVAL"
     assert sql.calls == 3 and model.top_calls == 4 and model.design_calls == 1
+    response = client.post(
+        "/api/chat",
+        json={
+            "session_id": "owner",
+            "db_id": "shop",
+            "provider": "agentrouter",
+            "model": "script",
+            "message": "I confirm this design",
+        },
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["dashboard"], body
+    assert sql.calls == 3 and model.top_calls == 5 and model.design_calls == 1
     assert body["dashboard"]["schema_version"] == 2 and len(body["dashboard"]["sources"]) == 3
     saved = client.post(
         "/api/studio",
@@ -363,6 +394,22 @@ def test_saved_dashboard_adds_missing_evidence_without_refreshing_existing_resul
         async def complete_detailed(self, model, prompt):
             context = json.loads(prompt.split("\nContext: ")[1])
             self.calls.append("top")
+            pending = (context.get("current_dashboard") or {}).get("pending_proposal")
+            if pending:
+                return json.dumps(
+                    {
+                        "action": "CALL_TOOL",
+                        "intent": "VISUALIZE",
+                        "tool": "ai_dashboard_designer",
+                        "tool_arguments": {
+                            "objective": "Confirm design",
+                            "design_action": "APPROVE",
+                            "proposal_id": pending["proposal_id"],
+                            "proposal_version": pending["version"],
+                            "approval_quote": context["question"],
+                        },
+                    }
+                ), TokenUsage()
             if not context["dashboard_evidence"]:
                 decision = {
                     "action": "CALL_TOOL",
@@ -431,12 +478,19 @@ def test_saved_dashboard_adds_missing_evidence_without_refreshing_existing_resul
     )
     assert response.status_code == 200, response.text
     preview = response.json()
+    assert preview["preview_id"] is None and preview["design_proposal"]
+    response = client.post(
+        f"/api/studio/{saved.dashboard_id}/edit",
+        json={"expected_version": 1, "message": "Confirm this design"},
+    )
+    assert response.status_code == 200, response.text
+    preview = response.json()
     assert preview["preview_id"], (preview, model.calls, model.tasks, sql.calls)
     assert len(preview["spec"]["sources"]) == 3
     assert preview["spec"]["widgets"][: len(spec.widgets)] == [
         w.model_dump(mode="json") for w in spec.widgets
     ]
-    assert sql.calls == 1 and model.calls == ["top", "top", "design"]
+    assert sql.calls == 1 and model.calls == ["top", "top", "design", "top"]
     committed = client.post(
         f"/api/studio/{saved.dashboard_id}/save",
         json={"expected_version": 1, "preview_id": preview["preview_id"]},

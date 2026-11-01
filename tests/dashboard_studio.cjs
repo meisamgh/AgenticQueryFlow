@@ -235,6 +235,36 @@ test("editing is an explicit unsaved preview; save and publish require separate 
   assert.equal(posts[2][1].approve, true);
   assert.equal(posts[2][1].expected_version, 2);
 });
+test("a design proposal stays conversational until explicit confirmation", async () => {
+  const record = saved(), posts = [];
+  const env = setup(async (path, options) => {
+    if (!options) return path === "/api/studio"
+      ? [{ id: "saved", name: "Revenue", status: "Draft", version: 1, updated_at: 1 }]
+      : record;
+    posts.push(JSON.parse(options.body));
+    if (posts.length === 1) return {
+      preview_id: null,
+      message: "Proposed design: higher contrast. Would you like to confirm?",
+      design_proposal: { status: "AWAITING_APPROVAL", proposal_id: "design", version: 3 },
+    };
+    return { preview_id: "approved", spec: { ...record.document.spec, theme: "contrast" } };
+  });
+  await env.library.click();
+  await find(env.body, "Revenue").click();
+  const input = all(env.body).find((e) => e["aria-label"] === "Saved dashboard design change");
+  input.value = "Use higher contrast";
+  await find(env.body, "Edit with AI").click();
+  assert.equal(env.renders(), 1, "proposal must not replace or construct a chart");
+  assert.ok(all(env.body).some((e) => e.textContent?.includes("Would you like to confirm?")));
+  assert.equal(record.version, 1);
+  input.value = "I confirm this design";
+  await find(env.body, "Edit with AI").click();
+  assert.equal(env.renders(), 2);
+  assert.equal(posts.length, 2);
+  assert.equal(posts[1].message, "I confirm this design");
+  assert.equal(record.version, 1, "approval must not implicitly save or publish");
+});
+
 test("viewer controls are read-only and the studio retains responsive layout", async () => {
   const record = { ...saved(), permission: "viewer" };
   const env = setup(async (path) =>

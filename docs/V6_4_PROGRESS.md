@@ -497,3 +497,206 @@ materialization, preventing silent same-widget overwrite. Regression preserves
 the original widgets on rejection. Final checks: 606 Python passed/2 skipped
 (18.12s), 180 frontend/voice passed (515ms), Ruff/mypy/diff passed. Live-provider,
 PostgreSQL and browser visual checks remain NOT RUN.
+
+### Human-in-the-loop dashboard design (2026-10-31)
+
+The same LangGraph assistant now investigates and proposes before rendering a
+dashboard. Typed DashboardDesignProposal retains per-widget goals/reasons, KPIs,
+chart/source requirements, fixed section layout, bounded statistical observations
+and a versioned discussion. The existing designer and governed SQL pipeline are
+reused; no new autonomous agent, SQL executor or NL intent router was introduced.
+
+Additive migration 3 in the existing private Studio/history database stores
+pending discussions and revision history. Candidate preparation stages are
+committed atomically; exact-version approval, BUILDING/READY/FAILED transitions,
+rejection and expiry preserve evidence. Invalid revisions retain the prior
+proposal. Failed durable finalization rolls back the unexposed RAM revision and
+bundle. Existing owner/editor/viewer checks and saved-version checks remain.
+Saved Studio reopening exposes a pending discussion to authorized editors/owners;
+new conversations never imply consent. Reset/Clear is session-scoped. Source
+snapshots are explicitly historical, not automatically refreshed live data.
+
+Only explicit confirmation of the current version builds a complete design;
+layout-only revisions and complete-proposal approval cause zero business-DB calls.
+An approved plan with missing analyses continues through governed SQL, then asks
+for review of newly verified mappings. Save and Publish remain independent.
+Frontend pending proposals render as discussion, not Chart unavailable or empty
+dashboard tabs. Existing Plotly/ECharts rendering and all result identities remain.
+
+Final verification: 621 Python passed/2 skipped (19.75s), 182 frontend/voice passed
+(554ms); Ruff, mypy (65 source files), and git diff --check passed. New acceptance
+coverage: test_dashboard_proposals.py (15 cases), extended multi-dashboard/Studio
+integration and frontend discussion/status tests. Real SQLite + scripted providers
+measure: three-result proposal = 4 Top + 3 SQL generation + 1 designer; complete
+approval = 1 Top + 0 SQL/designer; valid layout revision = 1 Top + 1 designer and
+0 SQL; missing-evidence continuation = 3 Top + 1 governed SQL generation + 1
+designer, then separate confirmation. Invalid revisions permit at most one
+targeted designer correction. These are fixture call counts and test runtimes,
+not live-provider latency, analytical accuracy or production speedup measurements.
+
+Live providers/PostgreSQL/browser pixel QA NOT RUN. Production identity/session
+authorization and external sharing remain BLOCKED as previously documented.
+Unsaved discussions resume in their original session, not by implicit cross-chat
+transfer. In-flight investigation uses existing progress/budgets; a cancelled
+attempt does not replace the last committed proposal. Legacy explicit dashboard
+APIs remain compatibility interfaces. Actual .env, credentials, business data and
+unrelated files were not edited. No commit, push or server restart was performed.
+See DASHBOARD_DESIGN_APPROVAL.md for implementation paths and remaining boundaries.
+
+### Dashboard decision-format hardening (2026-10-31)
+
+Recent local history confirmed rejected decision and repair calls; the exact old
+provider output/validation reasons were not retained, so their specific cause
+cannot be reconstructed. Confirmed source defects: prompt examples omitted newly
+required tool metadata, the prose key list omitted instruction, no dashboard
+proposal/approval examples existed, and failures appeared as normal no-query
+answers. Examples now expand through AgentDecision defaults and cover both
+dashboard actions. Required references/approval checks and the one-repair limit
+are unchanged. No invalid decision may execute a tool.
+
+Failed call-ledger entries now retain bounded validation issue lists, not raw
+provider responses. The frontend identifies assistant-service failures rather
+than calling them answered requests. ValidationError is handled before its
+ValueError parent, avoiding raw input/exception disclosure from unexpected
+structured-state failures. Native-schema/example completeness, failed usage,
+safe error text and frontend failure classification have regression assertions.
+No provider configuration, credentials or SQL behavior changed. Live reproduction
+of the original Groq response remains NOT RUN; restart/retry is needed to confirm
+the user's request and obtain precise diagnostics if it still fails.
+Checks: full Python 622 passed/2 skipped (20.49s), frontend/voice 182 passed
+(464ms), Ruff, mypy (65 source files) and git diff --check passed. No commit,
+push or server restart was performed.
+
+### Provider throttling and request-budget diagnostics (2026-10-31)
+
+The latest retained dashboard trace contained valid Top decisions, a successful
+SQL execution, a premature designer request without evidence, and repeated Groq
+transport retries before exhaustion. The provider adapter only performs these
+transport retries on HTTP 429. The recorded request took 107,491ms; this is a
+single observed failure, not a latency benchmark or success-rate estimate.
+
+Kept the existing call ceiling. Groq now checks global/specialist retry capacity
+and remaining time before waiting; it never retries earlier than a long provider
+Retry-After just because the local wait ceiling is 30 seconds. If it cannot honor
+the delay, it returns the typed 429 rather than making premature attempts. A denied
+retry preserves the preceding HTTP failure and does not inflate retry counts.
+Resource guards remain authoritative and all real sends still consume the budget.
+
+The Top layer now stops without another model invocation when no capacity remains,
+preserving the last tool failure instead of hiding rate limiting behind a generic
+decision error. Prompt/example ordering emphasizes investigation first and forbids
+designer use without accepted evidence or a pending proposal; the LLM still owns
+intent selection. Deadline and model-call messages are distinguished. Regression
+tests cover shared/specialist exhaustion, long Retry-After, insufficient deadline,
+transient success and retaining a throttled SQL-tool failure without another Top
+call. No quota, credentials, actual .env or live provider settings were changed.
+Real-provider completion of the dashboard remains unverified; code cannot remove
+the provider's external TPM limit.
+Checks: Python 626 passed/2 skipped (20.34s), frontend/voice 182 passed (576ms),
+Ruff, mypy (65 source files) and git diff --check passed. Provider failures used
+mock HTTP transports; no live provider request, commit, push or restart was made.
+
+### Working local dashboard/SQL integration (2026-10-31)
+
+Confirmed blockers: designer inference was unconditionally capped at 12s; a live
+Qwen JSON-mode request echoed the JSON schema rather than a proposal; the user's
+SQL provider was now Ollama but ModelProvider/catalog/SQL routing did not admit
+it. No Queryflow API listener was running, although Ollama was available.
+
+The designer now uses a configurable, request-deadline-bounded timeout (local
+default 120s, API default 12s). Native Ollama DashboardProposal output prevents
+schema echoing; an explicit unsupported-grammar response can use the existing
+single bounded correction/fallback. Native-mode prompts avoid duplicating the
+schema and include a valid instance shape with real eligible references.
+
+OllamaCompleter now implements generate using the existing SQL prompt and SQL
+task token limit. RoutingSQLModel reuses the same local client used by reasoning;
+no new executor or agent was added. Provider/model types and catalog registration
+admit explicitly environment-configured Ollama model IDs, not arbitrary client
+model names. Truncated local output fails rather than executing partial SQL.
+Mock HTTP + real SQLite tests prove safe execution and rejected DELETE attempts;
+native dashboard and bounded unsupported-grammar paths are covered.
+
+Live local synthetic evidence: old JSON mode FALLBACK/schema echo after 96.12s;
+new native mode READY, two charts, one call, 12.94s, zero SQL/cloud calls. Warmup
+was not controlled: no speedup ratio or general accuracy claim. A real business
+dashboard and live local SQL generation have NOT been tested end to end.
+
+Final full suite: 632 Python passed/2 skipped (22.94s), 182 frontend/voice passed
+(679ms), Ruff, mypy (65 source files), diff check passed. One earlier full run had
+a timing-sensitive optimizer NOT_FASTER assertion fail; it passed alone and on
+the final full run. No optimizer logic/test expectations were changed.
+
+Started updated API locally at 127.0.0.1:8000, process 48675. HTTP configuration
+checks confirmed SQL=qwen3.5:4b/Ollama, assistant=llama3.2:latest/Ollama, both models
+registered, and debit_card_specializing available among 12 databases. Local .env
+retains the selected designer=qwen3.5:4b/Ollama and adds designer timeout=120s;
+other role settings were not changed. No Git commit/push. Deployment authentication,
+external sharing, live cloud providers and browser visual QA remain unverified.
+
+### Real dashboard API investigation — NOT COMPLETE (2026-10-31)
+
+Executed four isolated, authorized `/api/chat` dashboard tests using the live
+local models and read-only debit_card_specializing database. No valid dashboard
+was built, approved, saved or published. Attempts took 27.78s, 57.93s, 55.73s and
+38.38s respectively. Observed failures: investigation loop without a proposal;
+SQL execution followed by failed design validation; an empty proposal backed by
+zero rows (SQL invented a 202% date filter and spending joins); and accepted SQL
+followed by repeatedly rejected designer actions before the step limit. HTTP 200
+was not treated as dashboard success or business correctness. No manual SQL or
+fabricated chart was substituted to make the test pass.
+
+Confirmed telemetry defect fixed: investigation-limit exits dropped ledger/usage
+and spent a ninth decision after eight tools. They now preserve usage/tool trace
+and stop without that additional call. Designer and failed-tool validation reasons
+are retained, invalid design output terminates rather than being misclassified as
+missing data for another full designer retry, and empty supported designs cannot
+be approved without widgets or an explicit pending-analysis requirement. These
+are diagnostic/safety fixes, not a claim that the small models are now reliable.
+
+Final checks: 634 Python passed/2 skipped (29.05s), 182 frontend/voice passed
+(470ms), Ruff, mypy (65 source files) and diff check passed. These regression
+results do not supersede the failed live API outcomes. Left the API running at
+127.0.0.1:8000, process 50214, with role settings unchanged. Asked permission to
+try Qwen for the understanding layer as well; no implicit model switch was made.
+Next uncompleted work: choose an authorized understanding/model configuration,
+obtain a meaningful nonempty supported proposal through the API, review and
+confirm its exact version, then verify READY and lineage. No commit or push.
+
+### Llama-preserving live dashboard completion (2026-11-01)
+
+Kept user-selected Llama 3.2 understanding and Qwen 3.5 4B SQL/design unchanged.
+Live compatibility probes isolated Ollama grammar rejection to large maxLength
+constraints; removing only those above 1024 on the wire compiled successfully.
+Canonical prompt schemas and local Pydantic limits remain enforced. Added native
+ANSWER/CALL_TOOL agreement branches, contextual result/proposal enums and local
+reference validation with the existing one-repair limit. No new NL router/agent.
+Unavailable row-dependent tools are excluded before evidence exists. Preserved
+original client constraints as bounded context in scoped SQL handoffs.
+
+Successful real API proposal: 58.77s; Qwen SQL summed yearmonth.Consumption by
+Date over all available dates, with no invented date predicate, joins or extra
+metrics. Result: 21 complete rows, one supported line chart, no missing evidence.
+First confirmation was correctly blocked because Llama paraphrased the approval
+quote. Added a contextual exact-quote enum plus local pre-tool checking; after
+restart the same proposal/version was confirmed and reached READY in 4.86s.
+Successful approval used one Llama decision and zero SQL-generation, business-DB
+execution or designer calls. Result ID and all 21 chart rows match the approved
+source. No Save or Publish action, no cloud calls, no fabricated KPI was used.
+One earlier automatic chart attempt rejected a spurious requested customer metric
+before a model/DB call; the Top layer continued to the valid dashboard proposal.
+That redundant attempted path remains a refinement opportunity, not hidden work.
+
+New tests in test_scoped_decisions.py cover wire/canonical separation, immutable
+scoped schema references, invalid-ID repair before tools, unchanged user scope,
+action/tool grammar consistency and exact approval quoting. Full Python: 641
+passed/2 skipped (24.16s); frontend/voice: 182 passed (519ms); Ruff, mypy (65 source
+files) and diff checks passed. Synthetic greeting now validates natively under
+Llama without grammar fallback. Passing this live explicit-schema consumption
+scenario does not establish broad business-question accuracy for these models.
+
+API remains at 127.0.0.1:8000, process 63593. Temporary dashboard is in an isolated
+API test session, not the browser's active conversation or Dashboard Library.
+Its supporting proposal remains durable; it was not saved/published. No .env
+model changes, commit or push. Production auth/sharing and browser visual QA
+remain outside this verification.

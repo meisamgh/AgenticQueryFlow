@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from statistics import median
 from time import perf_counter
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import Field, ValidationError
 
@@ -23,9 +25,15 @@ from semantic_text2sql.dashboard_service import (
     build_dashboard,
     eligible_kpis,
 )
+from semantic_text2sql.llm import StructuredOutputUnsupported
 from semantic_text2sql.models import CallLedgerEntry, StrictModel, TokenUsage
 from semantic_text2sql.result_cache import RecentResult
-from semantic_text2sql.runtime import RequestBudget, model_call_cap, use_request_budget
+from semantic_text2sql.runtime import (
+    RequestBudget,
+    RequestBudgetExceeded,
+    model_call_cap,
+    use_request_budget,
+)
 from semantic_text2sql.visualization_recommender import profile_chart_result
 
 
@@ -34,6 +42,8 @@ class KPIChoice(StrictModel):
     order: int | None = Field(default=None, ge=0, le=3)
     column_span: Literal[3, 4, 6, 12] | None = None
     replaces_widget_id: str | None = Field(default=None, max_length=100)
+    reason: str = Field(default="", max_length=400)
+    analytical_objective: str = Field(default="", max_length=400)
 
 
 class ChartChoice(StrictModel):
@@ -47,6 +57,8 @@ class ChartChoice(StrictModel):
     y: str | None = None
     series: str | None = None
     replaces_widget_id: str | None = Field(default=None, max_length=100)
+    reason: str = Field(default="", max_length=400)
+    analytical_objective: str = Field(default="", max_length=400)
 
 
 class DashboardProposal(StrictModel):
@@ -61,6 +73,9 @@ class DashboardProposal(StrictModel):
     theme: Literal["green", "neutral", "contrast"] | None = None
     rationale: str = Field(default="", max_length=600)
     missing_requirements: str = Field(default="", max_length=1000)
+    further_analyses: list[Annotated[str, Field(min_length=1, max_length=600)]] = Field(
+        default_factory=list, max_length=4
+    )
 
 
 @dataclass(frozen=True)
@@ -70,6 +85,18 @@ class DashboardDesignOutcome:
     reason: str
     usage: TokenUsage = field(default_factory=TokenUsage)
     ledger: tuple[CallLedgerEntry, ...] = ()
+    choices: DashboardProposal | None = None
+
+
+def dashboard_timeout(provider: str, budget: RequestBudget) -> float:
+    """Local inference needs a realistic timeout, still bounded by the shared deadline."""
+    default = "120" if provider == "ollama" else "12"
+    seconds = float(os.environ.get("TEXT2SQL_DASHBOARD_TIMEOUT_SECONDS", default))
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("Dashboard timeout must be a positive finite number")
+    if budget.remaining() <= 0:
+        raise RequestBudgetExceeded("The request deadline was exhausted.")
+    return min(seconds, budget.remaining())
 
 
 def _id(prefix: str, value: str) -> str:
@@ -208,6 +235,9 @@ def design_context(
 
 
 _PROMPT = """You are the AI dashboard design specialist, not a conversational router or SQL agent.
+This is a proposal for client review, not permission to build. Give each choice a concise
+analytical_objective and reason. Compare alternative combinations and avoid redundant views.
+Only describe findings supported by the supplied evidence; missing analyses need governed SQL.
 Design for the client's objective using ONLY verified KPI IDs and validated chart candidate IDs.
 Independently select the most useful eligible KPIs, primary chart and complementary supporting
 charts; do not repeat a fixed template. Choose order, widths, readable titles/labels and theme.
@@ -421,6 +451,7 @@ async def design_dashboard(
     repair: bool = False,
     repair_feedback: str = "",
     target_widget_id: str | None = None,
+    investigation_evidence: list[dict[str, Any]] | None = None,
 ) -> DashboardDesignOutcome:
     if sources and len(sources) > 1:
         from semantic_text2sql.multi_dashboard import composition_catalog
@@ -492,28 +523,53 @@ async def design_dashboard(
             }
             for identity, item in sources.items()
         ]
+    context["investigation_evidence"] = investigation_evidence or []
+    structured_task = getattr(completer, "complete_structured_task", None)
+    native_capability = getattr(completer, "native_schema_supported", None)
+    native_schema = (provider == "ollama" and callable(structured_task)
+                     and (not callable(native_capability)
+                          or native_capability(model, "DashboardProposal")))
     prompt = _PROMPT.format(
-        schema=json.dumps(DashboardProposal.model_json_schema()),
+        schema=("API response format supplies the schema. Return a proposal INSTANCE, not a schema."
+                if native_schema else json.dumps(DashboardProposal.model_json_schema())),
         objective=request.objective,
         context=json.dumps(context, default=str),
     )
+    example: dict[str, Any] = {"result_id": source.result_id,
+                               "mode": "PATCH" if previous else "REPLACE"}
+    if charts:
+        example["charts"] = [{"candidate_id": next(iter(charts))}]
+    elif kpis:
+        example["kpis"] = [{"kpi_id": next(iter(kpis))}]
+    if provider == "ollama":
+        prompt += ("\nExample proposal instance using a real eligible ID (choose the candidates "
+                   "that satisfy the objective): " + json.dumps(example)
+                   + "\nDo not return $defs, properties, or JSON Schema definitions.")
     usage = TokenUsage()
     started = perf_counter()
     before = budget.model_calls
     failed = False
     repairable_error = ""
+    diagnostic_error = ""
+    proposal: DashboardProposal | None = None
     try:
         if len(prompt) > 32000:
             raise ValueError("Design context exceeds the bounded prompt limit")
         if completer is None:
             raise ValueError("Dashboard model provider is unavailable")
         with use_request_budget(budget), model_call_cap(budget, 1):
-            if callable(getattr(completer, "complete_task", None)):
+            timeout = dashboard_timeout(provider, budget)
+            if native_schema and callable(structured_task):
+                operation = structured_task(
+                    model, prompt, "DashboardProposal", DashboardProposal.model_json_schema(),
+                    "dashboard",
+                )
+            elif callable(getattr(completer, "complete_task", None)):
                 operation = completer.complete_task(model, prompt, "dashboard", json_mode=True)
             else:
                 operation = completer.complete_detailed(model=model, prompt=prompt)
             raw, usage = await asyncio.wait_for(
-                budget.wait(operation, kind="model"), timeout=min(12.0, budget.remaining())
+                budget.wait(operation, kind="model"), timeout=timeout
             )
         proposal = DashboardProposal.model_validate_json(raw)
         if proposal.result_id != source.result_id:
@@ -547,7 +603,7 @@ async def design_dashboard(
                 ):
                     raise ValueError("Edit only the selected widget; preserve every other setting")
             spec = _materialize(proposal, base, kpis, charts, previous)
-            status, reason = "READY", "Validated AI dashboard design."
+            status, reason = "READY", proposal.rationale or "Validated AI dashboard design."
     except asyncio.CancelledError:
         raise
     except Exception as exc:
@@ -556,6 +612,9 @@ async def design_dashboard(
             repairable_error = json.dumps(exc.errors(include_input=False, include_url=False))[:600]
         elif isinstance(exc, ValueError):
             repairable_error = str(exc)[:600]
+        elif isinstance(exc, StructuredOutputUnsupported):
+            repairable_error = "Native schema unavailable; return a proposal JSON instance."
+        diagnostic_error = repairable_error or type(exc).__name__
         usage = getattr(exc, "usage", usage)
         # Invalid revisions must preserve the exact previous design, not silently
         # replace its metrics. Initial failures use the existing Phase 1 builder.
@@ -581,6 +640,7 @@ async def design_dashboard(
                 input_tokens=usage.input_tokens,
                 output_tokens=usage.output_tokens,
                 latency_ms=int((perf_counter() - started) * 1000),
+                validation_issues=[diagnostic_error] if failed else [],
             ),
         )
         if budget.model_calls > before
@@ -600,6 +660,7 @@ async def design_dashboard(
             repair=False,
             repair_feedback=repairable_error,
             target_widget_id=target_widget_id,
+            investigation_evidence=investigation_evidence,
         )
         combined = {
             key: (
@@ -615,8 +676,9 @@ async def design_dashboard(
             corrected.reason,
             TokenUsage.model_validate(combined),
             (*ledger, *corrected.ledger),
+            corrected.choices,
         )
-    return DashboardDesignOutcome(status, spec, reason, usage, ledger)  # type: ignore[arg-type]
+    return DashboardDesignOutcome(status, spec, reason, usage, ledger, proposal)  # type: ignore[arg-type]
 
 
 class DashboardRevisions:
@@ -653,6 +715,15 @@ class DashboardRevisions:
             raise DashboardError("No earlier dashboard revision is available.")
         history.pop()
         return history[-1]
+
+    def rollback(self, session: str, revision: DashboardSpec) -> None:
+        """Discard only this unexposed build if durable finalization failed."""
+        key = (session, revision.db_id, revision.result_id)
+        history = self._items.get(key, [])
+        if history and history[-1] == revision:
+            history.pop()
+            if not history:
+                self._items.pop(key, None)
 
     def clear(self, session: str) -> None:
         for key in list(self._items):

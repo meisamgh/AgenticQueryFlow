@@ -233,6 +233,23 @@ def test_real_top_layer_edit_after_restart_never_executes_sql(
 
         async def complete_detailed(self, model, prompt):
             self.calls.append("top")
+            context = json.loads(prompt.split("\nContext: ")[1])
+            pending = (context.get("current_dashboard") or {}).get("pending_proposal")
+            if pending:
+                return json.dumps(
+                    {
+                        "action": "CALL_TOOL",
+                        "intent": "VISUALIZE",
+                        "tool": "ai_dashboard_designer",
+                        "tool_arguments": {
+                            "objective": "Confirm design",
+                            "design_action": "APPROVE",
+                            "proposal_id": pending["proposal_id"],
+                            "proposal_version": pending["version"],
+                            "approval_quote": context["question"],
+                        },
+                    }
+                ), TokenUsage()
             if route == "component":
                 context = json.loads(prompt.split("\nContext: ")[1])
                 assert context["selected_dashboard_component"] == {
@@ -319,13 +336,30 @@ def test_real_top_layer_edit_after_restart_never_executes_sql(
         },
     )
     assert response.status_code == 200, response.text
+    if route in {"design", "component"}:
+        assert response.json()["preview_id"] is None
+        assert response.json()["design_proposal"]["status"] == "AWAITING_APPROVAL"
+        restarted = local_client(create_app(
+            TextToSQLAgent(registry, SQL()), conversation_completers={"agentrouter": model},
+            run_history=RunHistoryStore(path),
+        ))
+        discussion = restarted.get(f"/api/studio/{saved.dashboard_id}").json()
+        assert discussion["pending_design_proposal"]["status"] == "AWAITING_APPROVAL"
+        assert discussion["pending_design_proposal"]["stale_saved_version"] is False
+        assert model.calls == ["top", "dashboard"]
+        client = restarted
+        response = client.post(
+            f"/api/studio/{saved.dashboard_id}/edit",
+            json={"expected_version": 1, "message": "Confirm this design"},
+        )
+        assert response.status_code == 200, response.text
     if route == "design":
         assert response.json()["preview_id"]
-        assert model.calls == ["top", "dashboard"]
+        assert model.calls == ["top", "dashboard", "top"]
         assert response.json()["spec"]["theme"] == "contrast"
     elif route == "component":
         assert response.json()["preview_id"]
-        assert model.calls == ["top", "dashboard"]
+        assert model.calls == ["top", "dashboard", "top"]
         assert response.json()["spec"]["widgets"][0]["column_span"] == 12
         assert response.json()["spec"]["data"] == saved.document.spec.data.model_dump(mode="json")
         assert response.json()["spec"]["widgets"][1:] == [

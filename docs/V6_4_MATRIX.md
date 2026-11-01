@@ -94,3 +94,41 @@ and authorization integration exist. NOT RUN: live providers, PostgreSQL and rea
 browser visual QA. No production latency gain is claimed. Scope and call-count
 measurements are recorded in V6_4_PROGRESS.md and AGENTIC_DASHBOARDS.md; older
 requirement statuses remain unchanged.
+
+### Human-reviewed dashboard design (2026-10-31)
+
+VERIFIED locally: typed design proposals and source/layout requirements; the
+existing Top-layer agent selects investigations and interprets explicit approval;
+no conversational dashboard construction before exact-version confirmation;
+natural-language revisions and rejection; unchanged layout-only source snapshots;
+atomic proposal revision conflicts; restart/resume; missing-evidence continuation
+through governed SQLite SQL followed by a new mapping review; failed-finalization
+rollback and explicit retry; saved Studio compatibility/permissions; compact
+discussion summaries and non-error frontend presentation.
+
+Evidence: test_dashboard_proposals.py, extended test_multi_dashboard.py and
+test_dashboard_studio.py, dashboard_studio.cjs and frontend_rendering.cjs. Existing
+SQL/chart/security regressions remain enabled. Exact checks and counts are in
+V6_4_PROGRESS.md; no older requirement status is promoted by this entry.
+
+BLOCKED: production identity/session ownership and external sharing, as before.
+NOT RUN: live-provider, PostgreSQL and browser visual QA. No cross-session
+unsaved-proposal transfer or automatic refresh. Resume the original conversation
+or authorized saved Studio. See DASHBOARD_DESIGN_APPROVAL.md for scope and the
+distinction between validated candidate snapshots and approved rendered dashboards.
+
+### Live local dashboard completion (2026-11-01)
+
+VERIFIED for one explicit consumption-only scenario: unchanged Llama 3.2
+understanding plus Qwen 3.5 4B SQL/design; real `/api/chat` proposal with 21 complete
+monthly rows; reviewed exact-version confirmation after API restart; READY with
+the same result ID and 21-point line chart. Approval made no SQL/designer calls.
+Temporary only: not saved or published. Native wire grammar/action consistency,
+scoped reference validation and exact quoting retain canonical local validators.
+
+Evidence: live API responses and persisted READY proposal, test_scoped_decisions.py;
+641 Python passed/2 skipped, 182 frontend/voice passed, Ruff/mypy/diff passed.
+This supersedes the earlier NOT COMPLETE outcome only for this tested scenario;
+broad small-model accuracy, production auth/sharing and browser visual QA are
+not verified. See V6_4_PROGRESS.md for failures, remaining redundant chart attempt,
+timings and source boundaries. No model switch, commit or push.

@@ -17,6 +17,7 @@ from pydantic import Field, ValidationError
 from starlette.authentication import BaseUser
 
 from semantic_text2sql.ai_dashboard_designer import DashboardRevisions
+from semantic_text2sql.dashboard_proposals import ProposalStore
 from semantic_text2sql.dashboard_service import DashboardError
 from semantic_text2sql.dashboard_store import (
     DashboardDocument,
@@ -112,6 +113,7 @@ def studio_router(
 ) -> APIRouter:
     router = APIRouter(prefix="/api/studio")
     previews: dict[str, _Preview] = {}
+    proposals = ProposalStore(store) if store else None
 
     def access(request: Request, response: Response) -> tuple[DashboardStore, DashboardPrincipal]:
         response.headers["Cache-Control"] = "no-store, private"
@@ -176,7 +178,17 @@ def studio_router(
         identity: str, request: Request, response: Response, version: int | None = None
     ) -> SavedDashboard:
         db, principal = access(request, response)
-        return checked(lambda: db.open(principal, identity, version))
+        saved = checked(lambda: db.open(principal, identity, version))
+        if version is None and saved.permission != "viewer" and proposals:
+            pending = checked(
+                lambda: proposals.get(f"studio-{identity}", saved.document.source.db_id)
+            )
+            if pending and pending.saved_dashboard_id == identity and pending.status != "READY":
+                saved.pending_design_proposal = {
+                    **pending.summary(),
+                    "stale_saved_version": pending.saved_version != saved.version,
+                }
+        return saved
 
     @router.get("/{identity}/versions")
     def history(identity: str, request: Request, response: Response) -> list[dict[str, Any]]:
@@ -215,6 +227,7 @@ def studio_router(
                 "preview_id": None,
                 "message": result.message,
                 "call_ledger": result.call_ledger,
+                "design_proposal": result.dashboard_design_proposal,
             }
         from semantic_text2sql.dashboard_service import DashboardSpec
 

@@ -488,11 +488,15 @@ async function send(message, feedbackCategory = null, dashboardTarget = null) {
 }
 
 function responseStatus(body, attempts) {
+  const assistantFailure = (body.provenance || []).includes("assistant_service_failure");
   const accepted = body.generation?.accepted === true;
-  const explanatory = EXPLANATION_OPERATIONS_UI.has(body.operation || "");
+  const explanatory = EXPLANATION_OPERATIONS_UI.has(body.operation || "") || Boolean(body.dashboard_design_proposal);
   const chartOnly = body.operation === "VISUALIZE" || Boolean(body.plot_status);
   const modelUnavailable = body.generation && !accepted && body.generation.termination_reason === "model_error";
-  const status = chartOnly ? (body.presentation?.chart_spec ? "CHART FROM STORED DATA" : "CHART UNAVAILABLE")
+  const status = assistantFailure ? "ASSISTANT UNAVAILABLE"
+    : body.dashboard_design_proposal ? `DESIGN ${body.dashboard_design_proposal.status}`
+    : body.dashboard ? "DASHBOARD READY"
+    : chartOnly ? (body.presentation?.chart_spec ? "CHART FROM STORED DATA" : "CHART UNAVAILABLE")
     : explanatory ? "NO NEW QUERY"
     : accepted ? (body.generation.execution_status === "ACCEPTED" ? "EXECUTED" : body.generation.execution_status || "SAFE SQL")
     : modelUnavailable ? "MODEL UNAVAILABLE" : "FAILED";
@@ -517,6 +521,16 @@ function sameDisplayText(left, right) {
 function updateStatusPill(fragment, body, accepted, status) {
   const pill = fragment.querySelector(".status-pill");
   if (!pill) return;
+  if ((body.provenance || []).includes("assistant_service_failure")) {
+    pill.hidden = false;
+    pill.querySelector(".status-pill-label").textContent = "Assistant unavailable";
+    pill.classList.remove("warn");
+    pill.classList.add("error");
+    const slot = pill.querySelector("[data-icon]");
+    if (slot) slot.innerHTML = icon("alert");
+    return;
+  }
+  if (body.dashboard_design_proposal) { pill.hidden = true; return; }
   if (accepted && status !== "CHART UNAVAILABLE") { pill.hidden = true; return; }
   const label = pill.querySelector(".status-pill-label");
   const slot = pill.querySelector("[data-icon]");
@@ -559,6 +573,7 @@ function responseMode(body, opts = {}) {
    independent question comes back as "sql". Client heuristics only serve
    responses produced before this contract existed. */
 function presentationMode(body, opts = {}) {
+  if (body.dashboard_design_proposal) return "explanation";
   if (body.plot_status && body.plot_status !== "CHART_READY"
       && !body.presentation?.chart_spec && body.generation?.accepted) return "chart_unavailable";
   const stateMode = body.presentation_state?.mode;

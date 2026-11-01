@@ -11,13 +11,13 @@ import shutil
 import tempfile
 from pathlib import Path
 from time import perf_counter
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 import httpx
 
 from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.models import ModelProvider, SchemaInfo, StrategyHints, TokenUsage
-from semantic_text2sql.runtime import active_request_budget
+from semantic_text2sql.runtime import RequestBudgetExceeded, active_request_budget
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +75,20 @@ class OllamaCompleter:
     def native_schema_supported(self, model: str, schema_name: str) -> bool:
         return model not in self._schema_unsupported_models
 
+    async def generate(self, **kwargs: object) -> tuple[str, int, TokenUsage]:
+        """Use the existing governed generator prompt; no database access here."""
+        prompt = _prompt(
+            str(kwargs["question"]), cast(str | None, kwargs.get("evidence")),
+            cast(SchemaInfo, kwargs["schema"]), cast(StrategyHints, kwargs["strategy"]),
+            cast(DatabaseDialect, kwargs["dialect"]), str(kwargs["profile_context"]),
+            cast(str | None, kwargs.get("previous_sql")),
+            cast(str | None, kwargs.get("feedback")), cast(list[str], kwargs["rejected_shapes"]),
+            cast(Literal["reasoning", "icl", "alternative"], kwargs["generation_style"]),
+        )
+        started = perf_counter()
+        text, usage = await self.complete_task(str(kwargs["model"]), prompt, "sql")
+        return text, round((perf_counter() - started) * 1000), usage
+
     async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
         return await self.complete_task(model, prompt, "decision")
 
@@ -91,7 +105,10 @@ class OllamaCompleter:
     async def complete_structured_task(
         self, model: str, prompt: str, schema_name: str, schema: dict[str, object], task: str,
     ) -> tuple[str, TokenUsage]:
-        return await self._chat(model, prompt, task, schema)
+        wire = cast(dict[str, object], _ollama_wire_schema(schema))
+        if schema_name == "AgentDecision":
+            wire = _ollama_decision_actions(wire)
+        return await self._chat(model, prompt, task, wire)
 
     async def _chat(
         self, model: str, prompt: str, task: str, output_format: str | dict[str, object] | None,
@@ -123,6 +140,9 @@ class OllamaCompleter:
             usage = TokenUsage(
                 input_tokens=body.get("prompt_eval_count"), output_tokens=body.get("eval_count"),
             )
+            if body.get("done_reason") == "length":
+                raise ModelError("Ollama output was truncated at the completion-token limit.",
+                                 usage=usage)
             message = body.get("message") or {}
             content = message.get("content")
             if not isinstance(content, str) or not content.strip():
@@ -132,6 +152,35 @@ class OllamaCompleter:
             raise ModelError("The local Ollama server could not complete the request.") from exc
         except (ValueError, TypeError, AttributeError) as exc:
             raise ModelError("Ollama returned an invalid completion response.") from exc
+
+
+def _ollama_decision_actions(schema: dict[str, object]) -> dict[str, object]:
+    """Constrain action/tool agreement in the grammar, not just after decoding."""
+    props = cast(dict[str, object], schema.get("properties", {}))
+    if not {"action", "tool", "tool_arguments", "answer", "chart_proposal"}.issubset(props):
+        return schema
+    answer = {**schema, "properties": {**props, "action": {"type": "string", "enum": ["ANSWER"]},
+        "tool": {"type": "null"}, "tool_arguments": {"type": "null"},
+        "instruction": {"type": "null"}, "chart_proposal": {"type": "null"}}}
+    call = {**schema, "properties": {**props, "action": {"type": "string", "enum": ["CALL_TOOL"]},
+        "tool": cast(dict[str, Any], props["tool"])["anyOf"][0],
+        "tool_arguments": cast(dict[str, Any], props["tool_arguments"])["anyOf"][0],
+        "answer": {"type": "null"}, "instruction": {"type": "null"}}}
+    return {**schema, "anyOf": [answer, call]}
+
+
+def _ollama_wire_schema(value: object) -> object:
+    """Avoid Ollama's grammar failure on large bounded string repetitions.
+
+    Only the wire grammar omits maxLength above 1024. Canonical Pydantic
+    validation and prompt schemas retain every limit before any tool executes.
+    """
+    if isinstance(value, dict):
+        return {key: _ollama_wire_schema(item) for key, item in value.items()
+                if not (key == "maxLength" and isinstance(item, int) and item > 1024)}
+    if isinstance(value, list):
+        return [_ollama_wire_schema(item) for item in value]
+    return value
 
 
 def _structured_output_unsupported(error: ModelError) -> bool:
@@ -359,11 +408,21 @@ class GroqSQLModel:
                 timeout=self.timeout,
                 transport=self.transport,
             ) as client:
+                last_rate_response: httpx.Response | None = None
+                sent_retry_count = 0
                 for attempt in range(3):
                     if attempt:
                         budget = active_request_budget()
                         if budget is not None:
-                            budget.claim("model")
+                            try:
+                                budget.claim("model")
+                            except RequestBudgetExceeded:
+                                # A retry denied locally must not hide the actual
+                                # preceding rate-limit response behind a budget error.
+                                if last_rate_response is not None:
+                                    last_rate_response.raise_for_status()
+                                raise
+                    sent_retry_count = attempt
                     response = await client.post(
                         "chat/completions",
                         headers={
@@ -386,7 +445,15 @@ class GroqSQLModel:
                     )
                     if response.status_code != 429 or attempt == 2:
                         break
-                    await asyncio.sleep(_groq_retry_delay(response))
+                    last_rate_response = response
+                    delay = _groq_retry_delay(response)
+                    budget = active_request_budget()
+                    if delay > 30 or (budget is not None and (
+                        not budget.model_call_available()
+                        or budget.remaining() <= delay
+                    )):
+                        break
+                    await asyncio.sleep(delay)
                 response.raise_for_status()
                 body = response.json()
                 choice = body["choices"][0]
@@ -412,14 +479,14 @@ class GroqSQLModel:
                 "groq", model, phase, exc.response.status_code,
                 code, request_id, round((perf_counter() - started) * 1000),
                 capability_rejection=capability_rejection,
-                retry_count=attempt,
+                retry_count=sent_retry_count,
             )
             logger.warning(
                 "provider_request_failed provider=%s model=%s phase=%s status=%s "
                 "code=%s request_id=%s latency_ms=%s response_format=%s retry_count=%s",
                 problem.provider, problem.model, problem.phase, problem.status,
                 problem.code, problem.request_id, problem.latency_ms,
-                response_format.get("type") if response_format else "text", attempt,
+                response_format.get("type") if response_format else "text", sent_retry_count,
             )
             raise problem from exc
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
@@ -428,13 +495,13 @@ class GroqSQLModel:
             raise ModelError(
                 "Groq output was truncated at the completion-token limit.",
                 usage=_token_usage(body.get("usage") or {}).model_copy(
-                    update={"provider_retries": attempt}
+                    update={"provider_retries": sent_retry_count}
                 ),
             )
         if not isinstance(content, str) or not content.strip():
             raise ModelError("Groq returned no text output.")
         return content, _token_usage(body.get("usage") or {}).model_copy(
-            update={"provider_retries": attempt}
+            update={"provider_retries": sent_retry_count}
         )
 
 
@@ -883,12 +950,12 @@ def _groq_retry_delay(response: httpx.Response) -> float:
     header = response.headers.get("retry-after")
     if header:
         try:
-            return min(max(float(header), 0.1), 30.0)
+            return max(float(header) + 0.25, 0.1)
         except ValueError:
             pass
     match = re.search(r"try again in\s+([0-9.]+)s", response.text, re.IGNORECASE)
     if match:
-        return min(max(float(match.group(1)) + 0.25, 0.1), 30.0)
+        return max(float(match.group(1)) + 0.25, 0.1)
     return 2.0
 
 
@@ -1581,6 +1648,7 @@ class RoutingSQLModel:
         codecraft: CodeCraftSQLModel,
         true_sota: TrueSotaSQLModel | None = None,
         openrouter: OpenRouterSQLModel | None = None,
+        ollama: OllamaCompleter | None = None,
     ) -> None:
         self.providers: dict[str, SQLModel] = {
             "agentrouter": agentrouter,
@@ -1592,6 +1660,8 @@ class RoutingSQLModel:
             self.providers["true_sota"] = true_sota
         if openrouter is not None:
             self.providers["openrouter"] = openrouter
+        if ollama is not None:
+            self.providers["ollama"] = ollama
 
     async def generate(
         self,
@@ -1715,6 +1785,7 @@ def _task_token_limit(task: str) -> int:
         "context": "TEXT2SQL_CONTEXT_MAX_TOKENS",
         "plotting": "TEXT2SQL_PLOTTING_MAX_TOKENS",
         "dashboard": "TEXT2SQL_DASHBOARD_MAX_TOKENS",
+        "sql": "TEXT2SQL_SQL_MAX_TOKENS",
     }.get(task, "TEXT2SQL_MAX_COMPLETION_TOKENS")
     return max(1, int(os.environ.get(setting, "2048")))
 

@@ -30,7 +30,7 @@ from semantic_text2sql.models import (
     TableInfo,
     TokenUsage,
 )
-from semantic_text2sql.runtime import RequestBudget, use_request_budget
+from semantic_text2sql.runtime import RequestBudget, model_call_cap, use_request_budget
 
 
 def test_ollama_understanding_uses_native_schema_and_task_budget(monkeypatch: Any) -> None:
@@ -213,8 +213,10 @@ def test_openrouter_missing_key_and_truncation_fail_safely() -> None:
         asyncio.run(model.complete_detailed("nemotron", "SELECT 1"))
 
 
+@pytest.mark.parametrize("global_limit", [1, 12])
 def test_groq_rate_limit_retry_claims_shared_model_budget(
     monkeypatch: pytest.MonkeyPatch,
+    global_limit: int,
 ) -> None:
     calls = 0
 
@@ -224,14 +226,42 @@ def test_groq_rate_limit_retry_claims_shared_model_budget(
         return httpx.Response(429, json={"error": {"code": "rate_limit_exceeded"}})
 
     monkeypatch.setattr("semantic_text2sql.llm._groq_retry_delay", lambda response: 0)
+    async def forbidden_sleep(_):
+        pytest.fail("Do not wait for a retry that the shared/specialist budget cannot permit")
+    monkeypatch.setattr("semantic_text2sql.llm.asyncio.sleep", forbidden_sleep)
     model = GroqSQLModel("test-key", transport=httpx.MockTransport(handler))
-    budget = RequestBudget(timeout_seconds=5, max_model_calls=1)
-    with use_request_budget(budget), pytest.raises(TimeoutError, match="model-call budget"):
+    budget = RequestBudget(timeout_seconds=5, max_model_calls=global_limit)
+    with (
+        use_request_budget(budget), model_call_cap(budget, 1),
+        pytest.raises(ProviderRequestError) as captured,
+    ):
         asyncio.run(budget.wait(
             model.complete_detailed("qwen/qwen3.8-27b", "Hello"), kind="model"
         ))
     assert calls == 1
     assert budget.model_calls == 1
+    assert captured.value.status == 429 and captured.value.code == "rate_limit_exceeded"
+    assert captured.value.retry_count == 0
+
+
+@pytest.mark.parametrize("retry_after,timeout", [("60", 180), ("10", 1)])
+def test_groq_does_not_retry_before_provider_delay_or_after_deadline(
+    monkeypatch, retry_after, timeout
+):
+    calls = 0
+    def handler(request):
+        nonlocal calls
+        calls += 1
+        return httpx.Response(429, headers={"retry-after": retry_after},
+                             json={"error": {"code": "rate_limit_exceeded"}})
+    async def forbidden_sleep(_):
+        pytest.fail("Do not wait or retry when the bounded request cannot honor Retry-After")
+    monkeypatch.setattr("semantic_text2sql.llm.asyncio.sleep", forbidden_sleep)
+    budget = RequestBudget(timeout_seconds=timeout, max_model_calls=12)
+    model = GroqSQLModel("test-key", transport=httpx.MockTransport(handler))
+    with use_request_budget(budget), pytest.raises(ProviderRequestError) as captured:
+        asyncio.run(budget.wait(model.complete_detailed("qwen", "Hello"), kind="model"))
+    assert captured.value.status == 429 and calls == 1 and budget.model_calls == 1
 
 
 def _call(model: AgentRouterClaudeModel) -> tuple[str, int, TokenUsage]:
@@ -776,7 +806,9 @@ def test_agent_decision_schema_enumerates_every_allowed_value() -> None:
     ]
     assert schema["additionalProperties"] is False
     from semantic_text2sql.conversational_agent import _DECISION_EXAMPLES
-    assert len(_DECISION_EXAMPLES) == 3
+    assert len(_DECISION_EXAMPLES) == 5
+    assert {example["tool_arguments"]["design_action"] for example in _DECISION_EXAMPLES
+            if example.get("tool") == "ai_dashboard_designer"} == {"PROPOSE", "APPROVE"}
 
 
 def test_groq_native_structured_output_carries_full_json_schema() -> None:

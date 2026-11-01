@@ -144,6 +144,25 @@ test('success badge is hidden and plot choices are centered inside the answer', 
   assert.ok(styles.includes('.recommended-plots { display: flex; align-items: center; justify-content: center;'));
   assert.ok(source.includes('body.chart_recommendations'));
 });
+test('pending dashboard designs are discussion, not chart failures or executed dashboards', () => {
+  const context = vm.createContext({
+    EXPLANATION_OPERATIONS_UI: new Set(),
+    responseMode() { throw new Error('A proposal must not choose a result presentation'); },
+  });
+  vm.runInContext(source.slice(source.indexOf('function responseStatus('),
+    source.indexOf('function renderCallout(')), context);
+  vm.runInContext(source.slice(source.indexOf('function presentationMode('),
+    source.indexOf('function isChartMode(')), context);
+  for (const status of ['AWAITING_APPROVAL', 'REJECTED', 'FAILED', 'EXPIRED']) {
+    const body = {operation:'VISUALIZE', dashboard_design_proposal:{status},
+      presentation_state:{mode:'chart'}};
+    assert.equal(context.responseStatus(body, []).status, `DESIGN ${status}`);
+    assert.equal(context.responseStatus(body, []).explanatory, true);
+    assert.equal(context.presentationMode(body), 'explanation');
+  }
+  assert.equal(context.responseStatus({operation:'EXPLAIN_RESULT',
+    provenance:['assistant_service_failure']}, []).status, 'ASSISTANT UNAVAILABLE');
+});
 test('database is configured privately and the header hides the session ID', () => {
   const composer = markup.split('<form class="composer"')[1].split('</form>')[0];
   const header = markup.split('<header class="topbar">')[1].split('</header>')[0];

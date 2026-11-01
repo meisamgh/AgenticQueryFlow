@@ -30,6 +30,16 @@ class RequestBudget:
     def remaining(self) -> float:
         return max(0.0, self.started_at + self.timeout_seconds - monotonic())
 
+    def model_call_available(self) -> bool:
+        """Check retry feasibility without reserving a call; claim remains authoritative."""
+        with self._lock:
+            cap = _MODEL_CALL_CAP.get()
+            return (
+                self.remaining() > 0
+                and self.model_calls < self.max_model_calls
+                and not (cap is not None and cap[0] == id(self) and self.model_calls >= cap[1])
+            )
+
     async def wait(self, operation: Awaitable[T], *, kind: str) -> T:
         try:
             self.claim(kind)
