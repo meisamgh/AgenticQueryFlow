@@ -721,7 +721,8 @@ transfer. In-flight investigation uses existing progress/budgets; a cancelled
 attempt does not replace the last committed proposal. Legacy explicit dashboard
 APIs remain compatibility interfaces. Actual .env, credentials, business data and
 unrelated files were not edited. No commit, push or server restart was performed.
-See DASHBOARD_DESIGN_APPROVAL.md for implementation paths and remaining boundaries.
+This approval-based workflow is historical; see AUTONOMOUS_DASHBOARDS.md for
+the current workflow and remaining boundaries.
 
 ### Dashboard decision-format hardening (2026-10-31)
 
