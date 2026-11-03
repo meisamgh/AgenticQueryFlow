@@ -17,8 +17,15 @@ window.QueryflowDashboard = (() => {
     const known = (id) =>
       sources ? Boolean(sources[id]) : id === spec.result_id;
     const count = (id) => sources ? sources[id]?.row_count : spec.row_count;
+    const roles = ["PRIMARY", "COMPARISON", "DISTRIBUTION", "RELATIONSHIP"];
+    const hasRoles = spec?.widgets?.some((w) => w.analytical_role != null);
+    const invalidRoles = hasRoles && (
+      spec.widgets.some((w) => !roles.includes(w.analytical_role)) ||
+      spec.widgets.filter((w) => w.analytical_role === "PRIMARY").length !== 1
+    );
     if (
       !spec?.complete || !spec.result_id || !Array.isArray(spec.widgets) ||
+      invalidRoles ||
       !Number.isInteger(spec.row_count) || spec.row_count < 0 ||
       spec.widgets.length > 4 || (sources && !sources[spec.result_id]) ||
       spec.widgets.some((w) => !known(w.result_id)) ||
@@ -54,7 +61,7 @@ window.QueryflowDashboard = (() => {
           "h4",
           "dashboard-section-title",
           {
-            filters: "Scope",
+            filters: "Filters & scope",
             kpis: "KPIs",
             charts: "Charts",
             data: "Data",
@@ -132,7 +139,9 @@ window.QueryflowDashboard = (() => {
           const kpiCount = spec.kpis?.length || 0;
           grid.style.setProperty(
             "--dashboard-kpi-span",
-            String(kpiCount === 1 ? 12 : kpiCount === 2 ? 6 : kpiCount === 3 ? 4 : 3),
+            String(
+              kpiCount === 1 ? 12 : kpiCount === 2 ? 6 : kpiCount === 3 ? 4 : 3,
+            ),
           );
           for (const metric of spec.kpis || []) {
             const card = node("article", "chart-kpi-card dashboard-kpi");
@@ -179,24 +188,50 @@ window.QueryflowDashboard = (() => {
           // Reuse the existing semantic icon/sparkline component. All authoritative
           // values and chronological observations come from the validated backend.
           if (window.QueryflowKpis?.render && spec.kpis?.length) {
-            const decorated = spec.kpis.map(metric => ({
+            const decorated = spec.kpis.map((metric) => ({
               ...metric,
-              calculation: metric.calculation === "PERIOD_GROWTH" ? "PERIOD_CHANGE" : metric.calculation,
-              formatted_value: window.QueryflowKpis.format(metric.value, metric.unit),
+              calculation: metric.calculation === "PERIOD_GROWTH"
+                ? "PERIOD_CHANGE"
+                : metric.calculation,
+              formatted_value: window.QueryflowKpis.format(
+                metric.value,
+                metric.unit,
+              ),
               sparkline: metric.sparkline || [],
-              evidence: {result_id: metric.result_id, column: metric.metric, row_count: count(metric.result_id)},
-              comparison: metric.calculation === "PERIOD_GROWTH" && metric.baseline > 0
-                && metric.current != null && metric.periods?.length === 2
-                ? {baseline: metric.periods[0], current: metric.periods[1], change: metric.value} : null,
+              evidence: {
+                result_id: metric.result_id,
+                column: metric.metric,
+                row_count: count(metric.result_id),
+              },
+              comparison:
+                metric.calculation === "PERIOD_GROWTH" && metric.baseline > 0 &&
+                  metric.current != null && metric.periods?.length === 2
+                  ? {
+                    baseline: metric.periods[0],
+                    current: metric.periods[1],
+                    change: metric.value,
+                  }
+                  : null,
               comparison_evidence: metric.calculation === "PERIOD_GROWTH"
-                ? {baseline_value: metric.baseline, current_value: metric.current, sparkline: [], unit: undefined} : null,
+                ? {
+                  baseline_value: metric.baseline,
+                  current_value: metric.current,
+                  sparkline: [],
+                  unit: undefined,
+                }
+                : null,
               badge: (metric.periods || []).join(" → "),
             }));
             window.QueryflowKpis.render(grid, decorated);
             [...grid.children].forEach((card, index) => {
               card.classList.add("dashboard-kpi");
               card.dataset.widgetId = spec.kpis[index].kpi_id || "";
-              if (onSelectWidget) card.addEventListener("click", () => onSelectWidget(spec.kpis[index].kpi_id));
+              if (onSelectWidget) {
+                card.addEventListener(
+                  "click",
+                  () => onSelectWidget(spec.kpis[index].kpi_id),
+                );
+              }
             });
           }
           if (!spec.kpis?.length) {
@@ -209,48 +244,87 @@ window.QueryflowDashboard = (() => {
             );
           }
         } else if (kind === "charts") {
-          const grid = node("div", "dashboard-chart-grid");
-          section.append(grid);
-          for (const widget of spec.widgets) {
-            const card = node("article", "dashboard-chart-card");
-            card.style.setProperty(
-              "--dashboard-span",
-              String(
-                spec.design_mode === "ai" && [4, 6, 8, 12].includes(widget.column_span)
-                  ? widget.column_span : 12,
-              ),
-            );
-            card.dataset.resultId = widget.result_id;
-            card.dataset.widgetId = widget.widget_id;
-            if (widget === spec.widgets[0]) {
-              card.classList.add("dashboard-primary");
+          const layered = (spec.design_mode === "ai" && !spec.widgets.length) ||
+            (spec.widgets.length > 0 &&
+              spec.widgets.every((w) => w.analytical_role));
+          const layers = layered
+            ? [
+              ["PRIMARY", "Primary"],
+              ["COMPARISON", "Comparison"],
+              ["DISTRIBUTION", "Distribution"],
+              ["RELATIONSHIP", "Relationship"],
+            ]
+            : [[null, null]];
+          for (const [role, title] of layers) {
+            const selectedWidgets = role
+              ? spec.widgets.filter((w) => w.analytical_role === role)
+              : spec.widgets;
+            const layer = role
+              ? node("section", "dashboard-chart-layer")
+              : section;
+            if (role) {
+              layer.dataset.analyticalRole = role;
+              layer.append(node("h4", "dashboard-layer-title", title));
+              section.append(layer);
+              if (!selectedWidgets.length) {
+                layer.append(
+                  node(
+                    "p",
+                    "dashboard-empty",
+                    "No verified plot selected for this section.",
+                  ),
+                );
+                continue;
+              }
             }
-            const chart = widget.chart_spec;
-            card.append(
-              node(
-                "h5",
-                "dashboard-chart-title",
-                window.QueryflowChartTheme?.title(chart) || chart.title,
-              ),
-            );
-            if (onSelectWidget) {
-              const edit = node("button", "dashboard-widget-edit", "Edit");
-              edit.type = "button";
-              edit.setAttribute("aria-label", "Edit " + chart.title);
-              edit.addEventListener(
-                "click",
-                () => onSelectWidget(widget.widget_id),
+            const grid = node("div", "dashboard-chart-grid");
+            layer.append(grid);
+            for (const widget of selectedWidgets) {
+              const card = node("article", "dashboard-chart-card");
+              card.style.setProperty(
+                "--dashboard-span",
+                String(
+                  spec.design_mode === "ai" &&
+                    [4, 6, 8, 12].includes(widget.column_span)
+                    ? widget.column_span
+                    : 12,
+                ),
               );
-              card.append(edit);
+              card.dataset.resultId = widget.result_id;
+              card.dataset.widgetId = widget.widget_id;
+              if (
+                widget.analytical_role === "PRIMARY" ||
+                !layered && widget === spec.widgets[0]
+              ) {
+                card.classList.add("dashboard-primary");
+              }
+              const chart = widget.chart_spec;
+              card.append(
+                node(
+                  "h5",
+                  "dashboard-chart-title",
+                  window.QueryflowChartTheme?.title(chart) || chart.title,
+                ),
+              );
+              if (onSelectWidget) {
+                const edit = node("button", "dashboard-widget-edit", "Edit");
+                edit.type = "button";
+                edit.setAttribute("aria-label", "Edit " + chart.title);
+                edit.addEventListener(
+                  "click",
+                  () => onSelectWidget(widget.widget_id),
+                );
+                card.append(edit);
+              }
+              const slot = node("div", "chart-slot");
+              card.append(slot);
+              grid.append(card);
+              const handle = renderChart(slot, { chart_spec: chart }, null)
+                ?.echarts;
+              if (handle) handles.push(handle);
             }
-            const slot = node("div", "chart-slot");
-            card.append(slot);
-            grid.append(card);
-            const handle = renderChart(slot, { chart_spec: chart }, null)
-              ?.echarts;
-            if (handle) handles.push(handle);
           }
-          if (!spec.widgets.length) {
+          if (!spec.widgets.length && !layered) {
             section.append(
               node(
                 "p",

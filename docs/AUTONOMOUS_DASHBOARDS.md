@@ -39,6 +39,8 @@ Essential missing requirements cannot be presented as a finished design. Optiona
 or trigger additional SQL automatically.
 
 Layout remains verified scope/filters → eligible KPIs → charts → optional data.
+Chart layers now appear as Primary → Comparison → Distribution → Relationship,
+with exactly one Primary and honest empty sections for unsupported evidence.
 Charts occupy full-width rows; KPI cards may share a row. Aim for three useful
 KPIs only when supported; no invented metrics, baselines or decorative trends.
 

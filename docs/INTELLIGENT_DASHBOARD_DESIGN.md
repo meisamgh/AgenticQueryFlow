@@ -10,9 +10,10 @@ communicate it. No new agent, router, framework or SQL execution path was added.
    metadata only, not SQL predicates. Applied source constraints always remain.
 2. **KPIs:** select validated IDs using their definitions, units, period metadata,
    aggregation and grain. No minimum count or invented metrics to fill slots.
-3. **Visualizations:** internally consider primary analysis, comparison,
-   distribution and relationship. These are perspectives, not mandatory sections.
-   Compare combinations and select the smallest useful, nonredundant design.
+3. **Visualizations:** display Primary, Comparison, Distribution and Relationship
+   in that order. Exactly one selected plot is Primary. Other sections contain
+   useful evidence-supported plots; an unsupported section remains clearly empty,
+   never filled with a fabricated plot. Compare combinations for nonredundancy.
 
 The active `_PROMPT` is in `src/semantic_text2sql/ai_dashboard_designer.py`.
 Output remains the existing `DashboardProposal`: exact candidate IDs, PATCH/
@@ -56,6 +57,13 @@ AI chart widths now honor the supported 4/6/8/12 spans, with full width preferre
 Each chart starts at column one of a separate row. Mobile charts remain full
 width; KPIs may share a row. Deterministic/legacy default rendering stays full
 width. Plotly/ECharts and existing CSS tokens are reused.
+
+New AI designs must assign an analytical_role to each plot; schema, materializer
+and persisted spec validation enforce complete labeling and a single Primary.
+PATCH preserves existing roles unless explicitly changed. Removing the Primary
+requires promoting a replacement. Older unlabelled documents remain compatible
+without guessed reclassification. Role annotations are planner judgments, not
+proof of causal or statistical claims; existing chart/source validation remains.
 
 ## Evaluation boundary
 

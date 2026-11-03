@@ -308,7 +308,9 @@ def test_conversation_three_governed_queries_then_design_save_and_reopen(
                         for source in context["source_profiles"]
                     ],
                     "charts": [
-                        {"candidate_id": c["candidate_id"]} for c in context["chart_catalog"][:2]
+                        {"candidate_id": c["candidate_id"],
+                         "analytical_role": "PRIMARY" if i == 0 else "COMPARISON"}
+                        for i, c in enumerate(context["chart_catalog"][:2])
                     ],
                 }
             ), TokenUsage(input_tokens=100, output_tokens=30)

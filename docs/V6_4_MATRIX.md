@@ -199,3 +199,23 @@ validation, differing scripted selections for same-schema/different observations
 replacement/removal/order and unaffected source preservation. 652 Python passed/
 2 skipped, 187 frontend/voice passed; Ruff/mypy/diff passed. Live LLM design
 quality and browser appearance are NOT VERIFIED; no new LLM or SQL calls added.
+
+Four visible chart layers VERIFIED (automated): role metadata in DashboardWidget
+and ChartChoice; new AI design schema/local checks require plot roles and a unique
+Primary. Materialization orders Primary → Comparison → Distribution → Relationship;
+PATCH preserves/reassigns roles explicitly. Typed spec/store compatibility and
+frontend validate the same single-Primary invariant. Four sections render in order,
+unsupported layers remain empty and no plots share a grid row. Existing legacy
+unlabelled designs are preserved. Tests: 659 Python passed/2 skipped,
+188 frontend/voice passed; Ruff/mypy/diff passed. Live new-role planning and browser
+appearance remain unverified. Existing server and unsaved dashboards untouched.
+
+Dashboard failure hardening VERIFIED (automated, 2026-11-02): typed safe diagnostics,
+request/proposal/attempt logging without data, grounded year/label validation,
+specific bounded repair with preserved valid choices, provider non-retry,
+API/Studio messages and unchanged original revision after failure. Sources and
+acceptance: DASHBOARD_VALIDATION.md; test_dashboard_design_diagnostics.py and
+frontend message regressions. 677 Python passed/2 skipped, 189 frontend/voice
+passed, Ruff/mypy/diff passed. Live-provider/browser/PostgreSQL verification not run.
+Final source-scoped annotation regression included: 678 Python passed/2 skipped;
+189 frontend/voice passed. Full results and exact changed files: DASHBOARD_VALIDATION.md.

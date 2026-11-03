@@ -3,6 +3,9 @@
 Current three-layer reasoning and editing rules:
 [Intelligent BI dashboard design](INTELLIGENT_DASHBOARD_DESIGN.md).
 
+[Validation failures and bounded correction](DASHBOARD_VALIDATION.md) documents
+safe diagnostics, grounded annotation labels, repair limits and unchanged safety checks.
+
 The existing LangGraph assistant owns conversation and analytical changes. Its
 `ai_dashboard_designer` tool is a bounded specialist, not another agent. The
 Phase 1 deterministic dashboard remains the backend fallback. Phase 4 removes

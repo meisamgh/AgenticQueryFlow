@@ -1,5 +1,54 @@
 # V6.4 progress checkpoint
 
+## 2026-11-02 — Dashboard failure diagnostics and annotation correction
+
+Confirmed retained failures: rationale exceeded 600 characters, then the retry
+hit the combined all-digits/markup/finding annotation rule. Old logs did not
+identify the second field or individual trigger. Added safe structured failure
+records (code/field/repairability/exception/opaque IDs/attempt), per-attempt logging,
+API/Studio propagation, current-message frontend precedence and useful errors.
+No raw model output, SQL rows, credentials or unrecognized schema field names are logged.
+
+The prompt targets one short rationale under 300 chars; the existing hard 600
+limit remains. Grounded years/labels are allowed, but unsupported claims/markup
+still fail. Per-chart annotation permissions are source-scoped. Candidate, axis,
+mode, source and revision checks remain. Repair gets specific safe feedback and
+whitelisted prior choices; unrelated valid selections cannot be redesigned during
+repair. At most one repair; provider/request/deadline failures do not trigger it.
+
+Acceptance includes real SQLite/API creation → failed edit → save-original checks,
+log redaction, years, invalid IDs/axes, mode/stale refs, failed repair preservation
+and provider non-retry. Full verification: 677 Python passed/2 skipped (23.53s),
+189 frontend/voice passed (509ms), Ruff/mypy (65 source files)/diff passed.
+No live-provider/PostgreSQL/browser pixel checks, restart, .env changes or commit/push.
+Changed designer, models, API, conversational agent, Studio, frontend message
+selection/cache tag, diagnostics tests and docs. Prior uncommitted work preserved.
+Final additional source-scoping test confirms a year present in one retained
+analysis cannot authorize the same label on another source's chart. Final run:
+678 Python passed/2 skipped (22.58s), 189 frontend/voice passed (509ms).
+
+## 2026-11-01 — Ordered chart layers and single Primary
+
+Applied the user's refinement: filter decisions first, then KPIs, then visible
+Primary/Comparison/Distribution/Relationship chart layers. This supersedes earlier
+internal-perspective-only UI guidance. Proposal schema/catalog ordering now puts
+filter selection before KPIs/charts. Added optional analytical_role metadata for
+backward-compatible documents; new AI designs require role assignments and one
+Primary. Edits preserve roles, and removing the sole Primary requires a promotion.
+Validation, restore and source snapshots retain existing safety/lineage boundaries.
+
+Frontend renders the four layers in order, every chart on its own grid row and
+KPIs permitted in a shared row. Empty unsupported layers say no verified plot was
+selected; no chart/data is fabricated. Older unlabelled dashboards remain
+compatible rather than being automatically assigned new analytical meanings.
+No extra model/SQL calls or new agents. The running server was not restarted.
+
+Tests cover strict new-design roles, unique Primary/order, PATCH preservation and
+promotion, role persistence across restart, four-layer UI order and empty states.
+659 Python passed/2 skipped (23.21s); 188 frontend/voice passed (511ms),
+Ruff/mypy/diff passed. No live provider or browser pixel review for this refinement;
+no .env changes, commit or push. Restart/refresh and redesign to adopt new layouts.
+
 ## 2026-11-01 — Intelligent three-layer dashboard design and editing
 
 Read the supplied Intelligent BI Dashboard Design & Editing task and reused the

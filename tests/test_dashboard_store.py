@@ -46,6 +46,20 @@ def test_restart_preserves_snapshot_sql_filters_and_spec(tmp_path):
         ).fetchall() == [(1,), (2,)]
 
 
+def test_layer_roles_survive_restart_without_changing_legacy_snapshots(tmp_path):
+    doc = document()
+    roles = ["PRIMARY", "COMPARISON", "DISTRIBUTION", "RELATIONSHIP"]
+    widgets = [widget.model_copy(update={"analytical_role": roles[index]})
+               for index, widget in enumerate(doc.spec.widgets)]
+    layered = doc.model_copy(update={"spec": doc.spec.model_copy(update={"widgets": widgets})})
+    path, owner = tmp_path / "roles.sqlite", DashboardPrincipal("owner")
+    saved = DashboardStore(path).create(owner, "Layered design", layered)
+    reopened = DashboardStore(path).open(owner, saved.dashboard_id)
+    assert [w.analytical_role for w in reopened.document.spec.widgets] == roles[:len(widgets)]
+    assert reopened.document.source == doc.source
+    assert all(w.analytical_role is None for w in doc.spec.widgets)
+
+
 def test_owner_isolation_and_explicit_publication(tmp_path):
     store = DashboardStore(tmp_path / "history.sqlite")
     owner, other = DashboardPrincipal("alice", True), DashboardPrincipal("bob", True)

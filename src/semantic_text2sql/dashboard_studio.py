@@ -218,6 +218,7 @@ def studio_router(
                 "message": result.message,
                 "call_ledger": result.call_ledger,
                 "design_proposal": result.dashboard_design_proposal,
+                "dashboard_design_failures": result.dashboard_design_failures,
             }
         from semantic_text2sql.dashboard_service import DashboardSpec
 

@@ -6,6 +6,29 @@ const vm = require('node:vm');
 const source = fs.readFileSync(`${__dirname}/../web/app.js`, 'utf8');
 const styles = fs.readFileSync(`${__dirname}/../web/styles.css`, 'utf8');
 const markup = fs.readFileSync(`${__dirname}/../web/index.html`, 'utf8');
+test('user avatar is a white U on a green circle instead of a person icon', () => {
+  assert.ok(source.includes('avatar.textContent = "U";'));
+  assert.ok(!source.includes('avatar.innerHTML = icon("user"'));
+  assert.ok(styles.includes('width:34px; height:34px; background:#168447; color:#fff;'));
+});
+test('question composer is compact without reducing text readability or send controls', () => {
+  assert.ok(styles.includes('.composer-inner { max-width: 760px;'));
+  assert.ok(styles.includes('height: 28px; max-height: 110px; min-width: 0; flex: 1;'));
+  assert.ok(styles.includes('padding: 6px 10px; display: flex; flex-direction: row;'));
+  assert.ok(markup.includes('id="messageInput" rows="1"'));
+  assert.ok(markup.includes('id="sendButton"'));
+});
+test('dashboard failures show the safe current cause rather than an inherited explanation', () => {
+  const message = vm.runInNewContext(`${source.slice(source.indexOf('function dashboardResponseMessage('),
+    source.indexOf('async function appendAssistant('))}; dashboardResponseMessage`);
+  const failed = {message: 'The dashboard explanation exceeds the 600-character limit.',
+    explanation: 'Old successful answer', presentation: {summary: 'Old chart summary'},
+    dashboard_design_failures: [{code: 'ANNOTATION_TOO_LONG', message: 'Safe diagnostic'}]};
+  assert.equal(message(failed), failed.message);
+  assert.equal(message({...failed, message: ''}), 'Safe diagnostic');
+  assert.equal(message({dashboard: {result_id: 'accepted'}, message: 'Ready',
+    dashboard_design_failures: failed.dashboard_design_failures}), 'Ready');
+});
 const explorerContext = vm.createContext({window: {}});
 vm.runInContext(fs.readFileSync(`${__dirname}/../web/chart_explorer.js`, 'utf8'), explorerContext);
 const explorer = explorerContext.window.QueryflowChartExplorer;

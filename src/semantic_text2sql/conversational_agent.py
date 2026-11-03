@@ -2217,6 +2217,9 @@ class ConversationalAnalyticsAgent:
                 facts = {"tool": tool, "error": "Dashboard design is unavailable."}
             else:
                 self._request._dashboard_sources = dict(state.dashboard_results)
+                self._request._dashboard_request_id = (
+                    state.turn_context.request_id if state.turn_context else None
+                )
                 self._request._dashboard_source_ids = tool_input.source_result_ids
                 self._request._dashboard_design_action = tool_input.design_action
                 self._request._dashboard_proposal_id = tool_input.proposal_id
@@ -2253,6 +2256,8 @@ class ConversationalAnalyticsAgent:
                     "status": workflow_status,
                     "message": base.message,
                     "result_id": base.result_id,
+                    "design_failures": [item.model_dump()
+                                        for item in base.dashboard_design_failures],
                 }
                 if workflow_status == "REQUERY_REQUIRED":
                     facts["reason"] = base.message

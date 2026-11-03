@@ -54,6 +54,7 @@ class DashboardWidget(StrictModel):
     column_span: Literal[4, 6, 8, 12] = 6
     row: int = Field(ge=0, le=3)
     chart_spec: ChartSpec
+    analytical_role: Literal["PRIMARY", "COMPARISON", "DISTRIBUTION", "RELATIONSHIP"] | None = None
 
 
 class DashboardData(StrictModel):
@@ -116,6 +117,10 @@ class DashboardSpec(StrictModel):
 
     @model_validator(mode="after")
     def source_identity(self) -> DashboardSpec:
+        roles = [widget.analytical_role for widget in self.widgets
+                 if widget.analytical_role is not None]
+        if roles and (len(roles) != len(self.widgets) or roles.count("PRIMARY") != 1):
+            raise ValueError("Layered dashboards require all plot roles and exactly one primary")
         if self.schema_version == 2 and (
             not self.sources
             or self.result_id not in self.sources

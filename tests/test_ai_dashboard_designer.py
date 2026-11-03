@@ -214,7 +214,7 @@ def test_same_schema_different_behavior_can_support_different_model_selections()
                 "Verified context (profiles/sample are bounded, not the entire result): "
             )[1])
             assert "LAYER 1" in prompt and "LAYER 2" in prompt and "LAYER 3" in prompt
-            assert "NOT mandatory sections" in prompt
+            assert "Display FOUR chart layers" in prompt
             distribution = next(p["distribution"] for p in context["column_profiles"]
                                 if p["column"] == "revenue")
             candidate = context["chart_catalog"][1 if distribution["iqr_outlier_count"] else 0]
@@ -289,6 +289,61 @@ def test_patch_replacements_removals_order_and_width_preserve_other_widgets():
         {"candidate_id": ids[0], "order": 0}, {"candidate_id": ids[1], "order": 0}
     ]}, previous=previous)
     assert invalid.status == "FALLBACK" and invalid.spec.widgets == previous.widgets
+
+
+def test_layered_design_has_single_primary_in_front_and_preserves_roles_on_edit():
+    from semantic_text2sql.ai_dashboard_designer import DashboardProposal
+
+    fields = list(DashboardProposal.model_fields)
+    assert fields.index("filter_refs") < fields.index("kpis") < fields.index("charts")
+    _, _, _, _, catalog = setup()
+    ids = list(catalog)
+    first, *_ = run({"result_id": "result", "charts": [
+        {"candidate_id": ids[1], "analytical_role": "COMPARISON", "order": 0},
+        {"candidate_id": ids[0], "analytical_role": "PRIMARY", "order": 1},
+    ]})
+    assert first.status == "READY" and first.spec
+    assert [w.analytical_role for w in first.spec.widgets] == ["PRIMARY", "COMPARISON"]
+    assert [w.row for w in first.spec.widgets] == [0, 1]
+    edited, *_ = run({"result_id": "result", "mode": "PATCH", "theme": "contrast"},
+                     previous=first.spec)
+    assert edited.status == "READY" and edited.spec.widgets == first.spec.widgets
+    missing, *_ = run({"result_id": "result", "mode": "PATCH", "remove_ids": [ids[0]]},
+                      previous=first.spec)
+    assert missing.status == "FALLBACK" and missing.spec.widgets == first.spec.widgets
+    promoted, *_ = run({"result_id": "result", "mode": "PATCH", "remove_ids": [ids[0]],
+                       "charts": [{"candidate_id": ids[1], "analytical_role": "PRIMARY"}]},
+                       previous=first.spec)
+    assert promoted.status == "READY" and len(promoted.spec.widgets) == 1
+    assert promoted.spec.widgets[0].widget_id == ids[1]
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+def test_new_ai_dashboard_requires_layer_assignments_not_legacy_guesses(annotated):
+    source, request, _, _, charts = setup()
+    choice = {"candidate_id": next(iter(charts))}
+    if annotated:
+        choice["analytical_role"] = "PRIMARY"
+    model = Designer({"result_id": "result", "charts": [choice]})
+    outcome = asyncio.run(design_dashboard(
+        source=source, request=request.model_copy(update={"design_mode": "ai"}),
+        completer=model, provider="test", model="script", budget=RequestBudget(2),
+    ))
+    assert outcome.status == ("READY" if annotated else "FALLBACK")
+    if annotated:
+        assert outcome.spec.widgets[0].analytical_role == "PRIMARY"
+
+
+@pytest.mark.parametrize("roles", [("PRIMARY", "PRIMARY"), ("COMPARISON", "RELATIONSHIP"),
+                                 ("PRIMARY", None)])
+def test_invalid_layer_roles_do_not_produce_a_new_design(roles):
+    _, _, _, _, catalog = setup()
+    outcome, model, budget = run({"result_id": "result", "charts": [
+        {"candidate_id": key, "analytical_role": role}
+        for key, role in zip(catalog, roles, strict=False)
+    ]})
+    assert outcome.status == "FALLBACK"
+    assert model.calls == budget.model_calls == 1 and budget.database_calls == 0
 
 
 def test_provider_retry_cannot_exceed_one_specialist_call():
@@ -371,7 +426,8 @@ def test_ai_api_reuses_real_sql_result_and_undo_without_database_calls(registry,
                                              "not the entire result): ")[1])
             return json.dumps({"result_id": context["result_id"], "theme": "neutral",
                 "kpis": [{"kpi_id": context["kpi_catalog"][0]["kpi_id"]}],
-                "charts": [{"candidate_id": context["chart_catalog"][0]["candidate_id"]}]
+                "charts": [{"candidate_id": context["chart_catalog"][0]["candidate_id"],
+                            "analytical_role": "PRIMARY"}]
             }), TokenUsage(input_tokens=100, output_tokens=30)
 
     designer = LiveDesigner()

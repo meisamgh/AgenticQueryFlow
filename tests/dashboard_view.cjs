@@ -170,6 +170,22 @@ test('AI layout widths are honored without putting two plots in the same row', (
   const css = fs.readFileSync('web/styles.css', 'utf8');
   assert.ok(css.includes('grid-column:1 / span var(--dashboard-span,12)'));
 });
+test('four chart layers are ordered, each plot has its own row, and missing layers stay empty', () => {
+  const data = spec();
+  data.widgets[0].analytical_role = 'PRIMARY';
+  const container = new Element('div');
+  let renders = 0;
+  setup().render(container, data, {renderChart() { renders++; }, renderTable() {}});
+  const layers = walk(container).filter(e => e.dataset.analyticalRole);
+  assert.deepEqual(layers.map(e => e.dataset.analyticalRole),
+    ['PRIMARY', 'COMPARISON', 'DISTRIBUTION', 'RELATIONSHIP']);
+  assert.equal(renders, 1);
+  assert.equal(walk(container).filter(e => e.textContent ===
+    'No verified plot selected for this section.').length, 3);
+  const duplicate = {...data.widgets[0], widget_id: 'duplicate'};
+  assert.throws(() => setup().render(new Element('div'), {...data,
+    widgets: [data.widgets[0], duplicate]}, {renderChart() {}, renderTable() {}}));
+});
 test("ordinary analytical answers have no dashboard creation controls or calls", () => {
   const article = new Element("article");
   let calls = 0;

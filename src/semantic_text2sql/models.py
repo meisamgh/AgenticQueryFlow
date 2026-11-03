@@ -736,6 +736,7 @@ class ChatRequest(StrictModel):
     _dashboard_investigation_evidence: list[dict[str, Any]] = PrivateAttr(default_factory=list)
     _dashboard_source_ids: list[str] = PrivateAttr(default_factory=list)
     _dashboard_widget_id: str | None = PrivateAttr(default=None)
+    _dashboard_request_id: str | None = PrivateAttr(default=None)
     _dashboard_previous_result_id: str | None = PrivateAttr(default=None)
     dashboard_target: DashboardTarget | None = None
     model_config = ConfigDict(extra="forbid", validate_default=True)
@@ -1030,12 +1031,26 @@ class ChartRecommendations(StrictModel):
     alternative_charts: list[RecommendedChart] = Field(default_factory=list, max_length=6)
 
 
+class DashboardDesignFailure(StrictModel):
+    code: str
+    field: str
+    message: str
+    repairable: bool
+    request_id: str
+    proposal_id: str
+    attempt: int = Field(ge=1, le=2)
+    exception_type: str = ""
+
+
 class ChatResponse(StrictModel):
     _dashboard_evidence: dict[str, Any] = PrivateAttr(default_factory=dict)
     # Validated DashboardSpec serialized at the specialist boundary; kept here
     # as a JSON envelope to avoid importing dashboard_service back into models.
     dashboard: dict[str, Any] | None = None
     dashboard_design_proposal: dict[str, Any] | None = None
+    dashboard_design_failures: list[DashboardDesignFailure] = Field(
+        default_factory=list, max_length=2
+    )
     session_id: str
     run_id: str | None = None
     result_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")

@@ -100,6 +100,7 @@ from semantic_text2sql.models import (
     CheckRequest,
     CheckResponse,
     ConversationState,
+    DashboardDesignFailure,
     DashboardTarget,
     DatabaseOption,
     FilterValuesResponse,
@@ -2493,6 +2494,7 @@ def create_app(
         assert retained.result_id is not None
         usage = TokenUsage()
         ledger: list[CallLedgerEntry] = []
+        design_failures: list[Any] = []
         try:
             if undo:
                 if saved is not None:
@@ -2522,8 +2524,10 @@ def create_app(
                     repair=True,
                     target_widget_id=request._dashboard_widget_id,
                     investigation_evidence=request._dashboard_investigation_evidence,
+                    request_id=request._dashboard_request_id,
                 )
                 usage, ledger = outcome.usage, list(outcome.ledger)
+                design_failures = list(outcome.failures)
                 if outcome.spec is None:
                     return ChatResponse(
                         session_id=request.session_id, operation="VISUALIZE",
@@ -2531,16 +2535,18 @@ def create_app(
                         provenance=([] if outcome.status == "REQUERY_REQUIRED"
                                     else ["dashboard_design_validation_failed"]),
                         token_usage=usage, call_ledger=ledger,
+                        dashboard_design_failures=design_failures,
                     )
                 spec = outcome.spec
                 if outcome.status == "FALLBACK":
                     return ChatResponse(
                         session_id=request.session_id, operation="VISUALIZE",
                         resolved_question=objective,
-                        message="The design was not validated. "
-                                "The previous dashboard is unchanged.",
+                        message=outcome.reason + (" Your previous dashboard is unchanged."
+                                                  if previous else " No dashboard was created."),
                         provenance=["dashboard_design_validation_failed"],
                         token_usage=usage, call_ledger=ledger,
+                        dashboard_design_failures=design_failures,
                     )
                 # Validate snapshots before exposing a revision or replacing retained evidence.
                 document = DashboardDocument(
@@ -2560,6 +2566,7 @@ def create_app(
                 generation=retained.generation, presentation=None,
                 message="The dashboard is ready from the accepted result.",
                 dashboard=spec.model_dump(mode="json"), token_usage=usage, call_ledger=ledger,
+                dashboard_design_failures=design_failures,
                 state_commit_pending=(source.state_commit_pending
                                       if isinstance(source, ChatResponse) else False),
                 state_expected_version=(source.state_expected_version
@@ -2570,9 +2577,24 @@ def create_app(
             response._dashboard_evidence = evidence
             return response
         except DashboardError as exc:
+            conflict = str(exc) == "Dashboard changed concurrently; reopen before editing."
+            failure = DashboardDesignFailure(
+                code="REVISION_CONFLICT" if conflict else "SOURCE_VALIDATION_FAILED",
+                field="revision_id" if conflict else "source",
+                message=str(exc) if conflict
+                else "The dashboard source could not be validated safely.",
+                repairable=False, request_id=request._dashboard_request_id or uuid4().hex,
+                proposal_id=uuid4().hex, attempt=min(2, len(design_failures) + 1),
+                exception_type=type(exc).__name__,
+            )
+            logger.warning("dashboard_design_rejected request_id=%s proposal_id=%s attempt=%s "
+                           "code=%s field=%s repairable=false exception=%s", failure.request_id,
+                           failure.proposal_id, failure.attempt, failure.code, failure.field,
+                           failure.exception_type)
             return ChatResponse(
                 session_id=request.session_id, operation="VISUALIZE", resolved_question=objective,
-                message=str(exc), token_usage=usage, call_ledger=ledger,
+                message=failure.message, token_usage=usage, call_ledger=ledger,
+                dashboard_design_failures=[*design_failures, failure],
                 provenance=["dashboard_design_validation_failed"],
             )
 
@@ -2589,6 +2611,7 @@ def create_app(
                                               for k in spec.kpis],
                 "charts": [{"id": w.widget_id, "title": w.chart_spec.title,
                             "type": w.chart_spec.chart_type, "width": w.column_span,
+                            "analytical_role": w.analytical_role,
                             "source_result_id": w.result_id}
                            for w in spec.widgets]}
 

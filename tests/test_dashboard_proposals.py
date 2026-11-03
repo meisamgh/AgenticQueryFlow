@@ -324,7 +324,9 @@ def test_missing_evidence_is_requeried_then_dashboard_built_without_confirmation
             for item in context["chart_catalog"]:
                 if item["result_id"] not in seen:
                     seen.add(item["result_id"])
-                    charts.append({"candidate_id": item["candidate_id"], "column_span": 12})
+                    charts.append({"candidate_id": item["candidate_id"], "column_span": 12,
+                                   "analytical_role": "PRIMARY" if len(charts) == 0
+                                   else "COMPARISON"})
             return json.dumps({"result_id": context["result_id"], "charts": charts}), TokenUsage()
 
     sql, model = SQL(), Model()

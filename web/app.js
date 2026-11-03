@@ -297,7 +297,8 @@ function appendUser(message) {
   speaker.className = "speaker";
   const avatar = document.createElement("span");
   avatar.className = "avatar";
-  avatar.innerHTML = icon("user", 13);
+  avatar.textContent = "U";
+  avatar.setAttribute("aria-label", "You");
   const name = document.createElement("span");
   name.textContent = "You";
   const time = document.createElement("time");
@@ -1483,6 +1484,13 @@ function isPlotOnlyTurn(body) {
     ["sql_generation", "sql_repair", "sql_execution"].includes(entry.component));
 }
 
+function dashboardResponseMessage(body) {
+  if (!body.dashboard && body.dashboard_design_failures?.length) {
+    return body.message || body.dashboard_design_failures.at(-1).message;
+  }
+  return body.explanation || body.presentation?.summary || body.message || "";
+}
+
 async function appendAssistant(body, elapsed, options = {}) {
   if (!options.restored) rememberChartSnapshot(body);
   const fragment = $("#assistantTemplate").content.cloneNode(true);
@@ -1494,7 +1502,7 @@ async function appendAssistant(body, elapsed, options = {}) {
   const { explanatory, modelUnavailable, status } = responseStatus(body, attempts);
   updateStatusPill(fragment, body, accepted, status);
 
-  const responseMessage = body.explanation || body.presentation?.summary || body.message || "";
+  const responseMessage = dashboardResponseMessage(body);
   fragment.querySelector(".response-note").textContent = responseMessage;
   if (body.dashboard_design_proposal && window.QueryflowDesignReview) {
     const note = fragment.querySelector(".response-note");
