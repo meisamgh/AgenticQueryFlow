@@ -322,17 +322,21 @@ const pipelineStages = [
 
 const progressLabels = {
   queued: "Waiting to start…",
-  presentation: "Preparing a plain-language answer",
-  conversation: "Understanding your request",
-  retrieval: "Finding relevant tables and columns",
-  context_selection: "Selecting context with your context model",
-  grounding: "Verifying schema and metadata",
-  generation: "Generating SQL — waiting for the model",
-  validation: "Checking SQL safety",
-  optimization: "Checking a possible SQL optimization",
-  execution: "Running the read-only query",
-  result_review: "Reviewing an empty or NULL result",
-  recovery: "Investigating the query issue",
+  presentation: "Preparing your answer…",
+  conversation: "Understanding your question…",
+  retrieval: "Finding relevant data…",
+  context_selection: "Finding relevant data…",
+  grounding: "Checking the data structure…",
+  generation: "Preparing your query…",
+  validation: "Validating SQL…",
+  optimization: "Checking your query…",
+  execution: "Running your query…",
+  result_review: "Checking the results…",
+  visualization: "Preparing your visualization…",
+  plotting: "Preparing your visualization…",
+  build: "Preparing your dashboard…",
+  investigation: "Checking the evidence…",
+  recovery: "Investigating an issue…",
   recovery_reasoning: "Recovery agent: deciding what evidence to check",
   recovery_schema: "Recovery agent: inspecting schema",
   recovery_values: "Recovery agent: checking actual database values",
@@ -346,16 +350,7 @@ function appendProgress(contextMode) {
   $("#emptyState").hidden = true;
   const fragment = $("#progressTemplate").content.cloneNode(true);
   const article = fragment.querySelector("article");
-  const tracker = article.querySelector(".pipeline-tracker");
-  tracker.replaceChildren();
-  pipelineStages.forEach(([stage, label]) => {
-    if (stage === "context_selection" && contextMode === "retrieval") return;
-    const step = document.createElement("span");
-    step.dataset.stage = stage;
-    step.textContent = label;
-    tracker.append(step);
-  });
-  article.querySelector(".progress-detail").textContent = "Using the configured query pipeline";
+  article.querySelector(".progress-detail").textContent = "You can cancel at any time.";
   hydrateIcons(article);
   $("#messages").append(article);
   return article;
@@ -365,14 +360,36 @@ function wait(milliseconds) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
 }
 
+function updateThinking(progress, job) {
+  const stage = job.stage || "queued";
+  const label = stage.startsWith("recovery") ? "Investigating an issue…"
+    : progressLabels[stage] || "Working on your request…";
+  const title = progress.querySelector(".progress-stage");
+  if (title.textContent !== label) title.textContent = label;
+  progress.dataset.status = job.status;
+  progress.querySelector(".progress-elapsed").textContent = `${Math.floor(Math.max(0, Number(job.elapsed_ms) || 0) / 1000)}s`;
+  const events = job.events || [];
+  const signature = JSON.stringify(events);
+  if (progress.dataset.eventSignature === signature) return;
+  progress.dataset.eventSignature = signature;
+  const log = progress.querySelector(".progress-history ul");
+  log.replaceChildren();
+  events.forEach(event => {
+    const item = document.createElement("li");
+    item.textContent = `${((event.elapsed_ms || 0) / 1000).toFixed(1)}s · ${progressLabels[event.stage] || "Processing request"}`;
+    log.append(item);
+  });
+  const completed = [...new Set(events.filter(event => event.stage !== stage)
+    .map(event => event.stage.startsWith("recovery") ? "Investigating an issue" : progressLabels[event.stage])
+    .filter(Boolean))];
+  progress.querySelector(".progress-completed").textContent = completed.length
+    ? `${completed.length} earlier ${completed.length === 1 ? "step" : "steps"} · ${completed.at(-1).replace(/…$/, "")}` : "";
+}
+
 async function waitForJob(jobId, progress) {
   while (true) {
     const job = await api(`/api/chat/jobs/${jobId}`);
-    const seconds = ((job.elapsed_ms || 0) / 1000).toFixed(1);
-    updatePipeline(progress, job.stage, job.status, job.events || [], job.response);
-    const label = progressLabels[job.stage] || "Processing your request";
-    progress.querySelector(".progress-stage").textContent = label;
-    progress.querySelector(".progress-detail").textContent = `${seconds}s elapsed · ${Number(seconds) > 20 ? "Still working. You can cancel without changing your previous result." : "You can cancel at any time."}`;
+    updateThinking(progress, job);
     if (job.understanding) {
       const understanding = $("#understandingContent");
       understanding.replaceChildren();
@@ -382,13 +399,6 @@ async function waitForJob(jobId, progress) {
       detail.textContent = job.understanding.resolved_instruction;
       understanding.append(title, detail);
     }
-    const log = progress.querySelector(".progress-history ul");
-    log.replaceChildren();
-    (job.events || []).forEach(event => {
-      const item = document.createElement("li");
-      item.textContent = `${(event.elapsed_ms / 1000).toFixed(1)}s · ${progressLabels[event.stage] || event.stage}`;
-      log.append(item);
-    });
     if (job.status === "completed") return { ...job.response, progress_events: job.events || [] };
     if (job.status === "cancelled") throw new Error("Request cancelled.");
     if (job.status === "failed") throw new Error(job.error || "Chat job failed.");

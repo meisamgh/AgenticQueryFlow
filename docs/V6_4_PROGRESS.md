@@ -1,5 +1,16 @@
 # V6.4 progress checkpoint
 
+## 2026-11-03 — Compact thinking experience
+
+Frontend waiting uses an animated leaf, one event-backed activity label,
+discreet elapsed time and observed-step summary instead of speculative badges.
+The collapsible event log is rebuilt only when events change. Existing polling,
+cancellation and immediate response handoff are unchanged. Reduced-motion and
+mobile styles are included. No backend/model/SQL calls added. Verification:
+196 passing frontend/voice tests, including transitions, unchanged-event updates,
+completion, failure, cancellation and accessibility markup. Browser visual QA,
+live-provider and mobile-device verification were NOT RUN.
+
 ## 2026-11-02 — Dashboard failure diagnostics and annotation correction
 
 Confirmed retained failures: rationale exceeded 600 characters, then the retry
