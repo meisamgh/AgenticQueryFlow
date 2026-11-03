@@ -114,8 +114,8 @@ V6_4_PROGRESS.md; no older requirement status is promoted by this entry.
 BLOCKED: production identity/session ownership and external sharing, as before.
 NOT RUN: live-provider, PostgreSQL and browser visual QA. No cross-session
 unsaved-proposal transfer or automatic refresh. Resume the original conversation
-or authorized saved Studio. See DASHBOARD_DESIGN_APPROVAL.md for scope and the
-distinction between validated candidate snapshots and approved rendered dashboards.
+or authorized saved Studio. This approval-based workflow is historical; see
+AUTONOMOUS_DASHBOARDS.md for the current validated-preview workflow.
 
 ### Live local dashboard completion (2026-11-01)
 
