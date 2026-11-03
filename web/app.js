@@ -297,7 +297,8 @@ function appendUser(message) {
   speaker.className = "speaker";
   const avatar = document.createElement("span");
   avatar.className = "avatar";
-  avatar.innerHTML = icon("user", 13);
+  avatar.textContent = "U";
+  avatar.setAttribute("aria-label", "You");
   const name = document.createElement("span");
   name.textContent = "You";
   const time = document.createElement("time");
@@ -312,16 +313,11 @@ function appendUser(message) {
 }
 
 const pipelineStages = [
-  ["conversation", "Understanding"],
-  ["retrieval", "Retrieving"],
-  ["context_selection", "Context"],
-  ["grounding", "Grounding"],
-  ["generation", "Generating"],
-  ["validation", "Validating"],
-  ["execution", "Executing"],
-  ["result_review", "Review"],
-  ["recovery", "Recovery"],
-  ["presentation", "Explaining"],
+  ["conversation", "Understand"],
+  ["investigation", "Investigate"],
+  ["design_review", "Review design"],
+  ["build", "Build"],
+  ["completed", "Ready"],
 ];
 
 const progressLabels = {
@@ -401,13 +397,13 @@ async function waitForJob(jobId, progress) {
 }
 
 function visiblePipelineStage(stage) {
-  if (stage.startsWith("recovery_")) return "recovery";
-  if (stage === "optimization") return "validation";
+  if (stage.startsWith("recovery_") || ["retrieval", "context_selection", "grounding", "generation", "validation", "optimization", "execution", "result_review", "recovery", "presentation"].includes(stage)) return "investigation";
   return stage;
 }
 
 function updatePipeline(progress, currentStage, jobStatus, events = [], response = null) {
-  const visibleStage = visiblePipelineStage(currentStage);
+  const awaitingApproval = ["PROPOSED", "AWAITING_APPROVAL", "REVISING"].includes(response?.dashboard_design_proposal?.status);
+  const visibleStage = awaitingApproval ? "design_review" : visiblePipelineStage(currentStage);
   const seen = new Set(JSON.parse(progress.dataset.seenStages || "[]"));
   events.forEach((event) => seen.add(visiblePipelineStage(event.stage)));
   if (progress.dataset.activeStage && progress.dataset.activeStage !== visibleStage) seen.add(progress.dataset.activeStage);
@@ -419,8 +415,9 @@ function updatePipeline(progress, currentStage, jobStatus, events = [], response
       && (jobStatus === "completed" || step.dataset.stage !== visibleStage);
     step.classList.toggle("complete", completed);
     step.classList.toggle("active", jobStatus !== "completed" && step.dataset.stage === visibleStage);
+    step.classList.toggle("awaiting", awaitingApproval && step.dataset.stage === "design_review");
+    step.classList.toggle("failed", jobStatus === "failed" && step.dataset.stage === visibleStage);
     const recoverySkipped = jobStatus === "completed"
-      && ["recovery", "result_review"].includes(step.dataset.stage)
       && !seen.has(step.dataset.stage);
     step.classList.toggle("skipped", recoverySkipped);
     if (recoverySkipped) step.title = "Not called during this request";
@@ -488,11 +485,17 @@ async function send(message, feedbackCategory = null, dashboardTarget = null) {
 }
 
 function responseStatus(body, attempts) {
+  const assistantFailure = (body.provenance || []).includes("assistant_service_failure");
   const accepted = body.generation?.accepted === true;
-  const explanatory = EXPLANATION_OPERATIONS_UI.has(body.operation || "");
+  const designBlocked = (body.provenance || []).includes("dashboard_design_validation_failed");
+  const explanatory = EXPLANATION_OPERATIONS_UI.has(body.operation || "") || Boolean(body.dashboard_design_proposal) || Boolean(body.dashboard) || designBlocked;
   const chartOnly = body.operation === "VISUALIZE" || Boolean(body.plot_status);
   const modelUnavailable = body.generation && !accepted && body.generation.termination_reason === "model_error";
-  const status = chartOnly ? (body.presentation?.chart_spec ? "CHART FROM STORED DATA" : "CHART UNAVAILABLE")
+  const status = assistantFailure ? "ASSISTANT UNAVAILABLE"
+    : designBlocked ? "DESIGN NOT VALIDATED"
+    : body.dashboard_design_proposal ? `DESIGN ${body.dashboard_design_proposal.status}`
+    : body.dashboard ? "DASHBOARD READY"
+    : chartOnly ? (body.presentation?.chart_spec ? "CHART FROM STORED DATA" : "CHART UNAVAILABLE")
     : explanatory ? "NO NEW QUERY"
     : accepted ? (body.generation.execution_status === "ACCEPTED" ? "EXECUTED" : body.generation.execution_status || "SAFE SQL")
     : modelUnavailable ? "MODEL UNAVAILABLE" : "FAILED";
@@ -517,6 +520,16 @@ function sameDisplayText(left, right) {
 function updateStatusPill(fragment, body, accepted, status) {
   const pill = fragment.querySelector(".status-pill");
   if (!pill) return;
+  if ((body.provenance || []).includes("assistant_service_failure")) {
+    pill.hidden = false;
+    pill.querySelector(".status-pill-label").textContent = "Assistant unavailable";
+    pill.classList.remove("warn");
+    pill.classList.add("error");
+    const slot = pill.querySelector("[data-icon]");
+    if (slot) slot.innerHTML = icon("alert");
+    return;
+  }
+  if (body.dashboard_design_proposal) { pill.hidden = true; return; }
   if (accepted && status !== "CHART UNAVAILABLE") { pill.hidden = true; return; }
   const label = pill.querySelector(".status-pill-label");
   const slot = pill.querySelector("[data-icon]");
@@ -525,6 +538,7 @@ function updateStatusPill(fragment, body, accepted, status) {
   let kind = "ok";
   if (status === "MODEL UNAVAILABLE") { kind = "error"; iconName = "alert"; text = "Model unavailable"; }
   else if (status === "FAILED") { kind = "error"; iconName = "alert"; text = "Failed"; }
+  else if (status === "DESIGN NOT VALIDATED") { kind = "warn"; iconName = "alert"; text = "Design not validated"; }
   else if (status === "NO NEW QUERY") { kind = "warn"; iconName = "info"; text = "Answered without a new query"; }
   else if (status === "CHART UNAVAILABLE") { kind = "warn"; iconName = "alert"; text = "Chart unavailable"; }
   else if (status === "CHART FROM STORED DATA") { text = "Chart ready"; }
@@ -559,6 +573,8 @@ function responseMode(body, opts = {}) {
    independent question comes back as "sql". Client heuristics only serve
    responses produced before this contract existed. */
 function presentationMode(body, opts = {}) {
+  if (body.dashboard) return "explanation"; // The dashboard owns its validated charts/data.
+  if (body.dashboard_design_proposal || (body.provenance || []).includes("dashboard_design_validation_failed")) return "explanation";
   if (body.plot_status && body.plot_status !== "CHART_READY"
       && !body.presentation?.chart_spec && body.generation?.accepted) return "chart_unavailable";
   const stateMode = body.presentation_state?.mode;
@@ -1468,6 +1484,13 @@ function isPlotOnlyTurn(body) {
     ["sql_generation", "sql_repair", "sql_execution"].includes(entry.component));
 }
 
+function dashboardResponseMessage(body) {
+  if (!body.dashboard && body.dashboard_design_failures?.length) {
+    return body.message || body.dashboard_design_failures.at(-1).message;
+  }
+  return body.explanation || body.presentation?.summary || body.message || "";
+}
+
 async function appendAssistant(body, elapsed, options = {}) {
   if (!options.restored) rememberChartSnapshot(body);
   const fragment = $("#assistantTemplate").content.cloneNode(true);
@@ -1479,8 +1502,13 @@ async function appendAssistant(body, elapsed, options = {}) {
   const { explanatory, modelUnavailable, status } = responseStatus(body, attempts);
   updateStatusPill(fragment, body, accepted, status);
 
-  const responseMessage = body.explanation || body.presentation?.summary || body.message || "";
+  const responseMessage = dashboardResponseMessage(body);
   fragment.querySelector(".response-note").textContent = responseMessage;
+  if (body.dashboard_design_proposal && window.QueryflowDesignReview) {
+    const note = fragment.querySelector(".response-note");
+    note.hidden = !(body.provenance || []).includes("dashboard_design_validation_failed");
+    note.after(window.QueryflowDesignReview.render(body.dashboard_design_proposal));
+  }
 
   // Distinct empty / anomaly states, grounded in the real response.
   if (accepted && generation.row_count === 0) {
@@ -2906,20 +2934,33 @@ function renderPipelineDetails(fragment, timings, body, generation) {
   });
   const modelCalls = (body.call_ledger || []).filter(entry => entry.kind === "MODEL");
   if (modelCalls.length) sectionHeading("Model calls");
-  for (const entry of modelCalls) {
+  const groupedCalls = new Map();
+  for (const call of modelCalls) {
+    const component = call.component.replace(/^(recovery_reasoning)_\d+$/, "$1");
+    const key = JSON.stringify([component, call.task, call.provider, call.effective_model || call.requested_model]);
+    if (!groupedCalls.has(key)) groupedCalls.set(key, { ...call, component, calls: [] });
+    groupedCalls.get(key).calls.push(call);
+  }
+  for (const entry of groupedCalls.values()) {
     const row = document.createElement("div");
     row.className = "pipeline-run pipeline-model-call";
     const label = document.createElement("span");
     label.textContent = entry.task ? `${entry.component} · ${entry.task}` : entry.component;
     const detail = document.createElement("b");
-    const tokens = entry.input_tokens == null && entry.output_tokens == null
-      ? "tokens unavailable" : `${(entry.input_tokens || 0) + (entry.output_tokens || 0)} tokens`;
+    const calls = entry.calls;
+    const timed = calls.filter(call => call.latency_ms != null);
+    const metered = calls.filter(call => call.input_tokens != null || call.output_tokens != null);
+    const tokens = !metered.length ? "tokens unavailable"
+      : `${metered.reduce((sum, call) => sum + (call.input_tokens || 0) + (call.output_tokens || 0), 0)} tokens${metered.length < calls.length ? " (partial)" : ""}`;
+    const retries = calls.reduce((sum, call) => sum + (call.retry_count || 0), 0);
+    const failures = calls.filter(call => call.status === "FAILED").length;
     detail.textContent = [
       [entry.provider, entry.effective_model || entry.requested_model].filter(Boolean).join("/"),
-      entry.latency_ms == null ? "time unavailable" : `${entry.latency_ms} ms`,
+      calls.length > 1 ? `${calls.length} calls` : null,
+      !timed.length ? "time unavailable" : `${timed.reduce((sum, call) => sum + call.latency_ms, 0)} ms${timed.length < calls.length ? " (partial)" : ""}`,
       tokens,
-      entry.retry_count > 0 ? `retry ${entry.retry_count}` : null,
-      entry.status === "FAILED" ? "failed" : null,
+      retries > 0 ? `retry ${retries}` : null,
+      failures ? `${failures} failed` : null,
     ].filter(Boolean).join(" · ");
     row.append(label, detail);
     container.append(row);

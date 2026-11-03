@@ -235,6 +235,35 @@ test("editing is an explicit unsaved preview; save and publish require separate 
   assert.equal(posts[2][1].approve, true);
   assert.equal(posts[2][1].expected_version, 2);
 });
+test("a failed edit preserves the dashboard and a valid edit renders without confirmation", async () => {
+  const record = saved(), posts = [];
+  const env = setup(async (path, options) => {
+    if (!options) return path === "/api/studio"
+      ? [{ id: "saved", name: "Revenue", status: "Draft", version: 1, updated_at: 1 }]
+      : record;
+    posts.push(JSON.parse(options.body));
+    if (posts.length === 1) return {
+      preview_id: null,
+      message: "Design validation failed. The existing dashboard is unchanged.",
+    };
+    return { preview_id: "approved", spec: { ...record.document.spec, theme: "contrast" } };
+  });
+  await env.library.click();
+  await find(env.body, "Revenue").click();
+  const input = all(env.body).find((e) => e["aria-label"] === "Saved dashboard design change");
+  input.value = "Use higher contrast";
+  await find(env.body, "Edit with AI").click();
+  assert.equal(env.renders(), 1, "a failed edit must not replace the chart");
+  assert.ok(all(env.body).some((e) => e.textContent?.includes("Design validation failed")));
+  assert.equal(record.version, 1);
+  input.value = "Use higher contrast and preserve the data";
+  await find(env.body, "Edit with AI").click();
+  assert.equal(env.renders(), 2);
+  assert.equal(posts.length, 2);
+  assert.equal(posts[1].message, "Use higher contrast and preserve the data");
+  assert.equal(record.version, 1, "design edits must not implicitly save or publish");
+});
+
 test("viewer controls are read-only and the studio retains responsive layout", async () => {
   const record = { ...saved(), permission: "viewer" };
   const env = setup(async (path) =>

@@ -208,6 +208,25 @@ def test_growth_requires_explicit_matching_nonzero_comparison() -> None:
     )
 
 
+def test_kpi_sparklines_require_single_temporal_grain() -> None:
+    from semantic_text2sql.dashboard_service import eligible_kpis
+
+    assert all(not metric.sparkline for metric in eligible_kpis(snapshot()))
+    columns = ["month", "revenue"]
+    rows = [["202602", 400.0], ["202601", 300.0]]
+    chart = plan_chart(
+        VisualizationIntent(requested=True, chart_type="line", x="month", y="revenue"),
+        question="", columns=columns, rows=rows, truncated=False,
+    )
+    source = replace(snapshot(), columns=columns, rows=rows, row_count=2,
+                     sql="SELECT month, SUM(amount) AS revenue FROM sales GROUP BY month",
+                     chart_spec=chart)
+    metrics = eligible_kpis(source)
+    totals = [metric.sparkline for metric in metrics if metric.calculation == "TOTAL"]
+    assert totals == [[300.0, 400.0]]
+    assert all(not metric.sparkline for metric in metrics if metric.calculation == "COUNT")
+
+
 def test_up_to_four_complementary_charts_and_invalid_candidates_are_validated(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

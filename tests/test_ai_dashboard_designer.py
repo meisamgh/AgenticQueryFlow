@@ -9,6 +9,7 @@ from test_dashboard import snapshot
 
 from semantic_text2sql.ai_dashboard_designer import (
     DashboardRevisions,
+    dashboard_timeout,
     design_context,
     design_dashboard,
     eligible_catalog,
@@ -16,6 +17,20 @@ from semantic_text2sql.ai_dashboard_designer import (
 from semantic_text2sql.dashboard_service import DashboardError, DashboardRequest
 from semantic_text2sql.models import TokenUsage
 from semantic_text2sql.runtime import RequestBudget, active_request_budget
+
+
+def test_local_designer_timeout_honors_shared_deadline_and_configuration(monkeypatch):
+    monkeypatch.delenv("TEXT2SQL_DASHBOARD_TIMEOUT_SECONDS", raising=False)
+    budget = RequestBudget(180)
+    assert dashboard_timeout("ollama", budget) == 120
+    assert dashboard_timeout("groq", budget) == 12
+    monkeypatch.setenv("TEXT2SQL_DASHBOARD_TIMEOUT_SECONDS", "90")
+    assert dashboard_timeout("ollama", budget) == 90
+    short = RequestBudget(3)
+    assert 0 < dashboard_timeout("ollama", short) <= 3
+    monkeypatch.setenv("TEXT2SQL_DASHBOARD_TIMEOUT_SECONDS", "nan")
+    with pytest.raises(ValueError, match="positive finite"):
+        dashboard_timeout("ollama", budget)
 
 
 class Designer:
@@ -63,6 +78,28 @@ def test_ai_selects_real_candidates_width_theme_and_keeps_source():
     assert outcome.spec.result_id == source.result_id
     assert budget.model_calls == model.calls == len(outcome.ledger) == 1
     assert budget.database_calls == 0
+
+
+def test_incomplete_design_requests_evidence_instead_of_rendering():
+    _, _, _, _, charts = setup()
+    outcome, model, budget = run({
+        "result_id": "result", "charts": [{"candidate_id": next(iter(charts))}],
+        "missing_requirements": "Need comparable previous-year data",
+    })
+    assert outcome.status == "REQUERY_REQUIRED" and outcome.spec is None
+    assert outcome.reason
+    assert model.calls == budget.model_calls == 1
+    assert budget.database_calls == 0
+
+
+def test_optional_future_analyses_do_not_force_an_unrequested_requery():
+    _, _, _, _, charts = setup()
+    outcome, model, budget = run({
+        "result_id": "result", "charts": [{"candidate_id": next(iter(charts))}],
+        "further_analyses": ["Optionally inspect spending by country later"],
+    })
+    assert outcome.status == "READY" and outcome.spec
+    assert model.calls == budget.model_calls == 1 and budget.database_calls == 0
 
 
 @pytest.mark.parametrize("bad", [
@@ -132,6 +169,181 @@ def test_bounded_context_and_incomplete_source_rejected_before_model():
         asyncio.run(design_dashboard(source=replace(source, truncated=True), request=request,
             completer=model, provider="test", model="test", budget=RequestBudget(2)))
     assert model.calls == 0
+
+
+def test_designer_receives_bounded_distribution_and_relationship_evidence():
+    source, _, base, *_ = setup()
+    source = replace(source, columns=["x", "y", "constant", "customer_id"],
+                     rows=[[1, 2, 7, 10], [2, 4, 7, 11], [4, 8, 7, 12],
+                           [1000, 2000, 7, 13]], chart_spec=None)
+    context = design_context(source, base, {}, {}, None)
+    profiles = {item["column"]: item for item in context["column_profiles"]}
+    assert profiles["x"]["distribution"]["iqr_outlier_count"] == 1
+    assert profiles["x"]["distribution"]["q25"] == 1.75
+    assert profiles["constant"]["distribution"]["stddev_population"] == 0
+    assert "distribution" not in profiles["customer_id"]
+    relationship = next(item for item in context["relationship_evidence"]
+                        if item["x"] == "x" and item["y"] == "y")
+    assert relationship["pearson_r"] == 1 and relationship["paired_rows"] == 4
+    assert all(item["pearson_r"] is None for item in context["relationship_evidence"]
+               if item["y"] == "constant")
+    assert len(context["relationship_evidence"]) <= 6
+    assert context["sample"] == [] and "returned rows only" in context["evidence_scope"]
+    with pytest.raises(DashboardError):
+        design_context(replace(source, truncated=True), base, {}, {}, None)
+
+
+def test_statistical_context_excludes_nonfinite_values_and_reports_missingness():
+    source, _, base, *_ = setup()
+    source = replace(source, columns=["measure"], rows=[[1.0], [float("nan")],
+                     [float("inf")], [None]], chart_spec=None)
+    context = design_context(source, base, {}, {}, None)
+    profile = context["column_profiles"][0]
+    assert profile["non_finite_count"] == 2 and profile["nulls"] == 1
+    assert profile["distribution"]["count"] == 1
+    assert profile["distribution"]["mean"] == 1
+    assert context["relationship_evidence"] == []
+    json.dumps(context, allow_nan=False)
+
+
+def test_same_schema_different_behavior_can_support_different_model_selections():
+    class EvidenceDesigner(Designer):
+        async def complete_task(self, model, prompt, task, **kwargs):
+            self.calls += 1
+            context = json.loads(prompt.split(
+                "Verified context (profiles/sample are bounded, not the entire result): "
+            )[1])
+            assert "LAYER 1" in prompt and "LAYER 2" in prompt and "LAYER 3" in prompt
+            assert "Display FOUR chart layers" in prompt
+            distribution = next(p["distribution"] for p in context["column_profiles"]
+                                if p["column"] == "revenue")
+            candidate = context["chart_catalog"][1 if distribution["iqr_outlier_count"] else 0]
+            return json.dumps({"result_id": context["result_id"],
+                               "charts": [{"candidate_id": candidate["candidate_id"]}]
+                               }), TokenUsage()
+
+    source, request, *_ = setup()
+    changed = replace(source, result_id="different-result", chart_spec=None,
+                      rows=[[row[0], row[1], value] for row, value
+                            in zip(source.rows, [0, 0, 0, 1000], strict=True)])
+    selected = []
+    for item in (source, changed):
+        model = EvidenceDesigner({})
+        budget = RequestBudget(2, max_model_calls=1, max_database_calls=0)
+        outcome = asyncio.run(design_dashboard(
+            source=item, request=request.model_copy(update={"result_id": item.result_id}),
+            completer=model, provider="test", model="script", budget=budget,
+        ))
+        assert outcome.status == "READY" and outcome.spec
+        assert len(outcome.spec.widgets) == 1  # No four-perspective quota.
+        assert not outcome.spec.kpis  # No KPI quota either.
+        selected.append(outcome.spec.widgets[0].chart_spec.chart_type)
+        assert budget.model_calls == model.calls == 1 and budget.database_calls == 0
+    assert selected[0] != selected[1]
+
+
+def test_filter_metadata_selection_preserves_actual_scope_and_kpi_definitions():
+    from semantic_text2sql.ai_dashboard_designer import DashboardProposal, _materialize
+    from semantic_text2sql.dashboard_service import DashboardFilterMetadata
+
+    source, _, base, kpis, charts = setup()
+    metadata = DashboardFilterMetadata(field="country", source="stored_result", result_id="result")
+    base = base.model_copy(update={"verified_filter_metadata": [metadata]})
+    key = next(iter(kpis))
+    proposal = DashboardProposal(result_id="result", filter_refs=["filter-0"],
+                                 kpis=[{"kpi_id": key}])
+    outcome = _materialize(proposal, base, kpis, charts, None)
+    assert outcome.verified_filter_metadata == [metadata]
+    assert outcome.applied_constraints == base.applied_constraints
+    assert outcome.kpis[0].definition == kpis[key].definition
+    context = design_context(source, base, kpis, charts, None)
+    assert context["kpi_catalog"][0]["definition"] == kpis[key].definition
+    invalid = proposal.model_copy(update={"filter_refs": ["unknown"]})
+    with pytest.raises(ValueError, match="Unknown verified filter"):
+        _materialize(invalid, base, kpis, charts, None)
+
+
+def test_patch_replacements_removals_order_and_width_preserve_other_widgets():
+    _, _, _, kpis, charts = setup()
+    ids = list(charts)
+    keys = list(kpis)
+    first, *_ = run({"result_id": "result", "charts": [
+        {"candidate_id": ids[0]}, {"candidate_id": ids[1]}],
+        "kpis": [{"kpi_id": keys[0]}, {"kpi_id": keys[1]}]})
+    assert first.spec
+    previous = first.spec
+    patch, *_ = run({"result_id": "result", "mode": "PATCH",
+                     "remove_ids": [keys[0]],
+                     "kpis": [{"kpi_id": keys[2]}],
+                     "charts": [{"candidate_id": ids[2], "replaces_widget_id": ids[0],
+                                 "column_span": 12, "order": 1},
+                                {"candidate_id": ids[1], "order": 0}]}, previous=previous)
+    assert patch.status == "READY" and patch.spec
+    assert patch.spec.widgets[0].widget_id == ids[1]
+    assert patch.spec.widgets[0].chart_spec == previous.widgets[1].chart_spec
+    assert patch.spec.widgets[1].widget_id == ids[0]  # Stable replacement identity.
+    assert patch.spec.widgets[1].column_span == 12
+    assert patch.spec.kpis[0] == previous.kpis[1]
+    assert patch.spec.result_id == previous.result_id
+    invalid, *_ = run({"result_id": "result", "mode": "PATCH", "charts": [
+        {"candidate_id": ids[0], "order": 0}, {"candidate_id": ids[1], "order": 0}
+    ]}, previous=previous)
+    assert invalid.status == "FALLBACK" and invalid.spec.widgets == previous.widgets
+
+
+def test_layered_design_has_single_primary_in_front_and_preserves_roles_on_edit():
+    from semantic_text2sql.ai_dashboard_designer import DashboardProposal
+
+    fields = list(DashboardProposal.model_fields)
+    assert fields.index("filter_refs") < fields.index("kpis") < fields.index("charts")
+    _, _, _, _, catalog = setup()
+    ids = list(catalog)
+    first, *_ = run({"result_id": "result", "charts": [
+        {"candidate_id": ids[1], "analytical_role": "COMPARISON", "order": 0},
+        {"candidate_id": ids[0], "analytical_role": "PRIMARY", "order": 1},
+    ]})
+    assert first.status == "READY" and first.spec
+    assert [w.analytical_role for w in first.spec.widgets] == ["PRIMARY", "COMPARISON"]
+    assert [w.row for w in first.spec.widgets] == [0, 1]
+    edited, *_ = run({"result_id": "result", "mode": "PATCH", "theme": "contrast"},
+                     previous=first.spec)
+    assert edited.status == "READY" and edited.spec.widgets == first.spec.widgets
+    missing, *_ = run({"result_id": "result", "mode": "PATCH", "remove_ids": [ids[0]]},
+                      previous=first.spec)
+    assert missing.status == "FALLBACK" and missing.spec.widgets == first.spec.widgets
+    promoted, *_ = run({"result_id": "result", "mode": "PATCH", "remove_ids": [ids[0]],
+                       "charts": [{"candidate_id": ids[1], "analytical_role": "PRIMARY"}]},
+                       previous=first.spec)
+    assert promoted.status == "READY" and len(promoted.spec.widgets) == 1
+    assert promoted.spec.widgets[0].widget_id == ids[1]
+
+
+@pytest.mark.parametrize("annotated", [False, True])
+def test_new_ai_dashboard_requires_layer_assignments_not_legacy_guesses(annotated):
+    source, request, _, _, charts = setup()
+    choice = {"candidate_id": next(iter(charts))}
+    if annotated:
+        choice["analytical_role"] = "PRIMARY"
+    model = Designer({"result_id": "result", "charts": [choice]})
+    outcome = asyncio.run(design_dashboard(
+        source=source, request=request.model_copy(update={"design_mode": "ai"}),
+        completer=model, provider="test", model="script", budget=RequestBudget(2),
+    ))
+    assert outcome.status == ("READY" if annotated else "FALLBACK")
+    if annotated:
+        assert outcome.spec.widgets[0].analytical_role == "PRIMARY"
+
+
+@pytest.mark.parametrize("roles", [("PRIMARY", "PRIMARY"), ("COMPARISON", "RELATIONSHIP"),
+                                 ("PRIMARY", None)])
+def test_invalid_layer_roles_do_not_produce_a_new_design(roles):
+    _, _, _, _, catalog = setup()
+    outcome, model, budget = run({"result_id": "result", "charts": [
+        {"candidate_id": key, "analytical_role": role}
+        for key, role in zip(catalog, roles, strict=False)
+    ]})
+    assert outcome.status == "FALLBACK"
+    assert model.calls == budget.model_calls == 1 and budget.database_calls == 0
 
 
 def test_provider_retry_cannot_exceed_one_specialist_call():
@@ -214,7 +426,8 @@ def test_ai_api_reuses_real_sql_result_and_undo_without_database_calls(registry,
                                              "not the entire result): ")[1])
             return json.dumps({"result_id": context["result_id"], "theme": "neutral",
                 "kpis": [{"kpi_id": context["kpi_catalog"][0]["kpi_id"]}],
-                "charts": [{"candidate_id": context["chart_catalog"][0]["candidate_id"]}]
+                "charts": [{"candidate_id": context["chart_catalog"][0]["candidate_id"],
+                            "analytical_role": "PRIMARY"}]
             }), TokenUsage(input_tokens=100, output_tokens=30)
 
     designer = LiveDesigner()

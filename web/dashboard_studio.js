@@ -189,6 +189,9 @@ window.QueryflowDashboardStudio = (() => {
       ) change("publish", { approve: true });
     });
     const editText = node("input", "dashboard-revision-input");
+    const designDiscussion = node("p", "dashboard-design-discussion");
+    designDiscussion.setAttribute("role", "status");
+
     editText.placeholder = "Describe a design change…";
     editText.setAttribute("aria-label", "Saved dashboard design change");
     const clearSelection = button("Whole dashboard", () => {
@@ -212,6 +215,7 @@ window.QueryflowDashboardStudio = (() => {
           );
         }
         preview = result;
+        designDiscussion.textContent = "Dashboard updated. Choose Save to retain it.";
         if (
           ![
             ...(result.spec.widgets || []).map((w) => w.widget_id),
@@ -290,7 +294,7 @@ window.QueryflowDashboardStudio = (() => {
     }
     if (saved.permission === "viewer") toolbar.children[4].disabled = true;
     if (saved.permission !== "owner") toolbar.children[8].disabled = true;
-    content.append(toolbar, details, history, edits, view, evidence);
+    content.append(toolbar, designDiscussion, details, history, edits, view, evidence);
     redraw(saved.document.spec);
   }
   function install(options) {

@@ -45,6 +45,7 @@ class KPISpec(StrictModel):
     baseline: float | None = None
     current: float | None = None
     periods: list[str] = Field(default_factory=list, max_length=2)
+    sparkline: list[float] = Field(default_factory=list, max_length=500)
 
 
 class DashboardWidget(StrictModel):
@@ -53,6 +54,7 @@ class DashboardWidget(StrictModel):
     column_span: Literal[4, 6, 8, 12] = 6
     row: int = Field(ge=0, le=3)
     chart_spec: ChartSpec
+    analytical_role: Literal["PRIMARY", "COMPARISON", "DISTRIBUTION", "RELATIONSHIP"] | None = None
 
 
 class DashboardData(StrictModel):
@@ -115,6 +117,10 @@ class DashboardSpec(StrictModel):
 
     @model_validator(mode="after")
     def source_identity(self) -> DashboardSpec:
+        roles = [widget.analytical_role for widget in self.widgets
+                 if widget.analytical_role is not None]
+        if roles and (len(roles) != len(self.widgets) or roles.count("PRIMARY") != 1):
+            raise ValueError("Layered dashboards require all plot roles and exactly one primary")
         if self.schema_version == 2 and (
             not self.sources
             or self.result_id not in self.sources
@@ -353,6 +359,16 @@ def eligible_kpis(
                                     "explicit periods with matching group populations.",
                                 ),
                             )
+    chart = source.chart_spec or temporal_chart
+    if (chart and chart.time_format in {"month", "year", "day"}
+            and grain == [chart.x] and chart.x in source.columns):
+        position = source.columns.index(chart.x)
+        ordered = sorted(source.rows, key=lambda row: str(row[position]))
+        if len({str(row[position]) for row in ordered}) == len(ordered):
+            for metric in result:
+                if metric.calculation in {"TOTAL", "AVERAGE"} and metric.metric in additive:
+                    index = source.columns.index(metric.metric)
+                    metric.sparkline = [float(row[index]) for row in ordered]
     return result[:limit]
 
 

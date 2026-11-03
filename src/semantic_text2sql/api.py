@@ -46,13 +46,19 @@ from semantic_text2sql.conversation import (
 )
 from semantic_text2sql.conversational_agent import ConversationalAnalyticsAgent
 from semantic_text2sql.conversational_bridge import ConversationalAnalyticsBridge
+from semantic_text2sql.dashboard_proposals import ProposalStore
 from semantic_text2sql.dashboard_service import (
     DashboardError,
     DashboardRequest,
     DashboardSpec,
     build_dashboard,
 )
-from semantic_text2sql.dashboard_store import DashboardStore, SavedDashboard
+from semantic_text2sql.dashboard_store import (
+    DashboardDocument,
+    DashboardSnapshot,
+    DashboardStore,
+    SavedDashboard,
+)
 from semantic_text2sql.dashboard_studio import studio_router
 from semantic_text2sql.data_requirement_validator import validate_reusability
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
@@ -94,6 +100,7 @@ from semantic_text2sql.models import (
     CheckRequest,
     CheckResponse,
     ConversationState,
+    DashboardDesignFailure,
     DashboardTarget,
     DatabaseOption,
     FilterValuesResponse,
@@ -202,6 +209,7 @@ def create_app(
     ):
         raise ValueError("History/dashboard storage must not be an exposed business database.")
     saved_dashboards = DashboardStore(runs.path) if runs.path is not None else None
+    design_proposals = ProposalStore(saved_dashboards) if saved_dashboards else None
     if set(sqlite.list_ids()) & set(external_connections):
         raise ValueError("Database IDs must be unique across SQLite and remote connections.")
     profiles = ProfileStore(Path(os.environ.get("TEXT2SQL_PROFILE_ROOT", "profiles")))
@@ -255,9 +263,13 @@ def create_app(
         os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
         float(os.environ.get("OPENROUTER_TIMEOUT_SECONDS", "180")),
     )
+    ollama = OllamaCompleter(
+        os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+        float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "180")),
+    )
     active_agent = agent or TextToSQLAgent(
         sqlite,
-        RoutingSQLModel(agentrouter, groq, justdowork, codecraft, true_sota, openrouter),
+        RoutingSQLModel(agentrouter, groq, justdowork, codecraft, true_sota, openrouter, ollama),
         postgres,
         profiles,
     )
@@ -268,16 +280,15 @@ def create_app(
         "codecraft": codecraft,
         "true_sota": true_sota,
         "openrouter": openrouter,
-        "ollama": OllamaCompleter(
-            os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
-            float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "180")),
-        ),
+        "ollama": ollama,
     }
+
     def conversational_agent_enabled() -> bool:
         return (
             os.environ.get("TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED", "false").casefold()
             == "true"
         )
+
     app = FastAPI(
         title="Semantic Text-to-SQL v5",
         version="0.5.0",
@@ -303,6 +314,7 @@ def create_app(
             "code": exc.code,
             "detail": safe_messages.get(exc.code, "The database operation could not be completed."),
         })
+
     if os.environ.get("TEXT2SQL_GZIP_ENABLED", "true").casefold() == "true":
         app.add_middleware(
             GZipMiddleware,
@@ -564,6 +576,7 @@ def create_app(
         restored = result_from_history(record)
         if restored is not None:
             recent_results[key] = restored
+
     chat_jobs: dict[str, dict[str, Any]] = {}
     job_ttl_seconds = max(60, int(os.environ.get("TEXT2SQL_JOB_TTL_SECONDS", "3600")))
     max_jobs = max(10, int(os.environ.get("TEXT2SQL_MAX_JOBS", "500")))
@@ -774,6 +787,8 @@ def create_app(
     async def history_clear(response: Response, session_id: str) -> Response:
         response.headers["Cache-Control"] = "no-store"
         runs.drop_session(session_id)
+        if design_proposals:
+            design_proposals.clear(session_id)
         dashboard_revisions.clear(session_id)
         for bundle_key in [key for key in dashboard_bundles if key[0] == session_id]:
             dashboard_bundles.pop(bundle_key, None)
@@ -786,6 +801,8 @@ def create_app(
         """Start a fresh conversation without invoking any model or deleting audit history."""
         response.headers["Cache-Control"] = "no-store"
         conversations.reset(session_id)
+        if design_proposals:
+            design_proposals.clear(session_id)
         dashboard_revisions.clear(session_id)
         for bundle_key in [key for key in dashboard_bundles if key[0] == session_id]:
             dashboard_bundles.pop(bundle_key, None)
@@ -1685,6 +1702,8 @@ def create_app(
                 )
             pending = pending.model_copy(update={"semantic_contract": updated_contract})
         if operation == "RESET_CONTEXT":
+            if design_proposals:
+                design_proposals.clear(request.session_id)
             conversations.reset(request.session_id)
             await asyncio.to_thread(runs.mark_memory_reset, request.session_id)
             return ChatResponse(
@@ -2345,7 +2364,10 @@ def create_app(
         retriever=hybrid_retriever,
         sql_handler=execute_chat,
     )
+
     def reset_assistant_context(session_id: str) -> None:
+        if design_proposals:
+            design_proposals.clear(session_id)
         conversations.reset(session_id)
         runs.mark_memory_reset(session_id)
         for key in [key for key in recent_results if key[0] == session_id]:
@@ -2397,8 +2419,24 @@ def create_app(
             )
 
     async def assistant_dashboard_handler(
-        request: ChatRequest, objective: str, source: RecentResult | ChatResponse, undo: bool
+        request: ChatRequest, objective: str, source: RecentResult | ChatResponse | None, undo: bool
     ) -> ChatResponse:
+        # Legacy proposals remain stored for audit, but never seed or authorize a build.
+        if request._dashboard_design_action in {"APPROVE", "REJECT"}:
+            return ChatResponse(
+                session_id=request.session_id, operation="VISUALIZE",
+                resolved_question=objective,
+                message="Dashboard design no longer needs approval. Request a new dashboard "
+                        "or edit an existing dashboard; historical proposals are unchanged.",
+                provenance=["dashboard_design_validation_failed"],
+            )
+        if source is None:
+            return ChatResponse(
+                session_id=request.session_id,
+                operation="VISUALIZE",
+                resolved_question=objective,
+                message="Investigate the required analysis before proposing a design.",
+            )
         retained = (
             source if isinstance(source, RecentResult) else RecentResult.from_response(source)
         )
@@ -2409,6 +2447,7 @@ def create_app(
             design_mode="ai", objective=objective,
         )
         previous = dashboard_revisions.get(request.session_id, request.db_id, retained.result_id)
+
         if previous is None:
             for prior_id in request._dashboard_source_ids:
                 candidate = dashboard_revisions.get(request.session_id, request.db_id, prior_id)
@@ -2419,6 +2458,7 @@ def create_app(
         evidence: dict[str, RecentResult] = dict(dashboard_bundles.get(
             (request.session_id, request.db_id, retained.result_id), {}
         ))
+
         if previous:
             evidence.update(dashboard_bundles.get(
                 (request.session_id, request.db_id, previous.result_id), {}
@@ -2452,12 +2492,9 @@ def create_app(
                 resolved_question=objective,
                 message="This dashboard supports up to four separate analyses. Narrow its scope.")
         assert retained.result_id is not None
-        current_revision = dashboard_revisions.get(
-            request.session_id, request.db_id, retained.result_id
-        )
-        expected = current_revision.revision_id if current_revision else None
         usage = TokenUsage()
         ledger: list[CallLedgerEntry] = []
+        design_failures: list[Any] = []
         try:
             if undo:
                 if saved is not None:
@@ -2472,36 +2509,64 @@ def create_app(
             else:
                 provider = os.environ.get("TEXT2SQL_DASHBOARD_PROVIDER") or request.provider
                 model = os.environ.get("TEXT2SQL_DASHBOARD_MODEL") or request.model
+                # Capture the expected revision before awaiting model work. Never
+                # overwrite an edit that arrived while the designer was running.
+                expected = dashboard_revisions.get(
+                    request.session_id, request.db_id, retained.result_id
+                )
                 outcome = await design_dashboard(
                     source=retained, request=design_request,
                     completer=turn_completers.get(provider), provider=provider, model=model,
                     budget=active_request_budget() or RequestBudget(timeout_seconds=15),
                     previous=previous,
-                    patch_only=saved is not None,
+                    patch_only=previous is not None,
                     sources=evidence,
                     repair=True,
                     target_widget_id=request._dashboard_widget_id,
+                    investigation_evidence=request._dashboard_investigation_evidence,
+                    request_id=request._dashboard_request_id,
                 )
                 usage, ledger = outcome.usage, list(outcome.ledger)
+                design_failures = list(outcome.failures)
                 if outcome.spec is None:
                     return ChatResponse(
                         session_id=request.session_id, operation="VISUALIZE",
                         resolved_question=objective, message=outcome.reason,
+                        provenance=([] if outcome.status == "REQUERY_REQUIRED"
+                                    else ["dashboard_design_validation_failed"]),
                         token_usage=usage, call_ledger=ledger,
+                        dashboard_design_failures=design_failures,
                     )
-                spec = (outcome.spec if saved is not None else
-                        dashboard_revisions.commit(request.session_id, outcome.spec, expected))
-                if saved is None:
-                    bundle_key = (request.session_id, request.db_id, retained.result_id)
-                    dashboard_bundles[bundle_key] = evidence
-                    if len(dashboard_bundles) > 100:
-                        dashboard_bundles.pop(next(iter(dashboard_bundles)))
+                spec = outcome.spec
+                if outcome.status == "FALLBACK":
+                    return ChatResponse(
+                        session_id=request.session_id, operation="VISUALIZE",
+                        resolved_question=objective,
+                        message=outcome.reason + (" Your previous dashboard is unchanged."
+                                                  if previous else " No dashboard was created."),
+                        provenance=["dashboard_design_validation_failed"],
+                        token_usage=usage, call_ledger=ledger,
+                        dashboard_design_failures=design_failures,
+                    )
+                # Validate snapshots before exposing a revision or replacing retained evidence.
+                document = DashboardDocument(
+                    spec=spec, source=DashboardSnapshot.capture(retained),
+                    sources={key: DashboardSnapshot.capture(value)
+                             for key, value in evidence.items()}
+                    if spec.schema_version == 2 else {},
+                )
+                document.verify()
+                spec = dashboard_revisions.commit(
+                    request.session_id, spec, expected.revision_id if expected else None
+                )
+                dashboard_bundles[(request.session_id, request.db_id, spec.result_id)] = evidence
             response = ChatResponse(
                 session_id=request.session_id, result_id=retained.result_id,
                 operation="VISUALIZE", resolved_question=objective,
                 generation=retained.generation, presentation=None,
                 message="The dashboard is ready from the accepted result.",
                 dashboard=spec.model_dump(mode="json"), token_usage=usage, call_ledger=ledger,
+                dashboard_design_failures=design_failures,
                 state_commit_pending=(source.state_commit_pending
                                       if isinstance(source, ChatResponse) else False),
                 state_expected_version=(source.state_expected_version
@@ -2512,12 +2577,29 @@ def create_app(
             response._dashboard_evidence = evidence
             return response
         except DashboardError as exc:
+            conflict = str(exc) == "Dashboard changed concurrently; reopen before editing."
+            failure = DashboardDesignFailure(
+                code="REVISION_CONFLICT" if conflict else "SOURCE_VALIDATION_FAILED",
+                field="revision_id" if conflict else "source",
+                message=str(exc) if conflict
+                else "The dashboard source could not be validated safely.",
+                repairable=False, request_id=request._dashboard_request_id or uuid4().hex,
+                proposal_id=uuid4().hex, attempt=min(2, len(design_failures) + 1),
+                exception_type=type(exc).__name__,
+            )
+            logger.warning("dashboard_design_rejected request_id=%s proposal_id=%s attempt=%s "
+                           "code=%s field=%s repairable=false exception=%s", failure.request_id,
+                           failure.proposal_id, failure.attempt, failure.code, failure.field,
+                           failure.exception_type)
             return ChatResponse(
                 session_id=request.session_id, operation="VISUALIZE", resolved_question=objective,
-                message=str(exc), token_usage=usage, call_ledger=ledger,
+                message=failure.message, token_usage=usage, call_ledger=ledger,
+                dashboard_design_failures=[*design_failures, failure],
+                provenance=["dashboard_design_validation_failed"],
             )
 
     def dashboard_summary(session: str, db: str, result: str) -> dict[str, Any] | None:
+
         saved = studio_context.get()
         spec = (saved.document.spec if saved is not None
                 else dashboard_revisions.get(session, db, result))
@@ -2529,6 +2611,7 @@ def create_app(
                                               for k in spec.kpis],
                 "charts": [{"id": w.widget_id, "title": w.chart_spec.title,
                             "type": w.chart_spec.chart_type, "width": w.column_span,
+                            "analytical_role": w.analytical_role,
                             "source_result_id": w.result_id}
                            for w in spec.widgets]}
 

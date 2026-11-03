@@ -122,6 +122,15 @@ def test_one_targeted_correction_is_metered_and_no_third_call():
 
         async def complete_task(self, model, prompt, task, **kwargs):
             self.calls += 1
+            context = json.loads(prompt.split(
+                "Verified context (profiles/sample are bounded, not the entire result): "
+            )[1])
+            profiles = {item["result_id"]: item for item in context["source_profiles"]}
+            assert profiles["customers"]["behavior"] == {"reference": "primary context"}
+            revenue = next(item for item in profiles["result"]["behavior"]["column_profiles"]
+                           if item["column"] == "revenue")
+            assert revenue["distribution"]["mean"] == 175
+            assert profiles["result"]["row_count"] == 4
             if self.calls == 2:
                 assert "Unknown eligible metric" in prompt
             proposal = (
@@ -232,12 +241,28 @@ def test_conversation_three_governed_queries_then_design_save_and_reopen(
         async def complete_detailed(self, model, prompt):
             self.top_calls += 1
             context = json.loads(prompt.split("\nContext: ")[1])
+            pending = (context.get("current_dashboard") or {}).get("pending_proposal")
+            if pending:
+                return json.dumps(
+                    {
+                        "action": "CALL_TOOL",
+                        "intent": "VISUALIZE",
+                        "tool": "ai_dashboard_designer",
+                        "tool_arguments": {
+                            "objective": goal,
+                            "design_action": "APPROVE",
+                            "proposal_id": pending["proposal_id"],
+                            "proposal_version": pending["version"],
+                            "approval_quote": context["question"],
+                        },
+                    }
+                ), TokenUsage()
             if self.top_calls <= 3:
                 decision = {
                     "action": "CALL_TOOL",
                     "intent": "NEW_QUERY",
                     "tool": "ask_data",
-                    "finish_after_tool": True,
+                    "finish_after_tool": False,
                     "tool_arguments": {
                         "objective": objectives[self.top_calls - 1],
                         "operation": "NEW_QUERY",
@@ -283,7 +308,9 @@ def test_conversation_three_governed_queries_then_design_save_and_reopen(
                         for source in context["source_profiles"]
                     ],
                     "charts": [
-                        {"candidate_id": c["candidate_id"]} for c in context["chart_catalog"][:2]
+                        {"candidate_id": c["candidate_id"],
+                         "analytical_role": "PRIMARY" if i == 0 else "COMPARISON"}
+                        for i, c in enumerate(context["chart_catalog"][:2])
                     ],
                 }
             ), TokenUsage(input_tokens=100, output_tokens=30)
@@ -309,6 +336,7 @@ def test_conversation_three_governed_queries_then_design_save_and_reopen(
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["dashboard"], body
+    assert body["dashboard_design_proposal"] is None
     assert sql.calls == 3 and model.top_calls == 4 and model.design_calls == 1
     assert body["dashboard"]["schema_version"] == 2 and len(body["dashboard"]["sources"]) == 3
     saved = client.post(
@@ -363,6 +391,22 @@ def test_saved_dashboard_adds_missing_evidence_without_refreshing_existing_resul
         async def complete_detailed(self, model, prompt):
             context = json.loads(prompt.split("\nContext: ")[1])
             self.calls.append("top")
+            pending = (context.get("current_dashboard") or {}).get("pending_proposal")
+            if pending:
+                return json.dumps(
+                    {
+                        "action": "CALL_TOOL",
+                        "intent": "VISUALIZE",
+                        "tool": "ai_dashboard_designer",
+                        "tool_arguments": {
+                            "objective": "Confirm design",
+                            "design_action": "APPROVE",
+                            "proposal_id": pending["proposal_id"],
+                            "proposal_version": pending["version"],
+                            "approval_quote": context["question"],
+                        },
+                    }
+                ), TokenUsage()
             if not context["dashboard_evidence"]:
                 decision = {
                     "action": "CALL_TOOL",
@@ -431,6 +475,7 @@ def test_saved_dashboard_adds_missing_evidence_without_refreshing_existing_resul
     )
     assert response.status_code == 200, response.text
     preview = response.json()
+
     assert preview["preview_id"], (preview, model.calls, model.tasks, sql.calls)
     assert len(preview["spec"]["sources"]) == 3
     assert preview["spec"]["widgets"][: len(spec.widgets)] == [

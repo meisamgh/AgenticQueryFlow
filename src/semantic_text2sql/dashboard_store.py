@@ -207,6 +207,7 @@ class SavedDashboard(StrictModel):
     updated_at: float
     permission: Literal["owner", "editor", "viewer"] = "owner"
     document: DashboardDocument
+    pending_design_proposal: dict[str, Any] | None = None
 
 
 # Migration is additive and runs atomically alongside query_runs; no history rows

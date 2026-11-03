@@ -94,3 +94,128 @@ and authorization integration exist. NOT RUN: live providers, PostgreSQL and rea
 browser visual QA. No production latency gain is claimed. Scope and call-count
 measurements are recorded in V6_4_PROGRESS.md and AGENTIC_DASHBOARDS.md; older
 requirement statuses remain unchanged.
+
+### Human-reviewed dashboard design (2026-10-31)
+
+VERIFIED locally: typed design proposals and source/layout requirements; the
+existing Top-layer agent selects investigations and interprets explicit approval;
+no conversational dashboard construction before exact-version confirmation;
+natural-language revisions and rejection; unchanged layout-only source snapshots;
+atomic proposal revision conflicts; restart/resume; missing-evidence continuation
+through governed SQLite SQL followed by a new mapping review; failed-finalization
+rollback and explicit retry; saved Studio compatibility/permissions; compact
+discussion summaries and non-error frontend presentation.
+
+Evidence: test_dashboard_proposals.py, extended test_multi_dashboard.py and
+test_dashboard_studio.py, dashboard_studio.cjs and frontend_rendering.cjs. Existing
+SQL/chart/security regressions remain enabled. Exact checks and counts are in
+V6_4_PROGRESS.md; no older requirement status is promoted by this entry.
+
+BLOCKED: production identity/session ownership and external sharing, as before.
+NOT RUN: live-provider, PostgreSQL and browser visual QA. No cross-session
+unsaved-proposal transfer or automatic refresh. Resume the original conversation
+or authorized saved Studio. See DASHBOARD_DESIGN_APPROVAL.md for scope and the
+distinction between validated candidate snapshots and approved rendered dashboards.
+
+### Live local dashboard completion (2026-11-01)
+
+VERIFIED for one explicit consumption-only scenario: unchanged Llama 3.2
+understanding plus Qwen 3.5 4B SQL/design; real `/api/chat` proposal with 21 complete
+monthly rows; reviewed exact-version confirmation after API restart; READY with
+the same result ID and 21-point line chart. Approval made no SQL/designer calls.
+Temporary only: not saved or published. Native wire grammar/action consistency,
+scoped reference validation and exact quoting retain canonical local validators.
+
+Evidence: live API responses and persisted READY proposal, test_scoped_decisions.py;
+641 Python passed/2 skipped, 182 frontend/voice passed, Ruff/mypy/diff passed.
+This supersedes the earlier NOT COMPLETE outcome only for this tested scenario;
+broad small-model accuracy, production auth/sharing and browser visual QA are
+not verified. See V6_4_PROGRESS.md for failures, remaining redundant chart attempt,
+timings and source boundaries. No model switch, commit or push.
+
+### Compact design review UI — VERIFIED (automated)
+
+Sources: `web/design_review.js`, `web/app.js`, `web/styles.css`, `web/index.html`.
+Acceptance: `tests/design_review.cjs` and frontend progress regressions verify
+explicit approval, historical approval disabled, no build on render, safe text,
+terminal statuses, approval pause and unused stages. 186 frontend/voice tests
+and 641 Python tests passed (2 skipped); Ruff/mypy passed. Browser appearance
+remains unverified. Baseline commit `5ce519b`; these UI changes are uncommitted.
+## Autonomous dashboard workflow — VERIFIED (automated, 2026-11-01)
+
+Supersedes approval-before-build entries below; those describe historical work.
+Sources: `api.py`, `conversational_agent.py`, `ai_dashboard_designer.py`,
+`dashboard_studio.py`, `web/app.js`, `web/dashboard_studio.js`, `web/design_review.js`.
+Acceptance: `test_dashboard_proposals.py` archival safety/requery/concurrency;
+`test_multi_dashboard.py` automatic multi-result build/save/reopen;
+`test_dashboard_studio.py` direct saved edits and snapshot preservation;
+`test_ai_dashboard_designer.py` incomplete evidence and bounded validation;
+frontend Studio/rendering/archive tests. 643 Python passed/2 skipped, 186
+frontend/voice passed; Ruff/mypy/diff passed. No production/live latency claim.
+External sharing, live-provider quality, PostgreSQL integration and browser visual
+QA remain unverified or blocked by the pre-existing prerequisites.
+### Ordinary analysis versus dashboard scope — VERIFIED (routing)
+
+`conversational_agent.py`: explicit ordinary-query prompt/example and completion
+scope consistency validation before tools. `ai_dashboard_designer.py`: optional
+further analyses do not force requery; essential missing evidence still does.
+Tests: plain trend with earlier dashboard context; invalid scope repaired once
+before SQL; optional-suggestion design acceptance; automatic multi-result build.
+Isolated live Llama routing: ask_data, dashboard_goal=null, finish_after_tool=true,
+two model calls/zero DB calls, 8.66s. Full live SQL and browser verification were
+not performed; running backend requires reload to adopt these code changes.
+Checks: 645 Python passed/2 skipped; 186 frontend/voice passed; Ruff/mypy/diff passed.
+
+Native-path follow-up VERIFIED: `AgentDecision.result_kind`, `_ollama_decision_actions`
+artifact-first branches, and canonical scope validation. ANALYSIS/CHART cannot
+select dashboard tools or set dashboard_goal; legacy decisions still parse.
+Regressions cover native branch constraints, typed and legacy contradiction repair,
+ordinary questions, and multi-result dashboards. 646 Python passed/2 skipped,
+186 frontend/voice passed, Ruff/mypy/diff passed. Full isolated live consumption
+query returned 21 rows in 16.34s, with one Top-layer and one SQL model call,
+no dashboard call/retry. No state writes to the existing server; user declined
+restart, so the running port-8001 process still needs manual reload.
+
+Groq native-schema follow-up VERIFIED: inactive legacy proposal fields use
+null-only scoped schemas, without invalid minimum/string constraints. Canonical
+validation is preserved. Minimal live strict request accepted; isolated full
+consumption query accepted with 21 rows, 2.40s, one Top-layer and one SQL model
+call, no dashboard. Existing server was not restarted or modified.
+Checks: 646 Python passed/2 skipped, 186 frontend/voice passed; Ruff/mypy/diff passed.
+
+Bare-dashboard context reuse VERIFIED (scripted): Top-layer prompt and compact
+accepted-cache fallback retain question/columns/semantic contract without a
+ConversationState. New regression confirms one Top call, zero SQL calls and stable
+result identity. Full suite: 647 Python passed/2 skipped. Live query returned 21
+rows, but the subsequent live dashboard was rate-limited after a routing repair;
+full live dashboard completion remains NOT VERIFIED. No running-server changes.
+
+Three-layer BI design/editing VERIFIED (automated): `ai_dashboard_designer.py`
+layered prompt, finite distribution/association evidence, scoped secondary result
+profiles, enriched KPI definitions, preserved PATCH identities and unambiguous
+ordering. `conversational_agent.py` retains governed edit scope; dashboard renderer
+honors supported AI widths with separate chart rows. Tests prove candidate/filter
+validation, differing scripted selections for same-schema/different observations,
+replacement/removal/order and unaffected source preservation. 652 Python passed/
+2 skipped, 187 frontend/voice passed; Ruff/mypy/diff passed. Live LLM design
+quality and browser appearance are NOT VERIFIED; no new LLM or SQL calls added.
+
+Four visible chart layers VERIFIED (automated): role metadata in DashboardWidget
+and ChartChoice; new AI design schema/local checks require plot roles and a unique
+Primary. Materialization orders Primary → Comparison → Distribution → Relationship;
+PATCH preserves/reassigns roles explicitly. Typed spec/store compatibility and
+frontend validate the same single-Primary invariant. Four sections render in order,
+unsupported layers remain empty and no plots share a grid row. Existing legacy
+unlabelled designs are preserved. Tests: 659 Python passed/2 skipped,
+188 frontend/voice passed; Ruff/mypy/diff passed. Live new-role planning and browser
+appearance remain unverified. Existing server and unsaved dashboards untouched.
+
+Dashboard failure hardening VERIFIED (automated, 2026-11-02): typed safe diagnostics,
+request/proposal/attempt logging without data, grounded year/label validation,
+specific bounded repair with preserved valid choices, provider non-retry,
+API/Studio messages and unchanged original revision after failure. Sources and
+acceptance: DASHBOARD_VALIDATION.md; test_dashboard_design_diagnostics.py and
+frontend message regressions. 677 Python passed/2 skipped, 189 frontend/voice
+passed, Ruff/mypy/diff passed. Live-provider/browser/PostgreSQL verification not run.
+Final source-scoped annotation regression included: 678 Python passed/2 skipped;
+189 frontend/voice passed. Full results and exact changed files: DASHBOARD_VALIDATION.md.

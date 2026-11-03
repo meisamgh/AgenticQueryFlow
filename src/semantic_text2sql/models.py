@@ -13,7 +13,7 @@ from semantic_text2sql.sql_formatting import format_sql_for_display
 DEFAULT_MODEL = "gpt-5.6-sol"
 GROQ_QWEN_MODEL = "qwen/qwen3.8-27b"
 ModelProvider = Literal[
-    "agentrouter", "groq", "justdowork", "codecraft", "true_sota", "openrouter"
+    "agentrouter", "groq", "justdowork", "codecraft", "true_sota", "openrouter", "ollama"
 ]
 
 
@@ -495,6 +495,7 @@ class CallLedgerEntry(StrictModel):
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     latency_ms: int | None = Field(default=None, ge=0)
+    validation_issues: list[str] = Field(default_factory=list, max_length=4)
 
 
 class PipelineTelemetry(StrictModel):
@@ -728,8 +729,14 @@ class DashboardTarget(StrictModel):
 class ChatRequest(StrictModel):
     _dashboard_snapshot_only: bool = PrivateAttr(default=False)
     _dashboard_sources: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _dashboard_design_action: str = PrivateAttr(default="PROPOSE")
+    _dashboard_proposal_id: str | None = PrivateAttr(default=None)
+    _dashboard_proposal_version: int | None = PrivateAttr(default=None)
+    _dashboard_approval_quote: str | None = PrivateAttr(default=None)
+    _dashboard_investigation_evidence: list[dict[str, Any]] = PrivateAttr(default_factory=list)
     _dashboard_source_ids: list[str] = PrivateAttr(default_factory=list)
     _dashboard_widget_id: str | None = PrivateAttr(default=None)
+    _dashboard_request_id: str | None = PrivateAttr(default=None)
     _dashboard_previous_result_id: str | None = PrivateAttr(default=None)
     dashboard_target: DashboardTarget | None = None
     model_config = ConfigDict(extra="forbid", validate_default=True)
@@ -1024,11 +1031,26 @@ class ChartRecommendations(StrictModel):
     alternative_charts: list[RecommendedChart] = Field(default_factory=list, max_length=6)
 
 
+class DashboardDesignFailure(StrictModel):
+    code: str
+    field: str
+    message: str
+    repairable: bool
+    request_id: str
+    proposal_id: str
+    attempt: int = Field(ge=1, le=2)
+    exception_type: str = ""
+
+
 class ChatResponse(StrictModel):
     _dashboard_evidence: dict[str, Any] = PrivateAttr(default_factory=dict)
     # Validated DashboardSpec serialized at the specialist boundary; kept here
     # as a JSON envelope to avoid importing dashboard_service back into models.
     dashboard: dict[str, Any] | None = None
+    dashboard_design_proposal: dict[str, Any] | None = None
+    dashboard_design_failures: list[DashboardDesignFailure] = Field(
+        default_factory=list, max_length=2
+    )
     session_id: str
     run_id: str | None = None
     result_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")

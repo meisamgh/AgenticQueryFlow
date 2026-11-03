@@ -176,7 +176,9 @@ def studio_router(
         identity: str, request: Request, response: Response, version: int | None = None
     ) -> SavedDashboard:
         db, principal = access(request, response)
-        return checked(lambda: db.open(principal, identity, version))
+        saved = checked(lambda: db.open(principal, identity, version))
+
+        return saved
 
     @router.get("/{identity}/versions")
     def history(identity: str, request: Request, response: Response) -> list[dict[str, Any]]:
@@ -215,6 +217,8 @@ def studio_router(
                 "preview_id": None,
                 "message": result.message,
                 "call_ledger": result.call_ledger,
+                "design_proposal": result.dashboard_design_proposal,
+                "dashboard_design_failures": result.dashboard_design_failures,
             }
         from semantic_text2sql.dashboard_service import DashboardSpec
 

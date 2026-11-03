@@ -233,6 +233,23 @@ def test_real_top_layer_edit_after_restart_never_executes_sql(
 
         async def complete_detailed(self, model, prompt):
             self.calls.append("top")
+            context = json.loads(prompt.split("\nContext: ")[1])
+            pending = (context.get("current_dashboard") or {}).get("pending_proposal")
+            if pending:
+                return json.dumps(
+                    {
+                        "action": "CALL_TOOL",
+                        "intent": "VISUALIZE",
+                        "tool": "ai_dashboard_designer",
+                        "tool_arguments": {
+                            "objective": "Confirm design",
+                            "design_action": "APPROVE",
+                            "proposal_id": pending["proposal_id"],
+                            "proposal_version": pending["version"],
+                            "approval_quote": context["question"],
+                        },
+                    }
+                ), TokenUsage()
             if route == "component":
                 context = json.loads(prompt.split("\nContext: ")[1])
                 assert context["selected_dashboard_component"] == {
@@ -319,6 +336,7 @@ def test_real_top_layer_edit_after_restart_never_executes_sql(
         },
     )
     assert response.status_code == 200, response.text
+    assert response.json().get("design_proposal") is None
     if route == "design":
         assert response.json()["preview_id"]
         assert model.calls == ["top", "dashboard"]
