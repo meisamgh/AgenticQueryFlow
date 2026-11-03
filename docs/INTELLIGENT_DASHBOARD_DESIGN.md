@@ -4,6 +4,17 @@ The existing Top-layer LangGraph agent investigates the objective and retrieves
 missing evidence through governed tools. The existing designer LLM selects how to
 communicate it. No new agent, router, framework or SQL execution path was added.
 
+## Configuration and diagnostics
+
+`TEXT2SQL_DASHBOARD_PROVIDER` and `TEXT2SQL_DASHBOARD_MODEL` select the
+existing designer adapter; empty values inherit the request's assistant model.
+`TEXT2SQL_DASHBOARD_MAX_TOKENS` bounds the completion. Credentials belong in
+local configuration, never documentation or saved dashboards.
+See [validation diagnostics](DASHBOARD_VALIDATION.md) for structured failures
+and bounded correction, and [permanent Studio](DASHBOARD_STUDIO.md) for saving,
+revisions, ownership and persistence. The deterministic compatibility API and
+KPI eligibility rules remain documented in [Dashboard MVP](DASHBOARD_MVP.md).
+
 ## Three decision layers
 
 1. **Filters/scope:** select exact verified filter refs. These control displayed

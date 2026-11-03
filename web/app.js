@@ -362,6 +362,20 @@ function wait(milliseconds) {
 
 function updateThinking(progress, job) {
   const stage = job.stage || "queued";
+  const avatars = {
+    queued: "history", conversation: "brain", retrieval: "search",
+    context_selection: "search", grounding: "database", generation: "code",
+    validation: "check", optimization: "code", execution: "database",
+    result_review: "table", visualization: "chart-line", plotting: "chart-line",
+    build: "columns", investigation: "binoculars", presentation: "sparkles",
+    completed: "check",
+  };
+  const avatarName = stage.startsWith("recovery") ? "binoculars" : avatars[stage] || "sparkles";
+  const avatar = progress.querySelector(".thinking-stage-avatar");
+  if (avatar.dataset.icon !== avatarName) {
+    avatar.innerHTML = icon(avatarName, 22);
+    avatar.dataset.icon = avatarName;
+  }
   const label = stage.startsWith("recovery") ? "Investigating an issue…"
     : progressLabels[stage] || "Working on your request…";
   const title = progress.querySelector(".progress-stage");

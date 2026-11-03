@@ -1,6 +1,7 @@
 /* Curated Lucide icon path data (ISC-licensed) rendered as inline SVG.
    Only these constant strings pass through innerHTML; user data never does. */
 const ICON_PATHS = {
+  brain: '<path d="M12 18V5a3 3 0 0 0-5.8-1A4 4 0 0 0 3 10a4 4 0 0 0 1 7 4 4 0 0 0 8 1ZM12 5a3 3 0 0 1 5.8-1A4 4 0 0 1 21 10a4 4 0 0 1-1 7 4 4 0 0 1-8 1M8 8a3 3 0 0 0 4-3M16 8a3 3 0 0 1-4-3M7 14a3 3 0 0 1 5 2M17 14a3 3 0 0 0-5 2"/>',
   'chart-heatmap':'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18M15 3v18M3 9h18M3 15h18"/><path d="M4 4h4v4H4zM10 10h4v4h-4zM16 16h4v4h-4z" fill="currentColor" stroke="none"/>',
   'chart-treemap':'<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M11 3v18M11 11h10M16 11v10"/>',
   'chart-scatter':'<path d="M3 3v18h18"/><circle cx="7" cy="15" r="1"/><circle cx="10" cy="9" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="19" cy="5" r="1"/>',

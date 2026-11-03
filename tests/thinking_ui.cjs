@@ -6,10 +6,10 @@ const source = fs.readFileSync(`${__dirname}/../web/app.js`, 'utf8');
 function harness(jobs = []) {
   const nodes = new Map(); let writes = 0; let polls = 0;
   const progress = {dataset:{}, querySelector(selector) {
-    if (!nodes.has(selector)) nodes.set(selector, {textContent:'', children:[], replaceChildren(){ writes++; this.children=[]; }, append(item){ this.children.push(item); }});
+    if (!nodes.has(selector)) nodes.set(selector, {dataset:{}, textContent:'', children:[], replaceChildren(){ writes++; this.children=[]; }, append(item){ this.children.push(item); }});
     return nodes.get(selector);
   }};
-  const context = vm.createContext({document:{createElement:()=>({})},
+  const context = vm.createContext({icon:(name)=>`<svg>${name}</svg>`, document:{createElement:()=>({})},
     api:async()=>{polls++; return jobs.shift();}, window:{setTimeout:fn=>fn()}});
   vm.runInContext(source.slice(source.indexOf('const progressLabels ='), source.indexOf('function appendProgress(')) +
     source.slice(source.indexOf('function wait('), source.indexOf('function visiblePipelineStage(')), context);
@@ -42,6 +42,14 @@ test('waiting is accessible, reduced-motion aware and has no speculative stage b
   assert.ok(template.includes('aria-live="off"'));
   assert.ok(!template.includes('pipeline-tracker'));
   const css=fs.readFileSync(`${__dirname}/../web/styles.css`,'utf8');
-  assert.match(css,/prefers-reduced-motion:reduce.*thinking-leaf/);
+  assert.match(css,/prefers-reduced-motion:reduce.*thinking-stage-avatar/);
   assert.ok(css.includes('@media (max-width:600px)'));
+});
+test('each executed stage selects a meaningful avatar without exposing raw stage names',()=>{
+  const h=harness();
+  for (const [stage, expected] of Object.entries({conversation:'brain',retrieval:'search',
+    generation:'code',validation:'check',execution:'database',recovery_values:'binoculars',plotting:'chart-line',build:'columns'})) {
+    h.context.updateThinking(h.progress,{stage,status:'running',events:[]});
+    assert.equal(h.nodes.get('.thinking-stage-avatar').dataset.icon,expected);
+  }
 });

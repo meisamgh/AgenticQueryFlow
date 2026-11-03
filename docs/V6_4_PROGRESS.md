@@ -575,7 +575,7 @@ automatic validated previews and undo. Existing Plotly/ECharts/table callbacks
 remain the only renderers. Config is documented in .env.example; no local .env
 was edited. Source modules: ai_dashboard_designer, dashboard_service, runtime,
 conversational_agent, api, models and task budgets in llm; frontend dashboard_view,
-small app integration, styles and cache-busted index. See AI_DASHBOARD_DESIGNER.md.
+small app integration, styles and cache-busted index. See INTELLIGENT_DASHBOARD_DESIGN.md.
 
 Acceptance coverage: 15 designer tests plus existing Phase 1 tests; frontend
 dashboard coverage expanded to 12 tests. Full Python run: 570 passed/2 skipped;
