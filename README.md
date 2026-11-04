@@ -21,6 +21,8 @@ Failures, empty results, unexpected NULLs or correctness reviews
   [SQL-based memory](docs/SQL_MEMORY.md) retrieves analytical definitions on demand;
   refreshed data is distinguished from original historical snapshots.
 - **Compact context:** hybrid retrieval with optional model-based context selection.
+  Optional [offline graph grounding](docs/SEMANTIC_GRAPH.md) adds approved KPI
+  dependencies and bounded, provenance-aware join paths without extra LLM calls.
 - **Governed execution:** SQLGlot checks, allowlisted data access and bounded repair.
 - **Interactive results:** Visualization, Data and SQL views; charts reuse sufficient results.
 - **Traceability:** tool observations, validation attempts, timings and token accounting.

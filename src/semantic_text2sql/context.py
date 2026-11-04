@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any, Literal, cast
 
+from semantic_text2sql.join_resolver import tables_connected
 from semantic_text2sql.models import (
     ContextMetadata,
     ContextPlan,
@@ -42,6 +43,7 @@ def build_context_plan(
     question: str,
     evidence: str | None,
     context_request: ContextRequest | None = None,
+    catalog_relationships: list[ContextRelationship] | None = None,
 ) -> ContextPlan:
     """Resolve only dependencies already approved by schema linking and the contract."""
     measures = {item.casefold() for item in contract.measures}
@@ -106,6 +108,13 @@ def build_context_plan(
         ]
     formulas = [item.id for item in contract.structural_formulas]
     relationships = _relationships(schema, profile, tables)
+    names = {table.name for table in schema.tables}
+    approved = [item for item in catalog_relationships or []
+                if item.state == "APPROVED_CATALOG"
+                and {item.left_table, item.right_table} <= names]
+    if approved:
+        relationships = [item for item in relationships if item.state != "UNRESOLVED"]
+        relationships.extend(approved)
     requirements = _requirements(schema, profile, contract, relationships, question)
     if context_request is not None:
         requirements.extend(_planner_requirements(context_request, profile, relationships))
@@ -489,22 +498,7 @@ def _requirements(
 
 
 def _tables_connected(tables: set[str], relationships: list[ContextRelationship]) -> bool:
-    if len(tables) < 2:
-        return True
-    graph: dict[str, set[str]] = {table: set() for table in tables}
-    for relationship in relationships:
-        if relationship.left_table in tables and relationship.right_table in tables:
-            graph[relationship.left_table].add(relationship.right_table)
-            graph[relationship.right_table].add(relationship.left_table)
-    visited: set[str] = set()
-    pending = [next(iter(tables))]
-    while pending:
-        table = pending.pop()
-        if table in visited:
-            continue
-        visited.add(table)
-        pending.extend(graph[table] - visited)
-    return visited == tables
+    return tables_connected(tables, [(item.left_table, item.right_table) for item in relationships])
 
 
 def _planner_requirements(

@@ -2133,6 +2133,7 @@ function renderInspectorSchema() {
         const cardinality = relationship.cardinality
           ? ` · ${relationship.cardinality.replaceAll("_", " ").toLowerCase()}` : "";
         const source = relationship.state === "VERIFIED_FK" ? " · declared FK"
+          : relationship.state === "APPROVED_CATALOG" ? " · approved catalog"
           : relationship.state ? " · inferred relationship" : "";
         join.textContent = `${left} → ${right}${cardinality}${source}`;
         graphBox.append(join);

@@ -6,6 +6,10 @@ const vm = require('node:vm');
 const source = fs.readFileSync(`${__dirname}/../web/app.js`, 'utf8');
 const styles = fs.readFileSync(`${__dirname}/../web/styles.css`, 'utf8');
 const markup = fs.readFileSync(`${__dirname}/../web/index.html`, 'utf8');
+test('context inspector distinguishes approved catalog joins from declared FKs', () => {
+  assert.ok(source.includes('relationship.state === "APPROVED_CATALOG" ? " · approved catalog"'));
+  assert.ok(source.includes('relationship.state === "VERIFIED_FK" ? " · declared FK"'));
+});
 test('user avatar is a white U on a green circle instead of a person icon', () => {
   assert.ok(source.includes('avatar.textContent = "U";'));
   assert.ok(!source.includes('avatar.innerHTML = icon("user"'));

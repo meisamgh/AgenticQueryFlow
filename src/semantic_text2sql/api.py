@@ -134,6 +134,7 @@ from semantic_text2sql.semantic_catalog_validation import (
     sqlite_runner,
     verify_catalog,
 )
+from semantic_text2sql.semantic_graph import SemanticGraphStore, compile_graph
 from semantic_text2sql.service import TextToSQLService
 from semantic_text2sql.sql_diffs import (
     SqlDiffRequest,
@@ -362,7 +363,31 @@ def create_app(
         retriever=hybrid_retriever,
         agent=active_agent,
         context_completers=cast(dict[ModelProvider, Any], turn_completers),
+        semantic_catalogs=semantic_catalogs,
+        graph_store=SemanticGraphStore(Path(os.environ.get("TEXT2SQL_GRAPH_ROOT", "graphs"))),
     )
+    async def prepare_semantic_graphs() -> None:
+        if os.environ.get("TEXT2SQL_GRAPH_ENABLED", "false").lower() != "true":
+            return
+        def build() -> None:
+            registries: list[DatabaseRegistry | PostgresRegistry] = [sqlite]
+            if postgres:
+                registries.append(postgres)
+            for registry in registries:
+                identities = (registry.list_ids() if isinstance(registry, DatabaseRegistry)
+                              else registry.configured_ids())
+                for identity in identities:
+                    try:
+                        schema = registry.inspect(identity)
+                        profile = profiles.load(schema.dialect, identity)
+                        snapshot = compile_graph(schema, semantic_catalogs.load(identity),
+                                                 profile, glossaries.load(identity))
+                        if question_service.graph_store:
+                            question_service.graph_store.save(snapshot)
+                    except (ValueError, OSError, DatabaseError) as exc:
+                        logger.warning("semantic_graph_unavailable type=%s", type(exc).__name__)
+        await asyncio.to_thread(build)
+    app.router.add_event_handler("startup", prepare_semantic_graphs)
     conversation_store_value = os.environ.get("TEXT2SQL_CONVERSATION_STORE")
     conversation_path = Path(conversation_store_value) if conversation_store_value else None
     conversations = ConversationStore(

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 import re
-from collections import deque
 
+from semantic_text2sql.join_resolver import resolve_joins
 from semantic_text2sql.models import (
     ColumnProfile,
     DatabaseProfile,
@@ -199,23 +200,8 @@ def _foreign_key_columns(table: str, schema: SchemaInfo) -> set[str]:
 
 
 def _bridge_tables(selected: set[str], schema: SchemaInfo) -> set[str]:
-    graph: dict[str, set[str]] = {table.name: set() for table in schema.tables}
-    for item in schema.relationships:
-        graph.setdefault(item.from_table, set()).add(item.to_table)
-        graph.setdefault(item.to_table, set()).add(item.from_table)
-    additions: set[str] = set()
-    names = sorted(selected)
-    for index, start in enumerate(names):
-        for target in names[index + 1 :]:
-            queue = deque([(start, [start])])
-            visited = {start}
-            while queue:
-                current, path = queue.popleft()
-                if current == target:
-                    additions.update(path)
-                    break
-                for neighbor in sorted(graph.get(current, set())):
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        queue.append((neighbor, [*path, neighbor]))
-    return additions
+    legacy = os.environ.get("TEXT2SQL_GRAPH_ENABLED", "false").lower() != "true"
+    resolution = resolve_joins(sorted(selected), schema, reject_ambiguous=(
+        not legacy), max_depth=len(schema.tables) if legacy else 6,
+        max_candidates=max(64, len(schema.tables) * len(selected) ** 2) if legacy else 64)
+    return set(resolution.tables) if resolution.status == "CONNECTED" else set()
