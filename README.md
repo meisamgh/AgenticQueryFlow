@@ -8,7 +8,15 @@ It transforms natural-language business questions into governed SQL, inspectable
 
 <p align="center">
   <img src="Arch-pic.png" alt="AgenticQueryflow architecture" width="900" />
+
+  <img src="WorkFlow.png" alt="Queryflow architecture" width="900" />
 </p>
+
+<p align="center">
+  <img src="Arch-pic_ont.png" alt="Queryflow architecture" width="900" />
+</p>
+
+
 
 ## Features
 
