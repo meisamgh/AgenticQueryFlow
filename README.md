@@ -21,10 +21,10 @@ It transforms natural-language business questions into governed SQL, inspectable
 ## Features
 
 - **Conversational analytics:** A LangGraph assistant selects tools for new queries, refinements, explanations, investigations, and charts.
-- **Grounded Text-to-SQL:** Hybrid schema retrieval using BM25, embeddings, value matching, verified metadata, optional Model 1 context planning, and SQL generation.
+- **Grounded Text-to-SQL:** Hybrid schema retrieval using BM25, embeddings, value matching, deterministic metadata verification, optional graph grounding, and SQL generation.
 - **Read-only execution:** SQLGlot validation, database allowlists, row limits, timeouts, and bounded model/database calls.
 - **Evidence-based recovery:** Investigates failed queries, empty results, unexpected NULLs, and explicit correctness-review requests before proposing repair or escalation.
-- **Validated charts:** A separate plotting service validates accepted results before visualization, using Plotly with an ECharts fallback.
+- **Validated charts:** The Top-layer agent proposes chart encodings; a deterministic service validates accepted results and renders through Plotly with an ECharts fallback.
 - **Inspectable workspace:** SQL and Data tabs, CSV export, chart exploration, query history, versions, usage details, and optional voice transcription.
 
 
