@@ -1,5 +1,40 @@
 # V6.4 progress checkpoint
 
+## 2026-11-04 — Offline graph-enhanced semantic grounding
+
+Checkpoint before implementation: `7375d8f`. Added deterministic NetworkX
+compilation, versioned atomic JSON snapshots and a bounded cache; unified three
+join traversals with permission checks, composite mappings, forbidden relationship
+handling and ambiguity reporting. Graph-off keeps legacy tie selection. Optional
+service grounding propagates approved catalog metrics, mandatory filters and
+dependency columns; catalog joins retain distinct APPROVED_CATALOG provenance.
+The existing single Top-layer agent, SQL service, SQLGlot safety, result state and
+plotting paths remain. No dashboard code was changed.
+
+Optional local query_ontology reuses the recovery tool loop, existing deadlines
+and call limits. Exact typed metric evidence is checked; definitions alone do not
+authorize semantic repair without a provable SQL mismatch. No external ontology
+provider is enabled. Graph building occurs at explicit CLI refresh/startup, never
+per question. See SEMANTIC_GRAPH.md for interfaces, flags and the offline CLI.
+
+The stored debit-card benchmark includes 13 paired failures. AST-difference
+signals are saved as UNADJUDICATED, not invented root-cause labels. New performance
+results are synthetic local build/load/traversal measurements with zero model/DB
+calls; they are not a measured end-to-end speedup or SQL-accuracy improvement.
+Fresh debit-card accuracy, real-provider token use, PostgreSQL and NVIDIA tests
+remain NOT RUN. Production identity constraints and older incomplete V6.4 items
+are unchanged. Local verification results are recorded in the delivery report.
+
+Final local checks: 704 Python tests passed, 2 PostgreSQL integration tests skipped
+without their configured DSNs; 198 frontend/voice tests passed. Ruff, mypy
+(70 source files), lockfile consistency and diff whitespace checks passed.
+Twenty-six new Python cases cover graph/KPI/ontology behavior, including Model 1
+pruning, long-path graph-off compatibility, stale accepted metric rejection,
+checksum corruption, exact qualified sources and bounded context. Recovery shares
+the service metadata stores/cache. The inspector labels approved catalog joins
+separately from declared FKs. Actual .env and the unrelated workflow image were
+not changed; no commit, push or server restart was performed.
+
 ## 2026-11-03 — Compact thinking experience
 
 Frontend waiting uses an animated leaf, one event-backed activity label,
@@ -575,7 +610,7 @@ automatic validated previews and undo. Existing Plotly/ECharts/table callbacks
 remain the only renderers. Config is documented in .env.example; no local .env
 was edited. Source modules: ai_dashboard_designer, dashboard_service, runtime,
 conversational_agent, api, models and task budgets in llm; frontend dashboard_view,
-small app integration, styles and cache-busted index. See AI_DASHBOARD_DESIGNER.md.
+small app integration, styles and cache-busted index. See INTELLIGENT_DASHBOARD_DESIGN.md.
 
 Acceptance coverage: 15 designer tests plus existing Phase 1 tests; frontend
 dashboard coverage expanded to 12 tests. Full Python run: 570 passed/2 skipped;

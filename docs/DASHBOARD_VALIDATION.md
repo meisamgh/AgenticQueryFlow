@@ -75,6 +75,6 @@ Changed files for this fix:
 - `src/semantic_text2sql/dashboard_studio.py`
 - `web/app.js`, `web/index.html`
 - `tests/test_dashboard_design_diagnostics.py`, `tests/frontend_rendering.cjs`
-- This document, `AI_DASHBOARD_DESIGNER.md`, `V6_4_PROGRESS.md`, `V6_4_MATRIX.md`.
+- This document, `INTELLIGENT_DASHBOARD_DESIGN.md`, `V6_4_PROGRESS.md`, `V6_4_MATRIX.md`.
 
 Earlier unrelated/uncommitted dashboard work was preserved. No commit or push.

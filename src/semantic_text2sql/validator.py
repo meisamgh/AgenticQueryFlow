@@ -305,12 +305,21 @@ def _approved_metric_findings(
                           "its source relation is not proven."),
             ))
         else:
+            projection = (root.expressions[0].unalias()
+                          if isinstance(root, exp.Select) and len(root.expressions) == 1 else None)
+            wrong_direct_function = (
+                not complex_lineage and isinstance(projection, exp.AggFunc)
+                and type(projection) is not type(formula)
+                and isinstance(projection.this, exp.Column)
+                and projection.this.name.casefold() == required_column
+            )
             direct_wrong_input = bool(list(root.find_all(type(formula)))) and all(
                 isinstance(node.this, exp.Column)
                 for node in root.find_all(type(formula))
             )
             findings.append(SemanticFinding(
-                status="FAIL" if direct_wrong_input and not complex_lineage else "UNRESOLVED",
+                status="FAIL" if wrong_direct_function or (
+                    direct_wrong_input and not complex_lineage) else "UNRESOLVED",
                 code="APPROVED_METRIC_INPUT_MISMATCH",
                 evidence=f"No direct {type(formula).__name__.upper()} on "
                          f"{metric.source_relation}.{required_column} implements {metric.id}.",

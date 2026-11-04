@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, computed_field, model_validator
 
 from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.sql_formatting import format_sql_for_display
+
+if TYPE_CHECKING:
+    from semantic_text2sql.ontology import OntologyAdapter
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 GROQ_QWEN_MODEL = "qwen/qwen3.8-27b"
@@ -350,7 +353,7 @@ class ContextRelationship(StrictModel):
     right_column: str
     left_columns: list[str] | None = None
     right_columns: list[str] | None = None
-    state: Literal["VERIFIED_FK", "INFERRED_KEY_RELATIONSHIP", "UNRESOLVED"]
+    state: Literal["VERIFIED_FK", "APPROVED_CATALOG", "INFERRED_KEY_RELATIONSHIP", "UNRESOLVED"]
     join_cardinality: Literal["ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY", "UNKNOWN"]
     left_key_unique: bool | None = None
     right_key_unique: bool | None = None
@@ -379,7 +382,7 @@ class VerifiedRelationship(StrictModel):
     right: str
     left_columns: list[str] | None = None
     right_columns: list[str] | None = None
-    state: Literal["VERIFIED_FK", "INFERRED_KEY_RELATIONSHIP", "UNRESOLVED"]
+    state: Literal["VERIFIED_FK", "APPROVED_CATALOG", "INFERRED_KEY_RELATIONSHIP", "UNRESOLVED"]
     cardinality: Literal["ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY", "UNKNOWN"]
     left_key_unique: bool | None = None
     right_key_unique: bool | None = None
@@ -610,8 +613,10 @@ class RecoveryClaim(StrictModel):
         "NULL_CAUSE",
         "SQL_FAILURE",
         "UNCERTAINTY",
+        "METRIC_DEFINITION",
     ]
     statement: str = Field(min_length=1, max_length=500)
+    metric_id: str | None = Field(default=None, max_length=64)
     evidence_ids: list[str] = Field(min_length=1, max_length=6)
     table: str | None = Field(default=None, max_length=128)
     column: str | None = Field(default=None, max_length=128)
@@ -698,6 +703,8 @@ class VerifiedSchemaSnapshot(StrictModel):
 
 
 class GenerateRequest(StrictModel):
+    _catalog_relationships: list[ContextRelationship] = PrivateAttr(default_factory=list)
+    _ontology_adapter: OntologyAdapter | None = PrivateAttr(default=None)
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     question: str = Field(min_length=1, max_length=4_000)
     evidence: str | None = Field(default=None, max_length=8_000)

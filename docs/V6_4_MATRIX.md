@@ -1,5 +1,9 @@
 # Queryflow V6.4 requirement matrix
 
+Graph-enhanced grounding (2026-11-04) is tracked separately in SEMANTIC_GRAPH.md
+and test_semantic_graph.py. The optional layer does not promote any older
+IN_PROGRESS/BLOCKED semantic, authorization or live-provider requirement below.
+
 Statuses: NOT_STARTED, IN_PROGRESS, IMPLEMENTED_UNVERIFIED, VERIFIED, BLOCKED, NOT_APPLICABLE. VERIFIED requires code evidence and a relevant passing test. This matrix is a checkpoint, not a completion claim.
 
 | ID | Requirement | Severity | Current status | Source files | Planned change | Test coverage | Acceptance condition | Evidence | Final status |

@@ -3,6 +3,7 @@
 !.env.example
 .env.postgres
 profiles/
+graphs/
 benchmarks/.cache/
 benchmarks/spider_data/
 .venv/

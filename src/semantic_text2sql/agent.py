@@ -219,6 +219,7 @@ class TextToSQLAgent:
             request.question,
             request.evidence,
             request.context_request,
+            request._catalog_relationships,
         )
         if not context_plan.coverage_complete:
             return GenerateResponse(
@@ -602,7 +603,8 @@ class TextToSQLAgent:
                 if progress:
                     progress("recovery")
                 recovery_trace = await RecoveryCoordinator(
-                    RecoveryTools(database, request.db_id, schema, profile, budget=budget)
+                    RecoveryTools(database, request.db_id, schema, profile, budget=budget,
+                                  ontology=request._ontology_adapter)
                 ).ainvestigate(
                     question=request.question,
                     failed_sql=sql,

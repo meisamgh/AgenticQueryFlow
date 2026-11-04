@@ -708,6 +708,20 @@ svg.lucide { stroke-width: 1.7; }
 .attempt-item pre code { font-size: 11.5px; color: var(--sql-text); }
 
 /* ---------- Waiting (progress) ---------- */
+.thinking-stage-avatar { display:flex; flex:none; align-items:center; justify-content:center; width:42px; height:42px; border-radius:13px; background:var(--accent-soft); color:var(--accent); border:1px solid var(--border); animation:leaf-breathe 2.4s ease-in-out infinite; }
+.thinking-stage-avatar svg { width:22px; height:22px; }
+.waiting .progress-stage { margin:0 0 3px; color:var(--text); font-size:14px; font-weight:500; animation:thinking-reveal 180ms ease; }
+.waiting .progress-stage::after { content:""; display:inline-block; width:4px; height:4px; margin-left:8px; vertical-align:middle; border-radius:50%; background:var(--accent); animation:leaf-breathe 1.4s ease-in-out infinite; }
+.thinking-meta { display:flex; justify-content:space-between; gap:12px; color:var(--text-faint); font-size:11px; padding:4px 0; }
+.progress-completed { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.progress-elapsed { flex:none; font-variant-numeric:tabular-nums; }
+#messages .progress-history { font-size:12px; color:var(--text-muted); }
+#messages .progress-history ul { max-height:180px; overflow:auto; }
+[data-status="failed"] .thinking-stage-avatar, [data-status="cancelled"] .thinking-stage-avatar { animation:none; }
+@keyframes leaf-breathe { 0%,100% { opacity:.65; transform:scale(.96) rotate(-3deg); } 50% { opacity:1; transform:scale(1) rotate(3deg); } }
+@keyframes thinking-reveal { from { opacity:.5; transform:translateY(2px); } to { opacity:1; transform:translateY(0); } }
+@media (prefers-reduced-motion:reduce) { .thinking-stage-avatar, .waiting .progress-stage, .waiting .progress-stage::after { animation:none; transition:none; } }
+@media (max-width:600px) { .thinking-stage-avatar { width:34px; height:34px; } .waiting .progress-stage { font-size:13px; } }
 .waiting { padding: 14px 0 6px; display: flex; align-items: center; gap: 12px; color: var(--text-muted); font-size: 13px; }
 .spinner {
   height: 17px; width: 17px; border: 2px solid var(--border-strong);

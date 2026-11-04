@@ -3,14 +3,16 @@
 from __future__ import annotations
 
 import math
+import os
 import re
-from collections import Counter, OrderedDict, deque
+from collections import Counter, OrderedDict
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from threading import RLock
 from typing import Any, Protocol
 
 from semantic_text2sql.glossary import BusinessGlossary, GlossaryTerm
+from semantic_text2sql.join_resolver import resolve_joins
 from semantic_text2sql.models import (
     ColumnInfo,
     ColumnProfile,
@@ -603,27 +605,11 @@ def _relationship_columns(table: str, schema: SchemaInfo) -> set[str]:
 
 
 def _expand_bridges(selected: list[str], schema: SchemaInfo) -> list[str]:
-    graph: dict[str, set[str]] = {table.name: set() for table in schema.tables}
-    for relationship in schema.relationships:
-        graph[relationship.from_table].add(relationship.to_table)
-        graph[relationship.to_table].add(relationship.from_table)
-    expanded = list(dict.fromkeys(selected))
-    for index, start in enumerate(selected):
-        for target in selected[index + 1 :]:
-            queue = deque([(start, [start])])
-            visited = {start}
-            while queue:
-                current, path = queue.popleft()
-                if current == target:
-                    for table in path:
-                        if table not in expanded:
-                            expanded.append(table)
-                    break
-                for neighbor in sorted(graph.get(current, set())):
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        queue.append((neighbor, [*path, neighbor]))
-    return expanded
+    legacy = os.environ.get("TEXT2SQL_GRAPH_ENABLED", "false").lower() != "true"
+    resolution = resolve_joins(selected, schema, reject_ambiguous=(
+        not legacy), max_depth=len(schema.tables) if legacy else 6,
+        max_candidates=max(64, len(schema.tables) * len(selected) ** 2) if legacy else 64)
+    return resolution.tables if resolution.status == "CONNECTED" else list(dict.fromkeys(selected))
 
 
 def _metadata_inventory(

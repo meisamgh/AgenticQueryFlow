@@ -11,7 +11,7 @@
       rel="stylesheet"
       href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap"
     />
-    <link rel="stylesheet" href="/static/styles.css?v=qf-user-avatar-12" />
+    <link rel="stylesheet" href="/static/styles.css?v=qf-stage-avatar-14" />
     <script>
       // Apply the stored theme before first paint to avoid a flash.
       try {
@@ -301,13 +301,13 @@
         <div class="speaker ai"><span class="avatar"><img src="/static/queryflow_leaf_avatar.svg" alt="Queryflow AI" width="36" height="36"></span>QueryFlow <time>thinking</time></div>
         <div class="answer">
           <section class="waiting" role="status" aria-live="polite">
-            <span class="spinner" aria-hidden="true"></span>
+            <span class="thinking-stage-avatar" aria-hidden="true"><i data-icon="brain"></i></span>
             <div>
-              <p class="progress-stage">Queued…</p>
+              <p class="progress-stage">Understanding your question…</p>
               <p class="progress-detail"></p>
             </div>
           </section>
-          <div class="pipeline-tracker"></div>
+          <div class="thinking-meta"><span class="progress-completed"></span><span class="progress-elapsed" aria-live="off">0s</span></div>
           <details class="progress-history"><summary>Activity log</summary><ul></ul></details>
         </div>
       </article>
@@ -315,7 +315,7 @@
 
     <script src="https://cdn.plot.ly/plotly-4.1.1.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/echarts@5.5.1/dist/echarts.min.js"></script>
-    <script src="/static/icons.js?v=qf-icons-4"></script>
+    <script src="/static/icons.js?v=qf-icons-5"></script>
     <script src="/static/chart_theme.js?v=5"></script>
     <script src="/static/echarts_view.js?v=26"></script>
     <script src="/static/plotly_view.js?v=16"></script>
@@ -326,6 +326,6 @@
     <script src="/static/dashboard_view.js?v=7"></script>
     <script src="/static/dashboard_studio.js?v=4"></script>
     <script src="/static/design_review.js?v=2"></script>
-    <script src="/static/app.js?v=qf-user-avatar-12"></script>
+    <script src="/static/app.js?v=qf-semantic-graph-16"></script>
   </body>
 </html>
