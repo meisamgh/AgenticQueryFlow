@@ -17,7 +17,7 @@ from semantic_text2sql.models import (
 )
 from semantic_text2sql.ontology import LocalOntologyAdapter
 from semantic_text2sql.recovery import _validated_claims, ontology_recovery_allowed
-from semantic_text2sql.semantic_catalog import SemanticCatalogStore
+from semantic_text2sql.semantic_catalog import SemanticCatalogStore, schema_fingerprint
 from semantic_text2sql.semantic_graph import SemanticGraphStore, compile_graph, graph_identity
 
 
@@ -134,10 +134,12 @@ def test_metric_approval_drift_filters_dependencies_and_cycles() -> None:
     assert facts[0]["unit"] == "eur" and facts[0]["version"] == 1
     assert resolve_metrics("Order total", schema, _document(), SemanticContract())[1] == []
     metric.dependencies = [metric.id]
-    assert resolve_metrics("Order total", schema, document, SemanticContract())[1] == []
+    with pytest.raises(ValueError, match="unsupported"):
+        resolve_metrics("Order total", schema, document, SemanticContract())
     metric.dependencies = []
     document.schema_fingerprint = "stale"
-    assert resolve_metrics("Order total", schema, document, SemanticContract())[1] == []
+    with pytest.raises(ValueError, match="no longer"):
+        resolve_metrics("Order total", schema, document, SemanticContract())
     with pytest.raises(ValueError, match="no longer"):
         resolve_metrics("Order total", schema, document, contract)
 
@@ -199,16 +201,17 @@ def test_graph_cli_without_network(
 
 
 @pytest.mark.parametrize(
-    "enabled,snapshot_available,context_mode",
+    "enabled,snapshot_available,context_mode,metric_only",
     [
-        (False, False, "retrieval"),
-        (True, False, "retrieval"),
-        (True, True, "retrieval"),
-        (True, True, "model1"),
+        (False, False, "retrieval", False),
+        (False, False, "retrieval", True),
+        (True, False, "retrieval", False),
+        (True, True, "retrieval", False),
+        (True, True, "model1", False),
     ],
 )
 def test_sql_service_approved_metric_grounding(
-    tmp_path, monkeypatch, enabled, snapshot_available, context_mode
+    tmp_path, monkeypatch, enabled, snapshot_available, context_mode, metric_only
 ):
     import asyncio
 
@@ -243,15 +246,6 @@ def test_sql_service_approved_metric_grounding(
             return "SELECT SUM(amount) AS order_total FROM orders", 1
 
     model = Model()
-    if context_mode == "model1":
-        from semantic_text2sql.models import ContextManifest, TokenUsage
-
-        async def select_context(*args, **kwargs):
-            return ContextManifest(
-                selected_tables=["orders"], selected_columns={"orders": ["amount"]}
-            ), TokenUsage(input_tokens=10, output_tokens=5)
-
-        monkeypatch.setattr("semantic_text2sql.service.plan_context_detailed", select_context)
     service = TextToSQLService(
         database=registry,
         profiles=ProfileStore(tmp_path / "profiles"),
@@ -264,6 +258,7 @@ def test_sql_service_approved_metric_grounding(
         graph_store=graphs,
     )
     monkeypatch.setenv("TEXT2SQL_GRAPH_ENABLED", str(enabled).lower())
+    monkeypatch.setenv("TEXT2SQL_KPI_GROUNDING_ENABLED", str(metric_only).lower())
     result = asyncio.run(
         service.execute_question(
             question="Order total",
@@ -276,14 +271,16 @@ def test_sql_service_approved_metric_grounding(
     )
     assert result.generated.accepted and result.generated.rows == [[170.0]]
     assert model.calls == 1
-    assert bool(result.semantic_contract.approved_metrics) == enabled
-    assert ("human_approved_semantic_catalog" in model.context) == enabled
-    if context_mode == "model1":
-        # The legacy SQL linker may retain extra candidates, but graph expansion
-        # must not turn discarded candidates into mandatory semantic constraints.
-        assert "orders.ordered_on" not in result.semantic_contract.required_columns
-        assert "ordered_on" not in result.generated.context_request.columns["orders"]
-    if enabled:
+    assert bool(result.semantic_contract.approved_metrics) == (enabled or metric_only)
+    assert ("human_approved_semantic_catalog" in model.context) == (enabled or metric_only)
+    assert result.planner_usage.total_tokens in (None, 0)
+    assert not result.generated.telemetry.planner_call_used
+    assert result.generated.telemetry.model1_latency_ms == 0
+    assert result.generated.telemetry.context_grounding_latency_ms is not None
+    assert not any(item.component == "context_planner"
+                   for item in result.generated.telemetry.call_ledger)
+    assert {"order_id", "customer_id"} <= set(result.generated.context_request.columns["orders"])
+    if enabled or metric_only:
         document.schema_fingerprint = "stale"
         (catalog_root / "shop.json").write_text(document.model_dump_json())
         rejected = asyncio.run(
@@ -380,7 +377,8 @@ def test_dependencies_filters_conflicts_and_ambiguity() -> None:
         )
     derived.label = base.label
     derived.formula = "AVG(amount)"
-    assert resolve_metrics("Order total", schema, document, SemanticContract())[1] == []
+    with pytest.raises(ValueError, match="conflicting"):
+        resolve_metrics("Order total", schema, document, SemanticContract())
 
 
 def test_ontology_recovery_reuses_existing_agent_and_budget(registry, monkeypatch) -> None:
@@ -396,6 +394,10 @@ def test_ontology_recovery_reuses_existing_agent_and_budget(registry, monkeypatc
     evidence = {
         "available": True,
         "evidence_type": "APPROVED_ONTOLOGY",
+        "db_id": "shop",
+        "schema_fingerprint": schema_fingerprint(tools.schema),
+        "catalog_version": 1,
+        "authorized_tables": ["orders"],
         "metrics": [
             {
                 "id": "order_total",
@@ -403,6 +405,7 @@ def test_ontology_recovery_reuses_existing_agent_and_budget(registry, monkeypatc
                 "source_relation": "orders",
                 "status": "approved",
                 "provenance": "human_approved_semantic_catalog",
+                "catalog_version": 1,
             }
         ],
     }
@@ -576,7 +579,10 @@ def test_ontology_definitions_do_not_authorize_unproven_repairs() -> None:
     assert not ontology_repair_supported("SELECT ???", claims, _schema())
 
 
-def test_application_startup_builds_metadata_graph_without_queries(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("persist", [False, True])
+def test_application_startup_builds_metadata_graph_without_queries(
+    tmp_path, monkeypatch, persist,
+) -> None:
     from fastapi.testclient import TestClient
     from test_semantic_catalog import _registry
 
@@ -586,6 +592,7 @@ def test_application_startup_builds_metadata_graph_without_queries(tmp_path, mon
 
     registry = _registry(tmp_path)
     monkeypatch.setenv("TEXT2SQL_GRAPH_ENABLED", "true")
+    monkeypatch.setenv("TEXT2SQL_GRAPH_PERSISTENCE_ENABLED", str(persist).lower())
     monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(tmp_path))
     monkeypatch.setenv("TEXT2SQL_GRAPH_ROOT", str(tmp_path / "graphs"))
     monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
@@ -604,10 +611,22 @@ def test_application_startup_builds_metadata_graph_without_queries(tmp_path, mon
         async def generate(self, **kwargs):
             raise AssertionError("No LLM allowed for graph construction")
 
+    captured = {}
+    remember = SemanticGraphStore.remember
+
+    def cache(store, snapshot):
+        captured[snapshot.db_id] = store
+        remember(store, snapshot)
+
+    monkeypatch.setattr(SemanticGraphStore, "remember", cache)
     with TestClient(create_app(agent=TextToSQLAgent(registry, Model()))) as client:
         assert client.get("/").status_code == 200
     identity = graph_identity(registry.inspect("shop"))
-    assert SemanticGraphStore(tmp_path / "graphs").load("shop", identity=identity) is not None
+    assert captured["shop"].load("shop", identity=identity) is not None
+    if persist:
+        assert SemanticGraphStore(tmp_path / "graphs").load("shop", identity=identity) is not None
+    else:
+        assert not (tmp_path / "graphs").exists()
 
 
 def test_compact_context_preserves_formulas_and_rejects_oversize_metadata() -> None:
@@ -631,7 +650,8 @@ def test_approved_metric_preserves_exact_schema_qualification() -> None:
     assert contract.required_columns == ["analytics.orders.amount"]
     assert contract.approved_metrics[0].source_relation == "analytics.orders"
     document.metrics[0].formula = "SUM(forbidden.orders.amount)"
-    assert not resolve_metrics("Order total", schema, document, SemanticContract())[1]
+    with pytest.raises(ValueError, match="unsupported"):
+        resolve_metrics("Order total", schema, document, SemanticContract())
 
 
 def test_disabled_graph_keeps_legacy_long_bridge_paths(monkeypatch) -> None:

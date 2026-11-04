@@ -265,6 +265,10 @@ class ApprovedMetricDefinition(StrictModel):
     source_relation: str
     required_fields: list[str] = Field(default_factory=list)
     mandatory_filters: list[SemanticFilter] = Field(default_factory=list)
+    catalog_identity: str | None = None
+    catalog_version: int | None = None
+    metric_version: int | None = None
+    unit: str | None = None
 
 
 class PlannerMetadataRequirement(StrictModel):
@@ -517,6 +521,7 @@ class PipelineTelemetry(StrictModel):
     generation_system_tokens: int | None = Field(default=None, ge=0)
     generation_context_tokens_estimated: int = Field(default=0, ge=0)
     model1_latency_ms: int | None = Field(default=None, ge=0)
+    context_grounding_latency_ms: int | None = Field(default=None, ge=0)
     model2_latency_ms: int | None = Field(default=None, ge=0)
     selected_table_count: int = Field(default=0, ge=0)
     selected_column_count: int = Field(default=0, ge=0)
@@ -659,6 +664,10 @@ class RecoveryTrace(StrictModel):
     agent_action: Literal["REPAIR", "INFORM", "ESCALATE"] | None = None
     repair_instruction: str | None = Field(default=None, max_length=1_000)
     requires_human_review: bool = False
+    repair_applicability: Literal["NOT_REQUESTED", "SUPPORTED", "UNSUPPORTED"] = "NOT_REQUESTED"
+    repair_execution_succeeded: bool | None = None
+    false_repair: bool | None = None
+    ontology_metrics: list[ApprovedMetricDefinition] = Field(default_factory=list, max_length=4)
 
 
 class HumanReviewRequest(StrictModel):
@@ -763,24 +772,13 @@ class ChatRequest(StrictModel):
         min_length=1,
         max_length=200,
     )
-    context_provider: ModelProvider | None = Field(
-        default_factory=lambda: cast(
-            ModelProvider | None, os.environ.get("TEXT2SQL_CONTEXT_PROVIDER") or None
-        )
-    )
-    context_model: str | None = Field(
-        default_factory=lambda: os.environ.get("TEXT2SQL_CONTEXT_MODEL") or None,
-        min_length=1,
-        max_length=200,
-    )
+    # Deprecated wire fields; deterministic retrieval ignores model selection.
+    context_provider: ModelProvider | None = None
+    context_model: str | None = Field(default=None, min_length=1, max_length=200)
     execute: bool = True
     max_rows: int = Field(default=100, ge=1, le=500)
     visualization: bool | None = None
-    context_mode: Literal["model1", "retrieval"] = Field(
-        default_factory=lambda: cast(
-            Literal["model1", "retrieval"], os.environ.get("TEXT2SQL_CONTEXT_MODE", "retrieval")
-        )
-    )
+    context_mode: Literal["model1", "retrieval"] = "retrieval"
     feedback_category: (
         Literal[
             "wrong_result",

@@ -281,13 +281,13 @@ def test_ui_config_reads_safe_model_defaults_from_environment(monkeypatch) -> No
     assert response.json() == {
         "sql_provider": "agentrouter",
         "sql_model": "gpt-5.6-sol",
-        "context_mode": "model1",
-        "context_provider": "groq",
-        "context_model": "qwen/qwen3.8-27b",
+        "context_mode": "retrieval",
+        "context_provider": None,
+        "context_model": None,
         "assistant_provider": "agentrouter",
         "assistant_model": "gpt-5.6-sol",
-        "plotting_provider": "agentrouter",
-        "plotting_model": "gpt-5.6-sol",
+        "plotting_provider": None,
+        "plotting_model": None,
         "default_db_id": "books",
     }
 
@@ -673,7 +673,7 @@ def test_chat_request_uses_environment_models_unless_explicitly_overridden(monke
     default = ChatRequest(session_id="env-models", db_id="books", message="Count the books")
     assert (default.provider, default.model) == ("groq", "qwen/qwen3.8-27b")
     assert (default.context_mode, default.context_provider, default.context_model) == (
-        "model1", "agentrouter", "gpt-5.6-sol"
+        "retrieval", None, None
     )
 
     explicit = ChatRequest(

@@ -190,7 +190,7 @@ def test_explicit_temporal_boundaries_are_checked_against_sql() -> None:
     assert wrong["REQUIRED_FILTER_PREDICATE_MISMATCH"] == "FAIL"
 
 
-def test_transformed_temporal_boundary_is_unresolved_not_rejected() -> None:
+def test_direct_cte_temporal_boundary_has_proven_lineage() -> None:
     contract = SemanticContract(temporal_boundaries=[
         SemanticFilter(operand="yearmonth.Date", operator=">=", value="201301"),
     ])
@@ -198,7 +198,7 @@ def test_transformed_temporal_boundary_is_unresolved_not_rejected() -> None:
         "WITH periods AS (SELECT Date, Consumption FROM yearmonth) "
         "SELECT SUM(Consumption) FROM periods WHERE Date >= '201301'", contract,
     )
-    assert result["REQUIRED_FILTER_VALUE_MISSING"] == "UNRESOLVED"
+    assert result["FILTER_PREDICATE_MATCH"] == "PASS"
 
 
 def test_direct_ranking_direction_and_limit_are_checked() -> None:

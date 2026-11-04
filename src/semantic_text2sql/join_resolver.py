@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections import deque
-from itertools import combinations
+from heapq import heappop, heappush
+from itertools import combinations, count
 from time import monotonic
 from typing import Any, Literal
 
@@ -15,12 +16,89 @@ from semantic_text2sql.semantic_catalog import schema_fingerprint
 from semantic_text2sql.semantic_graph import GraphEdge, GraphSnapshot, digest
 
 
+class JoinPathCandidate(StrictModel):
+    tables: list[str]
+    relationship_ids: list[str]
+    provenance: list[str]
+    rank: tuple[int, int, int, int]
+
+
+class JoinAmbiguityWarning(StrictModel):
+    code: Literal["AMBIGUOUS_JOIN_PATH"] = "AMBIGUOUS_JOIN_PATH"
+    candidates: list[JoinPathCandidate]
+
+
 class JoinResolution(StrictModel):
     status: Literal["CONNECTED", "AMBIGUOUS", "DISCONNECTED", "BUDGET_EXHAUSTED"]
     tables: list[str]
     bridges: list[str] = Field(default_factory=list)
     relationships: list[GraphEdge] = Field(default_factory=list)
     explanation: str
+    warnings: list[JoinAmbiguityWarning] = Field(default_factory=list)
+    examined_states: int = 0
+
+
+def _path_rank(edges: list[GraphEdge]) -> tuple[int, int, int, int]:
+    return (
+        sum(item.provenance != "approved_catalog" for item in edges),
+        sum(item.facts.get("cardinality", "unknown") in {"unknown", "many_to_many"}
+            for item in edges),
+        sum(bool(item.facts.get("fanout_risk",
+                               item.facts.get("cardinality") != "one_to_one")) for item in edges),
+        len(edges),
+    )
+
+
+def _ranked_paths(
+    graph: nx.MultiGraph[str, dict[str, Any], dict[str, Any]], start: str, target: str,
+    max_depth: int, remaining: int, deadline: float,
+) -> tuple[list[list[GraphEdge]], int, bool]:
+    """Best-first search; retain at most two equal optimal prefixes per state.
+
+    Two optimal target paths prove ambiguity; enumerating further cycles/variants
+    cannot change that finding. Depth is part of the state to respect the bound.
+    """
+    serial = count()
+    zero = (0, 0, 0, 0)
+    queue: list[tuple[tuple[int, int, int, int], int, str, list[str], list[GraphEdge]]] = [
+        (zero, next(serial), start, [start], [])]
+    best: dict[tuple[str, int], tuple[tuple[int, int, int, int], int]] = {}
+    found: list[list[GraphEdge]] = []
+    processed = 0
+    while queue:
+        if monotonic() >= deadline or processed >= remaining:
+            return [], processed, True
+        rank, _, node, names, path = heappop(queue)
+        if found and rank > _path_rank(found[0]):
+            break
+        state = (node, len(path))
+        previous = best.get(state)
+        if previous and (rank > previous[0] or rank == previous[0] and previous[1] >= 2):
+            continue
+        best[state] = (rank, previous[1] + 1 if previous and rank == previous[0] else 1)
+        processed += 1
+        if node == target:
+            found.append(path)
+            if len(found) == 2:
+                break
+            continue
+        if len(path) >= max_depth:
+            continue
+        for neighbor in sorted(graph.neighbors(node)):
+            if neighbor in names:
+                continue
+            variants: dict[str, GraphEdge] = {}
+            for data in graph[node][neighbor].values():
+                edge = data["evidence"]
+                key = _join_identity(edge)
+                old = variants.get(key)
+                if old is None or edge.provenance == "approved_catalog":
+                    variants[key] = edge
+            for edge in sorted(variants.values(), key=lambda item: item.id):
+                candidate = [*path, edge]
+                heappush(queue, (_path_rank(candidate), next(serial), neighbor,
+                                [*names, neighbor], candidate))
+    return found, processed, False
 
 
 def _join_identity(edge: GraphEdge) -> str:
@@ -73,6 +151,7 @@ def resolve_joins(
     schema: SchemaInfo,
     *,
     snapshot: GraphSnapshot | None = None,
+    compiled_network: nx.MultiDiGraph[str, dict[str, Any], dict[str, Any]] | None = None,
     allowed_tables: set[str] | None = None,
     max_depth: int = 6,
     max_candidates: int = 64,
@@ -81,6 +160,8 @@ def resolve_joins(
 ) -> JoinResolution:
     deadline = monotonic() + max(0, timeout_seconds)
     bridge_order: list[str] = []
+    warnings: list[JoinAmbiguityWarning] = []
+    processed = 0
     allowed = {table.name for table in schema.tables}
     if allowed_tables is not None:
         allowed &= allowed_tables
@@ -98,8 +179,8 @@ def resolve_joins(
             status=status,
             tables=[*seeds, *[name for name in bridge_order if name in names - set(seeds)]],
             bridges=[name for name in bridge_order if name in names - set(seeds)],
-            relationships=evidence,
-            explanation=message,
+            relationships=[item.model_copy(deep=True) for item in evidence],
+            explanation=message, warnings=warnings, examined_states=processed,
         )
 
     if not set(seeds) <= allowed:
@@ -111,6 +192,13 @@ def resolve_joins(
     if len(seeds) < 2:
         return result("CONNECTED", [], "No join required.")
     edges = snapshot.edges if snapshot else declared_edges(schema)
+    if compiled_network is not None:
+        if (snapshot is None or compiled_network.graph.get("db_id") != schema.db_id
+                or compiled_network.graph.get("identity") != snapshot.identity
+                or compiled_network.graph.get("content_checksum") != snapshot.content_checksum):
+            return result("DISCONNECTED", [], "Cached network belongs to different metadata.")
+        edges = [data["evidence"] for _, _, data in compiled_network.edges(data=True)
+                 if data["evidence"].kind == "REFERENCES"]
     graph: nx.MultiGraph[str, dict[str, Any], dict[str, Any]] = nx.MultiGraph()
     graph.add_nodes_from(allowed)
     forbidden = {
@@ -138,61 +226,82 @@ def resolve_joins(
         ):
             graph.add_edge(a, b, key=edge.id, evidence=edge)
     evidence: dict[str, GraphEdge] = {}
-    processed = 0
-    for start, target in combinations(seeds, 2):
-        queue: deque[tuple[str, list[str], list[GraphEdge]]] = deque([(start, [start], [])])
-        legacy_visited = {start}
-        candidates: list[tuple[tuple[int, int, int, int], list[GraphEdge]]] = []
-        while queue:
-            if monotonic() >= deadline or processed >= max_candidates:
-                return result(
-                    "BUDGET_EXHAUSTED", [], "Join traversal limit reached; no path accepted."
-                )
-            current, path, path_edges = queue.popleft()
-            processed += 1
-            if current == target:
-                rank = (
-                    sum(item.provenance != "approved_catalog" for item in path_edges),
-                    sum(
-                        item.facts.get("cardinality", "unknown") in {"unknown", "many_to_many"}
-                        for item in path_edges
-                    ),
-                    sum(
-                        bool(
-                            item.facts.get(
-                                "fanout_risk", item.facts.get("cardinality") != "one_to_one"
+    pairs = ([(seeds[0], target) for target in seeds[1:]]
+             if reject_ambiguous else list(combinations(seeds, 2)))
+    for start, target in pairs:
+        candidates: list[tuple[tuple[int, int, int, int], list[GraphEdge]]]
+        if reject_ambiguous:
+            paths, used, exhausted = _ranked_paths(
+                graph, start, target, max_depth, max_candidates - processed, deadline)
+            processed += used
+            if exhausted:
+                return result("BUDGET_EXHAUSTED", [], "Join traversal limit reached.")
+            candidates = [(_path_rank(path), path) for path in paths]
+        else:
+            queue: deque[tuple[str, list[str], list[GraphEdge]]] = deque([(start, [start], [])])
+            legacy_visited = {start}
+            candidates = []
+            while queue:
+                if monotonic() >= deadline or processed >= max_candidates:
+                    return result(
+                        "BUDGET_EXHAUSTED", [], "Join traversal limit reached; no path accepted."
+                    )
+                current, path, path_edges = queue.popleft()
+                processed += 1
+                if current == target:
+                    rank = (
+                        sum(item.provenance != "approved_catalog" for item in path_edges),
+                        sum(
+                            item.facts.get("cardinality", "unknown") in {"unknown", "many_to_many"}
+                            for item in path_edges
+                        ),
+                        sum(
+                            bool(
+                                item.facts.get(
+                                    "fanout_risk", item.facts.get("cardinality") != "one_to_one"
+                                )
                             )
-                        )
-                        for item in path_edges
-                    ),
-                    len(path_edges),
-                )
-                candidates.append((rank, path_edges))
-                if not reject_ambiguous:
-                    break
-                continue
-            if len(path_edges) >= max_depth:
-                continue
-            for neighbor in sorted(graph.neighbors(current)):
-                if neighbor in path or (not reject_ambiguous and neighbor in legacy_visited):
+                            for item in path_edges
+                        ),
+                        len(path_edges),
+                    )
+                    candidates.append((rank, path_edges))
+                    if not reject_ambiguous:
+                        break
                     continue
-                legacy_visited.add(neighbor)
-                # Duplicate declared/catalog mappings are one candidate; approved metadata wins.
-                variants: dict[str, GraphEdge] = {}
-                for data in graph[current][neighbor].values():
-                    edge = data["evidence"]
-                    key = _join_identity(edge)
-                    old = variants.get(key)
-                    if old is None or edge.provenance == "approved_catalog":
-                        variants[key] = edge
-                choices = list(variants.values())
-                for edge in choices if reject_ambiguous else choices[:1]:
-                    queue.append((neighbor, [*path, neighbor], [*path_edges, edge]))
+                if len(path_edges) >= max_depth:
+                    continue
+                for neighbor in sorted(graph.neighbors(current)):
+                    if neighbor in path or (not reject_ambiguous and neighbor in legacy_visited):
+                        continue
+                    legacy_visited.add(neighbor)
+                    # Duplicate declared/catalog mappings are one candidate; approved metadata wins.
+                    variants: dict[str, GraphEdge] = {}
+                    for data in graph[current][neighbor].values():
+                        edge = data["evidence"]
+                        key = _join_identity(edge)
+                        old = variants.get(key)
+                        if old is None or edge.provenance == "approved_catalog":
+                            variants[key] = edge
+                    choices = list(variants.values())
+                    for edge in choices if reject_ambiguous else choices[:1]:
+                        queue.append((neighbor, [*path, neighbor], [*path_edges, edge]))
         if not candidates:
             return result("DISCONNECTED", [], "No authorized authoritative connecting path.")
         candidates.sort(key=lambda item: item[0])
         best = [path for rank, path in candidates if rank == candidates[0][0]]
         if len(best) > 1 and reject_ambiguous:
+            options = []
+            for option in best:
+                names = [start]
+                for option_edge in option:
+                    a = option_edge.source.removeprefix("table:")
+                    b = option_edge.target.removeprefix("table:")
+                    names.append(b if names[-1] == a else a)
+                options.append(JoinPathCandidate(
+                    tables=names, relationship_ids=[item.id for item in option],
+                    provenance=[item.provenance for item in option], rank=_path_rank(option)))
+            warnings.append(JoinAmbiguityWarning(candidates=options))
             return result("AMBIGUOUS", [], "Equally trusted join paths need a business choice.")
         current = start
         for edge in best[0]:

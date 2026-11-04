@@ -760,7 +760,7 @@ def test_plot_followup_is_selected_by_top_model_and_uses_no_new_sql(
     )
     assert model.calls == 1
     assert completer.calls == 4
-    assert plot_completer.calls == 1
+    assert plot_completer.calls == 0
     saved_plot = history.get(plotted.json()["run_id"], "agent-chart")
     assert saved_plot is not None
     assert saved_plot.response_payload["message"] == plotted.json()["message"]
@@ -769,7 +769,7 @@ def test_plot_followup_is_selected_by_top_model_and_uses_no_new_sql(
     assert bare_plot.json()["presentation"]["chart_spec"] is not None
     assert model.calls == 1
     assert completer.calls == 6
-    assert plot_completer.calls == 1
+    assert plot_completer.calls == 0
     reset = client.post("/api/chat", json={**base, "message": "Start over"})
     assert reset.status_code == 200
     assert reset.json()["operation"] == "RESET_CONTEXT"

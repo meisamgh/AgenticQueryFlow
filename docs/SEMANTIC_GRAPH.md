@@ -1,8 +1,10 @@
 # Offline graph-enhanced semantic grounding
 
-**Amendment gate:** [Phase 0 findings](SEMANTIC_GRAPH_PHASE0.md) supersede the
-implementation order below. Existing code is retained; resolver ambiguity and
-separate default-OFF persistence changes are pending review, not already complete.
+**Current checkpoint:** [Phase 0 findings](SEMANTIC_GRAPH_PHASE0.md) remain the
+evaluation baseline. The subsequent user request authorized implementation:
+typed ambiguity, bounded best-first search, in-memory runtime graphs, independent
+default-OFF persistence, and KPI/ontology hardening now have passing local tests.
+See [the current report](V6_4_CURRENT_REPORT.md) for evidence and remaining gaps.
 
 The existing Top-layer LangGraph assistant remains the only conversational agent.
 Hybrid retrieval still selects schema candidates; optional graph grounding adds
@@ -17,7 +19,7 @@ Dashboard code and analytical result storage are unchanged.
 | `hybrid_retrieval.py`, `linker.py`, `context.py` | Three independent traversal implementations now use `join_resolver.py`. No extra model call. |
 | `semantic_catalog.py`, `semantic_catalog_validation.py` | Governed JSON facts, human approvals and evidence probes already existed. They remain authoritative; the graph is derived metadata. |
 | `glossary.py` | Curated definitions already existed. Graph concept mappings remain advisory, not live value-existence evidence. |
-| `service.py` | Shared governed SQL execution already existed. Optional graph/catalog enrichment is now attached here before generation, including the optional Model 1 path. |
+| `service.py` | Optional graph/catalog enrichment precedes governed SQL generation. Model 1 is no longer an active path. |
 | `validator.py` | Existing PASS/FAIL/UNRESOLVED semantic checks are retained. A wrong direct aggregate function for a simple approved metric now fails; derived expression equivalence remains unresolved. |
 | `recovery.py` | Existing bounded reason/tool loop is reused for optional `query_ontology`; no second agent. |
 | `conversational_agent.py` | Continues to call the existing governed service. No alternative intent router. |
@@ -60,6 +62,8 @@ The graph never edits the semantic catalog or the autonomous KPI registry.
 
 ```ini
 TEXT2SQL_GRAPH_ENABLED=false
+TEXT2SQL_GRAPH_PERSISTENCE_ENABLED=false
+TEXT2SQL_KPI_GROUNDING_ENABLED=false
 TEXT2SQL_GRAPH_ROOT=graphs
 TEXT2SQL_SEMANTIC_CATALOG_ROOT=data/semantic_catalogs
 TEXT2SQL_ONTOLOGY_RECOVERY_ENABLED=false
@@ -69,8 +73,19 @@ Enable graph grounding explicitly after review. The application compiles metadat
 at startup for registered datasource IDs (schema inspection only; no row sampling).
 It does not compile graphs per question. Metadata changes invalidate a snapshot;
 restart or explicitly rebuild after updating schema, profile, catalog or glossary.
-Missing snapshots do not trigger on-demand construction. Graph-off retains stable
-legacy bridge tie selection; graph-on rejects equally ranked paths instead.
+Missing snapshots do not trigger on-demand construction. Runtime compilation is
+cached in memory by schema/catalog/profile identity; enabling graph grounding does
+not create JSON files. Persistence is a separate opt-in. Explicit CLI saves and
+standalone stores retain compatibility. Graph-off retains stable legacy bridge
+tie selection; graph-on returns typed equally ranked candidates without selecting
+an authoritative relationship. Cached network checks include identity/checksum;
+request permissions and forbidden relationships are still applied each time.
+
+KPI grounding can be enabled independently of traversal. Already-accepted approved
+metric definitions are revalidated even when both feature flags are off. Definition
+identity includes entity/relationship meaning and unit/version; opaque hashes are
+kept out of routine model context. Approved ontology repairs enter the governed
+contract before context construction and are checked against the current catalog.
 
 For exported `SchemaInfo` JSON and optional existing catalog/profile/glossary files:
 

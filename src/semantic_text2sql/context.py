@@ -206,7 +206,10 @@ def model_context_payload(
         "advisory_outputs", "entities", "proposed_tables", "proposed_joins",
         "proposed_filters", "ambiguities", "interpreter_confidence", "rationale",
     )
-    contract_values = contract.model_dump(mode="json", exclude_none=True, exclude_defaults=True)
+    contract_values = contract.model_dump(
+        mode="json", exclude_none=True, exclude_defaults=True,
+        exclude={"approved_metrics": {"__all__": {"catalog_identity"}}},
+    )
     payload["resolved_analytical_contract"] = {
         "original_question": contract.original_question or question,
         "resolved_question": contract.resolved_question or question,

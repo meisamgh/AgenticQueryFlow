@@ -14,9 +14,7 @@ from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.context_planner import (
     ContextPlannerCompleter,
     fallback_context_request,
-    plan_context_detailed,
     reconcile_context_contract,
-    selection_to_context_request,
     verify_context_request,
 )
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
@@ -26,7 +24,6 @@ from semantic_text2sql.graph_grounding import compact_grounding, resolve_metrics
 from semantic_text2sql.historical import HistoricalQueryStore
 from semantic_text2sql.hybrid_retrieval import HybridSchemaRetriever, metadata_requests
 from semantic_text2sql.join_resolver import resolve_joins
-from semantic_text2sql.llm import ModelError
 from semantic_text2sql.models import (
     CallLedgerEntry,
     ContextRelationship,
@@ -80,7 +77,7 @@ class TextToSQLService:
         history: HistoricalQueryStore,
         retriever: HybridSchemaRetriever,
         agent: TextToSQLAgent,
-        context_completers: Mapping[ModelProvider, ContextPlannerCompleter],
+        context_completers: Mapping[ModelProvider, ContextPlannerCompleter] | None = None,
         semantic_catalogs: SemanticCatalogStore | None = None,
         graph_store: SemanticGraphStore | None = None,
     ) -> None:
@@ -91,7 +88,6 @@ class TextToSQLService:
         self.history = history
         self.retriever = retriever
         self.agent = agent
-        self.context_completers = context_completers
         self.semantic_catalogs = semantic_catalogs
         self.graph_store = graph_store
 
@@ -170,18 +166,27 @@ class TextToSQLService:
             "\n".join(item for item in (evidence, value_alias_context) if item) or None
         )
         contract = semantic_contract or SemanticContract()
+        if (correctness_trace and correctness_trace.agent_action == "REPAIR"
+                and correctness_trace.ontology_metrics):
+            contract = contract.model_copy(update={"approved_metrics": list({
+                item.id: item for item in [*contract.approved_metrics,
+                                          *correctness_trace.ontology_metrics]
+            }.values())})
         graph_context = None
         graph_latency_ms: int | None = None
         catalog_relationships: list[ContextRelationship] = []
         graph_enabled = os.environ.get("TEXT2SQL_GRAPH_ENABLED", "false").lower() == "true"
+        metric_grounding = (graph_enabled or bool(contract.approved_metrics)
+                            or os.environ.get("TEXT2SQL_KPI_GROUNDING_ENABLED", "false").lower()
+                            == "true")
         try:
             catalog = (self.semantic_catalogs.load(db_id)
-                       if graph_enabled and self.semantic_catalogs else None)
+                       if metric_grounding and self.semantic_catalogs else None)
         except (OSError, ValueError):
             logger.warning("semantic_catalog_unavailable db_id=%s", db_id)
             catalog = None
         metric_facts: list[dict[str, Any]] = []
-        if graph_enabled:
+        if metric_grounding:
             try:
                 contract, metric_facts = resolve_metrics(question, schema, catalog, contract)
             except ValueError as exc:
@@ -262,55 +267,11 @@ class TextToSQLService:
         contract = apply_structural_formulas(
             contract, self.glossaries.structural_formulas(db_id, question)
         )
-        candidate_names = set(proposed_tables)
-        candidate_relationships = [
-            {
-                "left": f"{item.from_table}.{item.from_column}",
-                "right": f"{item.to_table}.{item.to_column}",
-                "state": "VERIFIED_FK",
-            }
-            for item in schema.relationships
-            if item.from_table in candidate_names and item.to_table in candidate_names
-        ]
-        if database_profile is not None:
-            candidate_relationships.extend(
-                {
-                    "left": f"{item.parent_table}.{item.parent_column}",
-                    "right": f"{item.child_table}.{item.child_column}",
-                    "state": "INFERRED_KEY_RELATIONSHIP" if item.inferred else "VERIFIED_FK",
-                }
-                for item in database_profile.relationships
-                if item.parent_table in candidate_names and item.child_table in candidate_names
-            )
-
         planner_usage = TokenUsage()
         planner_call_used = False
-        if context_mode == "model1" and not optimization_required:
-            configured_context_provider = os.environ.get("TEXT2SQL_CONTEXT_PROVIDER")
-            planner_provider = context_provider or (
-                cast(ModelProvider, configured_context_provider)
-                if configured_context_provider in self.context_completers
-                else provider
-            )
-            planner_model = context_model or os.environ.get("TEXT2SQL_CONTEXT_MODEL") or model
-            try:
-                selection, planner_usage = await budget.wait(
-                    plan_context_detailed(
-                        self.context_completers[planner_provider],
-                        planner_model,
-                        question,
-                        evidence,
-                        planner_schema,
-                        self.glossaries.load(db_id),
-                        previous_intent,
-                        candidate_relationships,
-                    ),
-                    kind="model",
-                )
-                context_request = selection_to_context_request(selection)
-                planner_call_used = True
-            except (KeyError, ModelError, ValueError):
-                pass
+        # Legacy model1 requests retain wire compatibility, but selection is
+        # exclusively retrieval plus deterministic verification for every turn.
+        context_mode = "retrieval"
 
         if graph_enabled and self.graph_store:
             graph_started = perf_counter()
@@ -321,11 +282,13 @@ class TextToSQLService:
             if snapshot:
                 resolution = await budget.wait(asyncio.to_thread(resolve_joins,
                     list(dict.fromkeys([*context_request.tables, *[item.source_relation
-                        for item in contract.approved_metrics]])), schema, snapshot=snapshot),
+                        for item in contract.approved_metrics]])), schema, snapshot=snapshot,
+                    compiled_network=graph_store.network(db_id, identity=snapshot.identity)),
                     kind="work")
                 graph_context = {"status": resolution.status,
                     "snapshot_id": snapshot.identity, "catalog_version": snapshot.catalog_version,
                     "explanation": resolution.explanation,
+                    "warnings": [item.model_dump(mode="json") for item in resolution.warnings],
                     "relationships": [item.model_dump(mode="json")
                                       for item in resolution.relationships]}
                 if resolution.status == "CONNECTED":
@@ -531,6 +494,13 @@ class TextToSQLService:
                     )
                 except RequestBudgetExceeded:
                     repaired = None
+                review_trace = review_trace.model_copy(update={
+                    "repair_execution_succeeded": bool(repaired and repaired.accepted),
+                    "false_repair": (True if repaired and any(
+                        finding.status == "FAIL" for attempt in repaired.attempts
+                        for finding in attempt.validation.semantic_findings) else None),
+                })
+                generated = generated.model_copy(update={"recovery": review_trace})
                 if repaired is not None and repaired.accepted:
                     offset = len(generated.attempts)
                     repaired_attempts = [
@@ -552,6 +522,16 @@ class TextToSQLService:
                     generated = generated.model_copy(
                         update={
                             "accepted": False,
+                            "attempts": [*generated.attempts, *[
+                                attempt.model_copy(update={
+                                    "number": len(generated.attempts) + index})
+                                for index, attempt in enumerate(
+                                    repaired.attempts if repaired else [], 1)
+                            ]],
+                            "token_usage": _add_token_usage(
+                                generated.token_usage,
+                                repaired.token_usage if repaired else TokenUsage(),
+                            ),
                             "execution_status": "NOT_EXECUTED",
                             "termination_reason": "attempt_limit",
                             "rows": [],
@@ -572,27 +552,16 @@ class TextToSQLService:
             )
         call_ledger: list[CallLedgerEntry] = [
             CallLedgerEntry(
+                component="context_grounding", kind="TOOL", status="SUCCEEDED",
+                latency_ms=planning_ms,
+            ),
+            CallLedgerEntry(
                 component="schema_inspection",
                 kind="DATABASE",
                 status="SUCCEEDED",
                 latency_ms=routing_ms,
             )
         ]
-        if planner_call_used:
-            call_ledger.append(
-                CallLedgerEntry(
-                    component="context_planner",
-                    kind="MODEL",
-                    status="SUCCEEDED",
-                    provider=str(context_provider or provider),
-                    requested_model=context_model or model,
-                    effective_model=context_model or model,
-                    input_tokens=planner_usage.input_tokens,
-                    output_tokens=planner_usage.output_tokens,
-                    latency_ms=planning_ms,
-                    retry_count=planner_usage.provider_retries,
-                )
-            )
         if graph_latency_ms is not None:
             call_ledger.append(CallLedgerEntry(component="semantic_graph_lookup",
                                                 kind="TOOL", status="SUCCEEDED",
@@ -666,7 +635,8 @@ class TextToSQLService:
             update={
                 "telemetry": generated.telemetry.model_copy(
                     update={
-                        "model1_latency_ms": planning_ms,
+                        "model1_latency_ms": 0,
+                        "context_grounding_latency_ms": planning_ms,
                         "ab_context_mode": context_mode,
                         "retrieval": retrieval_trace,
                         "selected_table_count": len(context_request.tables),
