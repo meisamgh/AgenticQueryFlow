@@ -1,8 +1,24 @@
 # AgenticQueryflow
 
-[AgenticQueryflow](https://github.com/meisamgh/agenticqueryflow) is a conversational
-analytics application that turns business questions into governed SQL, inspectable
-results, and interactive charts.
+[AgenticQueryflow](https://github.com/meisamgh/AgenticQueryFlow) is a conversational analytics application for **SQLite** and allowlisted **PostgreSQL** databases.
+
+It transforms natural-language business questions into governed SQL, inspectable results, and interactive charts. Users can refine analyses through follow-up questions, inspect generated SQL, and explore validated results.
+
+[Watch the demo](https://github.com/user-attachments/assets/cea65003-e31e-4846-a532-904ffcb6e25f)
+
+<p align="center">
+  <img src="Arch-pic.png" alt="AgenticQueryflow architecture" width="900" />
+</p>
+
+## Features
+
+- **Conversational analytics:** A LangGraph assistant selects tools for new queries, refinements, explanations, investigations, and charts.
+- **Grounded Text-to-SQL:** Hybrid schema retrieval using BM25, embeddings, value matching, verified metadata, optional Model 1 context planning, and SQL generation.
+- **Read-only execution:** SQLGlot validation, database allowlists, row limits, timeouts, and bounded model/database calls.
+- **Evidence-based recovery:** Investigates failed queries, empty results, unexpected NULLs, and explicit correctness-review requests before proposing repair or escalation.
+- **Validated charts:** A separate plotting service validates accepted results before visualization, using Plotly with an ECharts fallback.
+- **Inspectable workspace:** SQL and Data tabs, CSV export, chart exploration, query history, versions, usage details, and optional voice transcription.
+
 
 ## How it works
 
