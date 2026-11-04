@@ -1,0 +1,77 @@
+{
+  "1481": {
+    "categories": ["metric_semantics"],
+    "finding": "Reference selects rows at the global minimum Consumption, then divides segment sums by a shared row count. Predictions select segment minima of annual customer aggregates. These are different minimum scopes and denominators.",
+    "business_verdict": "UNRESOLVED: least consumption and annual average need owner-defined grain"
+  },
+  "1482": {
+    "categories": ["metric_semantics", "filters_time", "sql_generation"],
+    "finding": "Reference returns three scalar segment changes and has no EUR predicate. Both predictions filter EUR and return segment-ranked rows. Output contract and population differ.",
+    "business_verdict": "REFERENCE_QUESTION_CONFLICT: question requests EUR and biggest/lowest segments; reference does not implement those literally"
+  },
+  "1526": {
+    "categories": ["metric_semantics", "filters_time", "joins"],
+    "finding": "Question says paid 634.8. Predictions filter Amount=634.8; reference filters Price=1513.12 and joins gasstations. Money-versus-quantity and literal/population differences coexist.",
+    "business_verdict": "REFERENCE_QUESTION_CONFLICT: reference amount differs from the question; do not train a metric to reproduce it"
+  },
+  "1531": {
+    "categories": ["metric_semantics", "sql_generation"],
+    "finding": "Reference chooses CustomerID by highest single yearmonth Consumption and SUMs transaction unit prices. Predictions rank total transaction spending and AVG unit prices; retrieval also returns total spending.",
+    "business_verdict": "REFERENCE_QUESTION_CONFLICT: top spending and average differ from the reference selector and SUM"
+  },
+  "1533": {
+    "categories": ["metric_semantics", "joins", "sql_generation"],
+    "finding": "Reference preserves transaction-to-month join multiplicity and returns Consumption only. Predictions deduplicate qualifying customers or use EXISTS and return customer IDs; retrieval SUMs consumption by customer.",
+    "business_verdict": "UNRESOLVED: customer-versus-transaction multiplicity and output contract need adjudication"
+  },
+  "1472": {
+    "categories": ["sql_generation"],
+    "finding": "Both predictions retain the customer/annual SUM/filter/ranking logic but add total consumption to the result and a deterministic CustomerID tie-breaker. Reference returns CustomerID only.",
+    "business_verdict": "OUTPUT_SHAPE_OR_TIE_POLICY: extra columns alone can fail the stored comparator; IDs cannot be rechecked without the database"
+  },
+  "1473": {
+    "categories": ["metric_semantics"],
+    "finding": "Reference computes AVG(Consumption)/12. Retrieval averages summed month totals; Model 1 averages customer-month totals. Population, denominator and aggregation grain differ.",
+    "business_verdict": "UNRESOLVED: average monthly consumption requires an explicit metric definition"
+  },
+  "1479": {
+    "categories": ["sql_generation"],
+    "finding": "Only Model 1 fails: it adds total consumption to the selected year. Retrieval returns the year alone, matching the reference shape.",
+    "business_verdict": "OUTPUT_SHAPE: no evidence that Model 1 chose the wrong year"
+  },
+  "1480": {
+    "categories": ["sql_generation", "filters_time"],
+    "finding": "Reference returns two-character month; predictions return YYYYMM plus total consumption. Model 1 uses EXISTS rather than the reference JOIN.",
+    "business_verdict": "OUTPUT_SHAPE_AND_FORMAT: date representation is different; do not infer a bad relationship from EXISTS"
+  },
+  "1490": {
+    "categories": ["metric_semantics"],
+    "finding": "Reference percentage counts joined customer-month rows. Retrieval counts customers above a summed-consumption threshold, including zero-filled LEFT JOIN rows; Model 1 counts distinct customers with any qualifying month.",
+    "business_verdict": "UNRESOLVED: monthly rows, customer totals and any-month qualification are different metrics"
+  },
+  "1501": {
+    "categories": ["filters_time", "joins"],
+    "finding": "Reference constrains yearmonth.Date after joining by CustomerID. Predictions constrain the actual transaction Date in June 2013. Missing yearmonth is observable, but selected-table counts do not prove retrieval omitted it.",
+    "business_verdict": "REFERENCE_QUESTION_CONFLICT: consumption-period membership is not the same as transaction event time"
+  },
+  "1529": {
+    "categories": ["filters_time", "joins", "metric_semantics"],
+    "finding": "Reference joins transactions to every yearmonth for the customer, SUMs Price at that multiplied grain and gates January using yearmonth.Date. Predictions use transaction dates and avoid that fanout.",
+    "business_verdict": "REFERENCE_FANOUT_RISK: cannot label avoidance of multiplication a business error without adjudication"
+  },
+  "1498": {
+    "categories": ["sql_generation"],
+    "finding": "Only retrieval fails: it returns month plus monthly consumption, whereas reference and Model 1 return the maximum monthly total alone.",
+    "business_verdict": "OUTPUT_SHAPE: extra month column is sufficient to break exact result-shape comparison"
+  },
+  "1500": {
+    "categories": ["filters_time", "joins", "sql_generation"],
+    "finding": "Reference filters yearmonth.Date, joins by customer and retains descriptions with join multiplicity. Predictions filter transaction dates and use DISTINCT descriptions.",
+    "business_verdict": "REFERENCE_TIME_AND_GRAIN_RISK: event time and duplicate policy require adjudication"
+  },
+  "1525": {
+    "categories": ["metric_semantics", "filters_time"],
+    "finding": "Retrieval counts distinct customers on the requested transaction day; reference counts transaction-weighted customer rows. Model 1 substitutes August yearmonth membership for the explicitly requested day.",
+    "business_verdict": "CONFIRMED_MODEL1_DAY_FILTER_LOSS; retrieval-versus-reference denominator still needs adjudication"
+  }
+}

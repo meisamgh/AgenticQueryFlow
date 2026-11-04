@@ -1,5 +1,10 @@
 # Queryflow V6.4 requirement matrix
 
+2026-11-04 amendment: Phase 0 evidence is in SEMANTIC_GRAPH_PHASE0.md and
+benchmarks/results/semantic_graph_phase0.json. Runtime changes are STOPPED at the
+review gate. Typed ambiguity warnings, independent persistence gating, and later
+KPI/ontology refinements remain PENDING; no older requirement is promoted.
+
 Graph-enhanced grounding (2026-11-04) is tracked separately in SEMANTIC_GRAPH.md
 and test_semantic_graph.py. The optional layer does not promote any older
 IN_PROGRESS/BLOCKED semantic, authorization or live-provider requirement below.

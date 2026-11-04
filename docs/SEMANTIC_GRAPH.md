@@ -1,5 +1,9 @@
 # Offline graph-enhanced semantic grounding
 
+**Amendment gate:** [Phase 0 findings](SEMANTIC_GRAPH_PHASE0.md) supersede the
+implementation order below. Existing code is retained; resolver ambiguity and
+separate default-OFF persistence changes are pending review, not already complete.
+
 The existing Top-layer LangGraph assistant remains the only conversational agent.
 Hybrid retrieval still selects schema candidates; optional graph grounding adds
 bounded relationship evidence and approved KPI dependencies before the existing
