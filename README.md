@@ -35,7 +35,8 @@ Conversation → Top-layer assistant → Selected tools
                                       ├─ Reuse accepted results / inspect history
                                       ├─ Retrieve schema → Ground context → Generate SQL
                                       │                   → Validate → Read-only execution
-                                      └─ Validated chart planning over accepted data
+                                      └─ Top-layer chart proposal → Deterministic validation
+                                                                  → Plotly / ECharts
 
 Failures, empty results, unexpected NULLs or correctness reviews
     → Bounded recovery → Gather evidence → Repair or explain the limitation
@@ -44,7 +45,7 @@ Failures, empty results, unexpected NULLs or correctness reviews
 - **Conversational continuity:** accepted contracts, stable result IDs and scoped history.
   [SQL-based memory](docs/SQL_MEMORY.md) retrieves analytical definitions on demand;
   refreshed data is distinguished from original historical snapshots.
-- **Compact context:** hybrid retrieval with optional model-based context selection.
+- **Compact context:** hybrid retrieval and deterministic metadata verification; no context LLM.
   Optional [offline graph grounding](docs/SEMANTIC_GRAPH.md) adds approved KPI
   dependencies and bounded, provenance-aware join paths without extra LLM calls.
 - **Governed execution:** SQLGlot checks, allowlisted data access and bounded repair.
@@ -99,12 +100,16 @@ Then set `TEXT2SQL_DEFAULT_DB_ID=books` in `.env` and restart.
 | `TEXT2SQL_EXTERNAL_CONNECTIONS` | Optional remote database definitions |
 | `TEXT2SQL_PROFILE_ROOT` | Stored schema and column profiles |
 | `TEXT2SQL_GLOSSARY_ROOT` | Approved business glossary JSON files |
-| `TEXT2SQL_CONTEXT_MODE` | `retrieval` or optional `model1` selection |
-| `TEXT2SQL_ASSISTANT_*`, `TEXT2SQL_SQL_*`, `TEXT2SQL_PLOTTING_*` | Model/provider selection by task |
+| `TEXT2SQL_ASSISTANT_*`, `TEXT2SQL_SQL_*` | Top-layer conversation/chart planning and SQL generation |
 
 Set the selected adapter's API key and base URL using [.env.example](.env.example).
 Never commit `.env` or credentials. Profiles and glossary files supplement—not
 replace—the database connection.
+
+Context selection and chart materialization make no independent model calls.
+The Top layer plans charts; invalid or missing proposals use deterministic
+validation and fallback. Conditional recovery and the dashboard designer remain.
+[Architecture changes and measured results](docs/SINGLE_PLANNER.md).
 
 **Databases:** SQLite, PostgreSQL, plus optional MySQL, SQL Server, Snowflake and
 BigQuery adapters. See [connection setup](docs/EXTERNAL_DATABASES.md) for driver

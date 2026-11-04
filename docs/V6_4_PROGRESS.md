@@ -993,3 +993,32 @@ Replaced obsolete live-approval integration expectations with archival safeguard
 legacy store transition tests remain. See AUTONOMOUS_DASHBOARDS.md for scripted
 before/after call counts. No live provider/PostgreSQL/browser pixel QA was run,
 no model/environment changes, no commit/push or backend restart performed.
+
+## 2026-11-04 — Single conversational planner
+
+Removed active Model 1 context calls and dedicated plotting-model calls, including
+the legacy API visualization path. Existing hybrid retrieval, deterministic
+context verification, graph/KPI grounding, SQL generation/validation and bounded
+recovery remain. Top-layer chart proposals now materialize through deterministic
+validation/fallback; missing analytical data still returns to governed SQL.
+
+Routine Top-layer observations use compact result profiles and stable IDs rather
+than row previews. Retired environment settings are ignored, their example
+entries removed, and old request fields remain accepted. Grounding/chart tool
+timings are distinguished from historical model timings. No local `.env` edited.
+
+Evidence: 725 Python tests passed, 2 PostgreSQL tests skipped (19.24s); 198 frontend
+tests passed (619ms); Ruff, mypy (70 source files) and diff checks passed. New
+tests cover zero model budgets, invalid/missing chart proposals, stable result IDs,
+compact profile privacy, and scripted SQLite API call-count/latency comparisons.
+No SQL validation or security assertions were weakened.
+
+Measured SQL+chart fixture: model calls 4 → 2; p50 45.688 → 36.357ms, p95
+46.863 → 50.985ms. Cached plot: calls 2 → 1 with zero SQL/DB calls. Scripted
+timings use fixed 5ms retired stages; tail latency does not uniformly improve.
+See SINGLE_PLANNER.md for complete before/after measurements and token caveats.
+
+Remaining verification: real-provider SQL execution/semantic accuracy, chart
+quality review, real PostgreSQL and browser pixel QA. Prior graph-amendment and
+production-authorization limitations remain unchanged. No commit, push or server
+restart was performed.

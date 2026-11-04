@@ -5,3 +5,9 @@ Primary source: the user-provided 810-line brief dated 2026-10-24, titled “Que
 Target ownership: the Top-layer LLM chooses analytical actions; a typed contract resolver preserves accepted semantics; the governed Text-to-SQL service retrieves verified schema and generates read-only SQL; deterministic safety and provable semantic checks gate execution; a dedicated plotting service uses the exact verified result; and the orchestrator commits accepted state and produces a grounded answer. Display-only chart mechanics may remain local.
 
 Mandatory safeguards: no stale-result substitution, no unverified semantic claim, no SQL outside the read-only allowlist, no placeholder production authentication, and no claim of completion based solely on mocked tests. The full brief's sections 1–20 and its 32 integration scenarios remain the source of truth if this summary is ambiguous.
+
+2026-11-04 simplification: context selection is hybrid retrieval plus deterministic
+verification, not Model 1. Chart proposals belong to the existing Top layer;
+the plotting tool is deterministic with validated local fallback. See
+[implementation and measurements](SINGLE_PLANNER.md). Conditional recovery and
+the separate dashboard designer are unchanged.

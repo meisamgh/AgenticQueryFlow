@@ -243,15 +243,6 @@ def test_sql_service_approved_metric_grounding(
             return "SELECT SUM(amount) AS order_total FROM orders", 1
 
     model = Model()
-    if context_mode == "model1":
-        from semantic_text2sql.models import ContextManifest, TokenUsage
-
-        async def select_context(*args, **kwargs):
-            return ContextManifest(
-                selected_tables=["orders"], selected_columns={"orders": ["amount"]}
-            ), TokenUsage(input_tokens=10, output_tokens=5)
-
-        monkeypatch.setattr("semantic_text2sql.service.plan_context_detailed", select_context)
     service = TextToSQLService(
         database=registry,
         profiles=ProfileStore(tmp_path / "profiles"),
@@ -278,11 +269,13 @@ def test_sql_service_approved_metric_grounding(
     assert model.calls == 1
     assert bool(result.semantic_contract.approved_metrics) == enabled
     assert ("human_approved_semantic_catalog" in model.context) == enabled
-    if context_mode == "model1":
-        # The legacy SQL linker may retain extra candidates, but graph expansion
-        # must not turn discarded candidates into mandatory semantic constraints.
-        assert "orders.ordered_on" not in result.semantic_contract.required_columns
-        assert "ordered_on" not in result.generated.context_request.columns["orders"]
+    assert result.planner_usage.total_tokens in (None, 0)
+    assert not result.generated.telemetry.planner_call_used
+    assert result.generated.telemetry.model1_latency_ms == 0
+    assert result.generated.telemetry.context_grounding_latency_ms is not None
+    assert not any(item.component == "context_planner"
+                   for item in result.generated.telemetry.call_ledger)
+    assert {"order_id", "customer_id"} <= set(result.generated.context_request.columns["orders"])
     if enabled:
         document.schema_fingerprint = "stale"
         (catalog_root / "shop.json").write_text(document.model_dump_json())

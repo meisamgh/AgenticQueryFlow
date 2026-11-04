@@ -150,10 +150,7 @@ from semantic_text2sql.visualization import (
 )
 from semantic_text2sql.visualization_recommender import (
     materialize_recommendation,
-    merge_recommendations,
     recommend_charts,
-    refine_charts_with_model,
-    viz_recommender_llm_enabled,
 )
 from semantic_text2sql.voice import (
     MAX_AUDIO_BYTES,
@@ -362,7 +359,6 @@ def create_app(
         history=history,
         retriever=hybrid_retriever,
         agent=active_agent,
-        context_completers=cast(dict[ModelProvider, Any], turn_completers),
         semantic_catalogs=semantic_catalogs,
         graph_store=SemanticGraphStore(Path(os.environ.get("TEXT2SQL_GRAPH_ROOT", "graphs"))),
     )
@@ -662,23 +658,16 @@ def create_app(
         response.headers["Cache-Control"] = "no-store"
         sql_provider = os.environ.get("TEXT2SQL_SQL_PROVIDER") or "agentrouter"
         sql_model = os.environ.get("TEXT2SQL_SQL_MODEL") or DEFAULT_MODEL
-        context_mode = os.environ.get("TEXT2SQL_CONTEXT_MODE") or "retrieval"
         return {
             "sql_provider": sql_provider,
             "sql_model": sql_model,
-            "context_mode": context_mode,
-            "context_provider": (
-                os.environ.get("TEXT2SQL_CONTEXT_PROVIDER") or sql_provider
-                if context_mode == "model1" else None
-            ),
-            "context_model": (
-                os.environ.get("TEXT2SQL_CONTEXT_MODEL") or sql_model
-                if context_mode == "model1" else None
-            ),
+            "context_mode": "retrieval",
+            "context_provider": None,
+            "context_model": None,
             "assistant_provider": os.environ.get("TEXT2SQL_ASSISTANT_PROVIDER") or sql_provider,
             "assistant_model": os.environ.get("TEXT2SQL_ASSISTANT_MODEL") or sql_model,
-            "plotting_provider": os.environ.get("TEXT2SQL_PLOTTING_PROVIDER") or sql_provider,
-            "plotting_model": os.environ.get("TEXT2SQL_PLOTTING_MODEL") or sql_model,
+            "plotting_provider": None,
+            "plotting_model": None,
             "default_db_id": os.environ.get("TEXT2SQL_DEFAULT_DB_ID") or "debit_card_specializing",
         }
 
@@ -1220,19 +1209,6 @@ def create_app(
             raise HTTPException(
                 status_code=422,
                 detail=f"Model {request.model!r} is not allowed for {request.provider}.",
-            )
-        if (
-            enforce_model_catalog
-            and request.context_provider
-            and request.context_model
-            and not supports_model(request.context_provider, request.context_model)
-        ):
-            raise HTTPException(
-                status_code=422,
-                detail=(
-                    f"Context model {request.context_model!r} is not allowed for "
-                    f"{request.context_provider}."
-                ),
             )
         started = perf_counter()
         analytics_usage = TokenUsage()
@@ -2047,50 +2023,6 @@ def create_app(
                 except Exception:
                     logger.warning("Chart recommendation failed", exc_info=True)
                     chart_recommendations = None
-            if (
-                viz_intent.requested
-                and len(generated.columns) > 2
-                and viz_recommender_llm_enabled()
-                and not assistant_enabled
-            ):
-                try:
-                    model_calls_before = request_budget.model_calls
-                    model_recommended, viz_usage, viz_ms = await refine_charts_with_model(
-                        turn_completers.get(request.provider),
-                        provider=request.provider,
-                        model=request.model,
-                        question=pending.resolved_question,
-                        columns=generated.columns,
-                        rows=generated.rows,
-                        budget=request_budget,
-                        required_chart_type=(
-                            viz_intent.chart_type if viz_intent.explicit_type else None
-                        ),
-                    )
-                    client_ledger = (
-                        [
-                            CallLedgerEntry(
-                                component="visualization_recommendation",
-                                kind="MODEL",
-                                status="SUCCEEDED" if model_recommended is not None else "FAILED",
-                                provider=request.provider,
-                                requested_model=request.model,
-                                effective_model=request.model,
-                                input_tokens=viz_usage.input_tokens,
-                                output_tokens=viz_usage.output_tokens,
-                                latency_ms=viz_ms,
-                            )
-                        ]
-                        if request_budget.model_calls > model_calls_before
-                        else []
-                    )
-                    chart_recommendations = merge_recommendations(
-                        model_recommended, chart_recommendations
-                    )
-                    visualization_usage = _add_usage(visualization_usage, viz_usage)
-                    presentation_ledger.extend(client_ledger)
-                except Exception:
-                    logger.warning("LLM chart recommendation failed", exc_info=True)
             if (
                 not assistant_enabled
                 and presentation is not None

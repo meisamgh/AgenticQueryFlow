@@ -370,7 +370,7 @@ test('pipeline bars represent measured stage time and leave missing stages unmea
   assert.ok(!source.includes('Configured models'));
   const routing = container.children.find(row => row.children[0]?.textContent === 'Routing');
   assert.equal(routing.children[2].children[0].style.width, '25%');
-  const unknown = container.children.find(row => row.children[0]?.textContent === 'Context planning');
+  const unknown = container.children.find(row => row.children[0]?.textContent === 'Context grounding');
   assert.equal(unknown.children[1].textContent, 'Not reported');
   assert.equal(unknown.children[2].children[0].style.width, '0%');
   pipeline(fragment, {total: 1000, top_decisions: 200, result_explanation: 30}, {
@@ -388,6 +388,12 @@ test('pipeline bars represent measured stage time and leave missing stages unmea
   assert.ok(labels.indexOf('Stage timing') < labels.indexOf('Model calls'));
   assert.ok(labels.includes('Model calls'));
   assert.ok(!labels.includes('Configured models'));
+  pipeline(fragment, {total: 100, top_decisions: 30, context_grounding: 12, chart_validation: 4}, {}, {});
+  assert.equal(container.children.find(row => row.children[0]?.textContent === 'Context grounding')
+    .children[1].textContent, '12 ms');
+  assert.equal(container.children.find(row => row.children[0]?.textContent === 'Chart validation')
+    .children[1].textContent, '4 ms');
+  assert.equal(container.children.some(row => row.children[0]?.textContent === 'Charting model'), false);
   assert.equal(call.className, 'pipeline-run pipeline-model-call');
   const repeated = {kind: 'MODEL', component: 'conversational_agent', task: 'decision',
     provider: 'ollama', effective_model: 'llama', latency_ms: 100, input_tokens: 10, output_tokens: 2};

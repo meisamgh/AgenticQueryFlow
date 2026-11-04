@@ -127,7 +127,7 @@ def test_integrated_sql_chart_proposal_validates_or_selectively_falls_back(
     assert response["chart_id"]
     assert top.calls == 1
     assert len(sql.calls) == 1
-    assert plotting.calls == (0 if proposed_y == "total_consumption" else 1)
+    assert plotting.calls == 0
     if proposed_y is not None:
         entry = next(item for item in response["call_ledger"]
                      if item["component"] == "chart_proposal_validation")
@@ -143,7 +143,7 @@ def test_integrated_sql_chart_proposal_validates_or_selectively_falls_back(
     assert edited["chart_id"] != response["chart_id"]
     assert edited["presentation"]["chart_spec"]["y"] == "total_consumption"
     assert len(sql.calls) == 1
-    assert plotting.calls == (0 if proposed_y == "total_consumption" else 1)
+    assert plotting.calls == 0
 
 
 @pytest.mark.parametrize("repair_succeeds", [True, False])
@@ -410,7 +410,7 @@ def test_same_turn_new_refine_chart_uses_latest_provisional_result(
     assert response["timings_ms"]["sql_generation"] >= 0
     assert response["timings_ms"]["sql_validation"] >= 0
     assert response["timings_ms"]["sql_execution"] >= 0
-    assert response["timings_ms"]["charting_model"] >= 0
+    assert "charting_model" not in response["timings_ms"]
     top_calls = [item for item in response["call_ledger"]
                  if item["component"] == "conversational_agent"]
     assert all(item["latency_ms"] is not None and item["task"] for item in top_calls)
@@ -721,9 +721,9 @@ def test_total_then_currency_then_plot_reuses_complete_result(
     assert chart["presentation"]["chart_spec"]["x"] == "currency"
     assert chart["presentation"]["chart_spec"]["y"] == "total_consumption"
     assert len(sql.calls) == 2
-    assert plotting.calls == 1
+    assert plotting.calls == 0
     assert [entry["component"] for entry in chart["call_ledger"] if entry["kind"] == "MODEL"] == [
-        "conversational_agent", "plotting_model", "conversational_agent",
+        "conversational_agent", "conversational_agent",
     ]
 
 
@@ -770,7 +770,7 @@ def test_combined_sql_and_plot_then_change_type_without_new_sql(
     assert combined["presentation"]["chart_spec"]["chart_type"] == "bar"
     assert chart_inputs[0] == (False, False)
     assert len(sql.calls) == 1
-    assert plotting.calls == 1
+    assert plotting.calls == 0
     changed = _post(client,
                     "Change the plot to a horizontal bar of total consumption by currency",
                     "combined")
@@ -781,7 +781,7 @@ def test_combined_sql_and_plot_then_change_type_without_new_sql(
     assert changed["presentation"]["chart_spec"]["chart_type"] == "horizontal_bar"
     assert changed["generation"]["sql"] == combined["generation"]["sql"]
     assert len(sql.calls) == 1
-    assert plotting.calls == 1  # Type-only follow-up executes without a plotting LLM.
+    assert plotting.calls == 0  # Type-only follow-up executes without a plotting LLM.
     assert chart_inputs == [(False, False), (True, False)]
 
 
@@ -823,7 +823,7 @@ def test_date_consumption_then_plot_it_reuses_executed_result(
     assert chart["presentation_state"]["source_result_id"] == first["result_id"]
     assert chart["message"] == "Here is the chart of the accepted result."
     assert len(sql.calls) == 1
-    assert plotting.calls == 1
+    assert plotting.calls == 0
 
 
 def test_total_consumption_over_date_and_plot_it_in_one_turn(
@@ -856,7 +856,7 @@ def test_total_consumption_over_date_and_plot_it_in_one_turn(
         top.calls, plotting.calls, top.prompts[-1][-400:],
     )
     assert len(sql.calls) == 1
-    assert plotting.calls == 1
+    assert plotting.calls == 0
 
 
 def test_plot_restores_complete_accepted_result_after_app_restart(
@@ -957,7 +957,7 @@ def test_plot_requeries_when_restart_left_only_a_result_preview(
     )
     assert chart["presentation"]["chart_spec"]["chart_type"] == "line"
     assert chart["result_id"] != first["result_id"]
-    assert plotting.calls == 1
+    assert plotting.calls == 0
 
 
 def test_chart_type_edit_overrides_wrong_new_query_route(
@@ -1121,7 +1121,7 @@ def test_requery_required_can_continue_through_sql_to_validated_chart(
     assert chart["presentation_state"]["source_result_id"] == chart["result_id"]
     assert len(sql.calls) == 2
     assert "revenue" not in sql.calls[1].casefold()
-    assert plotting.calls == 1
+    assert plotting.calls == 0
 
 
 def test_requery_required_overrides_premature_answer_and_preserves_goal(
@@ -1161,7 +1161,7 @@ def test_requery_required_overrides_premature_answer_and_preserves_goal(
     assert chart["result_id"] != first["result_id"]
     assert chart["presentation"]["chart_spec"]["chart_type"] == "line"
     assert chart["generation"]["columns"] == ["month", "total_consumption"]
-    assert plotting.calls == 1
+    assert plotting.calls == 0
 
 
 def test_failed_current_sql_cannot_plot_stale_accepted_result(
