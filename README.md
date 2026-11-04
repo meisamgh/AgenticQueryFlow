@@ -4,7 +4,11 @@
 
 [AgenticQueryFlow](https://github.com/meisamgh/AgenticQueryFlow) is an open-source conversational analytics application for supported SQL data sources and analytical warehouses. Ask questions in natural language, inspect the generated read-only SQL and its results, refine analyses through follow-up conversations, and create charts or dashboards from validated data.
 
-[**Watch the demo**](https://github.com/user-attachments/assets/cea65003-e31e-4846-a532-904ffcb6e25f) · [**Architecture details**](docs/V6_4_PROGRESS.md) · [**Connection guide**](docs/EXTERNAL_DATABASES.md)
+[**Architecture details**](docs/V6_4_PROGRESS.md) · [**Connection guide**](docs/EXTERNAL_DATABASES.md)
+
+## Demo video
+
+https://github.com/user-attachments/assets/cea65003-e31e-4846-a532-904ffcb6e25f
 
 <p align="center">
   <img src="WorkFlow.png" alt="AgenticQueryFlow conversational analytics workflow" width="960" />
