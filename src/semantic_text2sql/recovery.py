@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 import json
+import os
 import re
 from collections.abc import Callable
 from time import monotonic, perf_counter
@@ -12,20 +13,24 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from sqlglot import exp, parse_one
+from sqlglot.errors import SqlglotError
 
 from semantic_text2sql.database import DatabaseRegistry
 from semantic_text2sql.models import (
+    ApprovedMetricDefinition,
     DatabaseProfile,
     RecoveryClaim,
     RecoveryToolCall,
     RecoveryTrace,
     RecoveryUsage,
     SchemaInfo,
+    SemanticContract,
     TokenUsage,
 )
+from semantic_text2sql.ontology import OntologyAdapter, configured_local_ontology
 from semantic_text2sql.postgres import PostgresRegistry
 from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded
-from semantic_text2sql.validator import validate_sql
+from semantic_text2sql.validator import validate_sql, validate_sql_semantics
 
 MAX_RECOVERY_TOOL_CALLS = 3
 MAX_RECOVERY_MODEL_CALLS = 4
@@ -61,6 +66,7 @@ class RecoveryTools:
         max_database_probes: int = 8,
         max_recovery_seconds: float = 8.0,
         budget: RequestBudget | None = None,
+        ontology: OntologyAdapter | None = None,
     ) -> None:
         self.database = database
         self.db_id = db_id
@@ -73,11 +79,19 @@ class RecoveryTools:
         self._deadline: float | None = None
         self.budget_exhausted = False
         self._database_probe_count = 0
+        self._ontology = ontology
 
     def begin_recovery(self) -> None:
         self._deadline = monotonic() + self.max_recovery_seconds
         self.budget_exhausted = False
         self._database_probe_count = 0
+
+    def query_ontology(self, query: str, *, allowed_tables: list[str]) -> dict[str, Any]:
+        if self.remaining_seconds() <= 0:
+            raise TimeoutError("Recovery deadline reached")
+        if self._ontology is None:
+            self._ontology = configured_local_ontology(self.schema, self.profile)
+        return self._ontology.lookup(query[:500], allowed_tables=set(allowed_tables))
 
     @property
     def database_probe_count(self) -> int:
@@ -210,6 +224,8 @@ class RecoveryTools:
             f'SELECT DISTINCT "{column}" FROM "{table}" '
             f"WHERE LOWER(CAST(\"{column}\" AS TEXT)) {operator} LOWER('{sql_value}') LIMIT 10"
         )
+        if self.schema.dialect not in {"sqlite", "postgres"}:
+            sql = parse_one(sql, read="postgres").sql(dialect=self.schema.dialect)
         result = self.query_database(sql, allowed_tables=allowed_tables)
         return {
             "evidence_type": "VALUE_PROBE",
@@ -628,6 +644,13 @@ class RecoveryCoordinator:
                     )
                     if action in {"REPAIR", "INFORM"} and not claims:
                         return await fallback_with_agent_usage()
+                    if action == "REPAIR" and any(
+                        claim.claim_type == "METRIC_DEFINITION" for claim in claims
+                    ) and not ontology_repair_supported(failed_sql, claims, self.tools.schema):
+                        action = "ESCALATE"
+                        diagnosis = ("The approved definition is available, but a safe correction "
+                                     "cannot be verified from the current evidence.")
+                        payload["repair_instruction"] = None
                     base = RecoveryTrace(
                         mode=mode,  # type: ignore[arg-type]
                         failure_code=failure_code,
@@ -701,6 +724,11 @@ class RecoveryCoordinator:
                         str(arguments.get("sql") or ""),
                         allowed_tables=allowed_tables,
                     )
+                elif tool == "query_ontology" and ontology_recovery_allowed(failure_code):
+                    result = await asyncio.wait_for(asyncio.to_thread(
+                        self.tools.query_ontology, str(arguments.get("query") or question),
+                        allowed_tables=allowed_tables),
+                        timeout=max(.01, self.tools.remaining_seconds()))
                 else:
                     return await fallback_with_agent_usage()
                 purpose = str(payload.get("purpose") or "Gather verified recovery evidence.")
@@ -886,6 +914,29 @@ def _failure_category(mode: str, failure_code: str, failure_message: str) -> str
     return "sql"
 
 
+def ontology_repair_supported(sql: str, claims: list[RecoveryClaim], schema: SchemaInfo) -> bool:
+    definitions = [ApprovedMetricDefinition(id=claim.metric_id or "metric",
+        source_relation=claim.table or "", formula=claim.value or "")
+        for claim in claims if claim.claim_type == "METRIC_DEFINITION"]
+    if not definitions:
+        return False
+    try:
+        findings = validate_sql_semantics(sql, SemanticContract(approved_metrics=definitions),
+                                          dialect=schema.dialect)
+        return any(item.status == "FAIL" and item.code == "APPROVED_METRIC_INPUT_MISMATCH"
+                   for item in findings)
+    except (ValueError, SqlglotError):
+        return False
+
+
+def ontology_recovery_allowed(failure_code: str) -> bool:
+    return (os.environ.get("TEXT2SQL_ONTOLOGY_RECOVERY_ENABLED", "false").lower() == "true"
+            and any(term in failure_code.upper() for term in
+                    ("SEMANTIC", "METRIC", "JOIN", "CORRECTNESS", "GRAIN"))
+            and not any(term in failure_code.upper() for term in
+                        ("SYNTAX", "PARSE", "SAFETY", "PROVIDER", "TIMEOUT")))
+
+
 def _agent_recovery_prompt(
     question: str,
     failed_sql: str,
@@ -894,7 +945,15 @@ def _agent_recovery_prompt(
     allowed_tables: list[str],
     observations: list[dict[str, Any]],
 ) -> str:
-    return f"""You are one bounded Text-to-SQL recovery agent with exactly three tools.
+    ontology_instruction = (
+        'Optional tool: {"action":"CALL_TOOL","tool":"query_ontology",'
+        '"arguments":{"query":"metric or relationship"},"purpose":"semantic lookup"}. '
+        'Only current approved metrics can support METRIC_DEFINITION claims; include exact '
+        'metric_id, table=source_relation, value=formula and observation evidence IDs. '
+        'Concept suggestions cannot authorize automatic repair.'
+        if ontology_recovery_allowed(failure_code) else "")
+    return f"""You are one bounded Text-to-SQL recovery agent.
+{ontology_instruction}
 Return one JSON object only, using one of these shapes:
 {{"action":"CALL_TOOL","tool":"inspect_schema","arguments":{{"tables":["name"],
 "columns":{{"name":["column"]}}}},"purpose":"short reason"}}
@@ -981,6 +1040,17 @@ def _claim_has_compatible_evidence(
 ) -> bool:
     """Enforce deterministic claim-type to observation-type compatibility."""
     cited_observations = [observations[item] for item in cited if item in observations]
+    if claim.claim_type == "METRIC_DEFINITION":
+        return any(item.get("tool") == "query_ontology"
+                   and isinstance(item.get("result"), dict)
+                   and item["result"].get("evidence_type") == "APPROVED_ONTOLOGY"
+                   and any(metric.get("id") == claim.metric_id
+                           and metric.get("source_relation") == claim.table
+                           and metric.get("formula") == claim.value
+                           and metric.get("status") == "approved"
+                           and metric.get("provenance") == "human_approved_semantic_catalog"
+                           for metric in item["result"].get("metrics", []))
+                   for item in cited_observations)
     if claim.claim_type in {"SQL_FAILURE", "UNCERTAINTY"}:
         return "failure-1" in cited or bool(cited_observations)
     if claim.claim_type == "SCHEMA_FACT":

@@ -19,6 +19,7 @@ from typing import Any, Literal
 from uuid import uuid4
 
 from pydantic import Field
+from sqlglot import parse_one
 
 from semantic_text2sql.database import DatabaseRegistry
 from semantic_text2sql.models import SchemaInfo, StrictModel
@@ -112,6 +113,11 @@ def sqlite_runner(registry: DatabaseRegistry, db_id: str, *, row_limit: int = 20
 
 def postgres_runner(registry: PostgresRegistry, db_id: str, *, row_limit: int = 200) -> ProbeRunner:
     def run(sql: str) -> list[dict[str, Any]]:
+        dialect = registry.dialect_for(db_id)
+        if dialect != "postgres":
+            native = parse_one(sql, read="postgres").sql(dialect=dialect)
+            names, rows, _ = registry.execute(db_id, native, max_rows=row_limit)
+            return [dict(zip(names, row, strict=False)) for row in rows]
         with registry.connect(db_id) as connection, connection.cursor() as cursor:
             cursor.execute(sql)
             names = [item.name for item in cursor.description or ()]

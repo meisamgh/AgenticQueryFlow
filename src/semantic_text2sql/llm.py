@@ -1,4 +1,4 @@
-"""Mockable AgentRouter, Groq, JustDoWork, and CodeCraft provider boundaries."""
+"""Mockable project-scoped model provider boundaries."""
 
 from __future__ import annotations
 
@@ -11,12 +11,13 @@ import shutil
 import tempfile
 from pathlib import Path
 from time import perf_counter
-from typing import Literal, Protocol, cast
+from typing import Any, Literal, Protocol, cast
 
 import httpx
 
+from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.models import ModelProvider, SchemaInfo, StrategyHints, TokenUsage
-from semantic_text2sql.runtime import active_request_budget
+from semantic_text2sql.runtime import RequestBudgetExceeded, active_request_budget
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,12 @@ class ProviderRequestError(ModelError):
         self, provider: str, model: str, phase: str, status: int,
         code: str, request_id: str | None, latency_ms: int,
         capability_rejection: bool = False,
+        retry_count: int = 0,
     ) -> None:
-        super().__init__(f"{provider} HTTP {status} ({code or 'unknown_error'})")
+        super().__init__(
+            f"{provider} HTTP {status} ({code or 'unknown_error'})",
+            usage=TokenUsage(provider_retries=retry_count),
+        )
         self.provider = provider
         self.model = model
         self.phase = phase
@@ -44,6 +49,7 @@ class ProviderRequestError(ModelError):
         self.request_id = request_id
         self.latency_ms = latency_ms
         self.capability_rejection = capability_rejection
+        self.retry_count = retry_count
 
 
 class StructuredOutputFallbackRequired(ModelError):
@@ -52,6 +58,162 @@ class StructuredOutputFallbackRequired(ModelError):
 
 class StructuredOutputUnsupported(StructuredOutputFallbackRequired):
     """The provider explicitly rejected native schema-constrained output."""
+
+
+class OllamaCompleter:
+    """Local conversation completion using Ollama's native structured chat API."""
+
+    def __init__(
+        self, base_url: str = "http://127.0.0.1:11434", timeout_seconds: float = 180,
+        *, transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        self.base_url = base_url.rstrip("/")
+        self.timeout_seconds = timeout_seconds
+        self.transport = transport
+        self._schema_unsupported_models: set[str] = set()
+
+    def native_schema_supported(self, model: str, schema_name: str) -> bool:
+        return model not in self._schema_unsupported_models
+
+    async def generate(self, **kwargs: object) -> tuple[str, int, TokenUsage]:
+        """Use the existing governed generator prompt; no database access here."""
+        prompt = _prompt(
+            str(kwargs["question"]), cast(str | None, kwargs.get("evidence")),
+            cast(SchemaInfo, kwargs["schema"]), cast(StrategyHints, kwargs["strategy"]),
+            cast(DatabaseDialect, kwargs["dialect"]), str(kwargs["profile_context"]),
+            cast(str | None, kwargs.get("previous_sql")),
+            cast(str | None, kwargs.get("feedback")), cast(list[str], kwargs["rejected_shapes"]),
+            cast(Literal["reasoning", "icl", "alternative"], kwargs["generation_style"]),
+        )
+        started = perf_counter()
+        text, usage = await self.complete_task(str(kwargs["model"]), prompt, "sql")
+        return text, round((perf_counter() - started) * 1000), usage
+
+    async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+        return await self.complete_task(model, prompt, "decision")
+
+    async def complete_task(
+        self, model: str, prompt: str, task: str, *, json_mode: bool = False,
+    ) -> tuple[str, TokenUsage]:
+        return await self._chat(model, prompt, task, "json" if json_mode else None)
+
+    async def complete_structured(
+        self, model: str, prompt: str, schema_name: str, schema: dict[str, object],
+    ) -> tuple[str, TokenUsage]:
+        return await self.complete_structured_task(model, prompt, schema_name, schema, "decision")
+
+    async def complete_structured_task(
+        self, model: str, prompt: str, schema_name: str, schema: dict[str, object], task: str,
+    ) -> tuple[str, TokenUsage]:
+        wire = cast(dict[str, object], _ollama_wire_schema(schema))
+        if schema_name == "AgentDecision":
+            wire = _ollama_decision_actions(wire)
+        return await self._chat(model, prompt, task, wire)
+
+    async def _chat(
+        self, model: str, prompt: str, task: str, output_format: str | dict[str, object] | None,
+    ) -> tuple[str, TokenUsage]:
+        payload: dict[str, object] = {
+            "model": model, "messages": [{"role": "user", "content": prompt}],
+            "stream": False, "think": False, "keep_alive": "5m",
+            "options": {
+                "temperature": 0, "num_predict": _task_token_limit(task),
+                "num_ctx": max(2048, int(os.environ.get("OLLAMA_NUM_CTX", "16384"))),
+            },
+        }
+        if output_format is not None:
+            payload["format"] = output_format
+        try:
+            async with httpx.AsyncClient(
+                timeout=self.timeout_seconds, transport=self.transport,
+            ) as client:
+                response = await client.post(f"{self.base_url}/api/chat", json=payload)
+            if response.is_error:
+                if (response.status_code == 400 and isinstance(output_format, dict)
+                        and "failed to parse grammar" in response.text.lower()):
+                    self._schema_unsupported_models.add(model)
+                    raise StructuredOutputUnsupported(
+                        "Ollama cannot compile this structured-output schema."
+                    )
+                raise ModelError(f"Ollama request failed (HTTP {response.status_code}).")
+            body = response.json()
+            usage = TokenUsage(
+                input_tokens=body.get("prompt_eval_count"), output_tokens=body.get("eval_count"),
+            )
+            if body.get("done_reason") == "length":
+                raise ModelError("Ollama output was truncated at the completion-token limit.",
+                                 usage=usage)
+            message = body.get("message") or {}
+            content = message.get("content")
+            if not isinstance(content, str) or not content.strip():
+                raise ModelError("Ollama returned no text output.", usage=usage)
+            return content.strip(), usage
+        except httpx.HTTPError as exc:
+            raise ModelError("The local Ollama server could not complete the request.") from exc
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise ModelError("Ollama returned an invalid completion response.") from exc
+
+
+def _ollama_decision_actions(schema: dict[str, object]) -> dict[str, object]:
+    """Constrain action/tool agreement in the grammar, not just after decoding."""
+    props = cast(dict[str, object], schema.get("properties", {}))
+    if "result_kind" in props:
+        # Decide the requested artifact before emitting free-text tool arguments.
+        props = {"result_kind": props["result_kind"],
+                 **{key: value for key, value in props.items() if key != "result_kind"}}
+        schema = {**schema, "properties": props}
+    if not {"action", "tool", "tool_arguments", "answer", "chart_proposal"}.issubset(props):
+        return schema
+    answer = {**schema, "properties": {**props, "action": {"type": "string", "enum": ["ANSWER"]},
+        "tool": {"type": "null"}, "tool_arguments": {"type": "null"},
+        "instruction": {"type": "null"}, "chart_proposal": {"type": "null"}}}
+    call = {**schema, "properties": {**props, "action": {"type": "string", "enum": ["CALL_TOOL"]},
+        "tool": cast(dict[str, Any], props["tool"])["anyOf"][0],
+        "tool_arguments": cast(dict[str, Any], props["tool_arguments"])["anyOf"][0],
+        "answer": {"type": "null"}, "instruction": {"type": "null"}}}
+    if "finish_after_tool" not in props:
+        return {**schema, "anyOf": [answer, call]}
+    call_props = cast(dict[str, Any], call["properties"])
+    arguments = cast(dict[str, Any], call_props["tool_arguments"])
+    argument_props = arguments.get("properties", {})
+    if "dashboard_goal" not in argument_props:
+        return {**schema, "anyOf": [answer, call]}
+    if "result_kind" in props:
+        ordinary = {**call, "properties": {**call_props,
+            "result_kind": {"type": "string", "enum": ["ANALYSIS", "CHART"]},
+            "tool": {**cast(dict[str, Any], call_props["tool"]), "enum": [
+                tool for tool in cast(dict[str, Any], call_props["tool"])["enum"]
+                if tool not in {"ai_dashboard_designer", "undo_dashboard"}
+            ]},
+            "tool_arguments": {**arguments, "properties": {**argument_props,
+                "dashboard_goal": {"type": "null"}}}}}
+        dashboard = {**call, "properties": {**call_props,
+            "result_kind": {"type": "string", "enum": ["DASHBOARD"]},
+            "finish_after_tool": {"type": "boolean", "enum": [False]}}}
+        return {**schema, "anyOf": [answer, ordinary, dashboard]}
+    # A completed single-tool request cannot also start an unfinished dashboard.
+    # Separate native branches prevent small models emitting that contradiction.
+    finished = {**call, "properties": {**call_props,
+        "finish_after_tool": {"type": "boolean", "enum": [True]},
+        "tool_arguments": {**arguments, "properties": {**argument_props,
+            "dashboard_goal": {"type": "null"}}}}}
+    ongoing = {**call, "properties": {**call_props,
+        "finish_after_tool": {"type": "boolean", "enum": [False]}}}
+    return {**schema, "anyOf": [answer, finished, ongoing]}
+
+
+def _ollama_wire_schema(value: object) -> object:
+    """Avoid Ollama's grammar failure on large bounded string repetitions.
+
+    Only the wire grammar omits maxLength above 1024. Canonical Pydantic
+    validation and prompt schemas retain every limit before any tool executes.
+    """
+    if isinstance(value, dict):
+        return {key: _ollama_wire_schema(item) for key, item in value.items()
+                if not (key == "maxLength" and isinstance(item, int) and item > 1024)}
+    if isinstance(value, list):
+        return [_ollama_wire_schema(item) for item in value]
+    return value
 
 
 def _structured_output_unsupported(error: ModelError) -> bool:
@@ -127,7 +289,7 @@ class SQLModel(Protocol):
         evidence: str | None,
         schema: SchemaInfo,
         strategy: StrategyHints,
-        dialect: Literal["sqlite", "postgres"],
+        dialect: DatabaseDialect,
         profile_context: str,
         previous_sql: str | None,
         feedback: str | None,
@@ -167,7 +329,7 @@ class GroqSQLModel:
             cast(str | None, kwargs.get("evidence")),
             cast(SchemaInfo, kwargs["schema"]),
             cast(StrategyHints, kwargs["strategy"]),
-            cast(Literal["sqlite", "postgres"], kwargs["dialect"]),
+            cast(DatabaseDialect, kwargs["dialect"]),
             str(kwargs["profile_context"]),
             cast(str | None, kwargs.get("previous_sql")),
             cast(str | None, kwargs.get("feedback")),
@@ -197,6 +359,7 @@ class GroqSQLModel:
             "final_answer": "TEXT2SQL_TOP_ANSWER_MAX_TOKENS",
             "context": "TEXT2SQL_CONTEXT_MAX_TOKENS",
             "plotting": "TEXT2SQL_PLOTTING_MAX_TOKENS",
+            "dashboard": "TEXT2SQL_DASHBOARD_MAX_TOKENS",
         }.get(task, "TEXT2SQL_MAX_COMPLETION_TOKENS")
         default = "2048" if task == "decision_repair" else "1536"
         return await self._complete_detailed(
@@ -235,6 +398,30 @@ class GroqSQLModel:
             self._native_schema_unavailable.add((model, schema_name))
             raise StructuredOutputUnsupported(str(exc)) from exc
 
+    async def complete_structured_task(
+        self, model: str, prompt: str, schema_name: str,
+        schema: dict[str, object], task: str,
+    ) -> tuple[str, TokenUsage]:
+        if not self.native_schema_supported(model, schema_name):
+            raise StructuredOutputFallbackRequired(
+                "Native structured output was rejected earlier for this model and schema."
+            )
+        try:
+            return await self._complete_detailed(
+                model, prompt, _task_token_limit(task),
+                response_format=_openai_schema_format(schema_name, schema),
+            )
+        except ProviderRequestError as exc:
+            if exc.code == "json_validate_failed":
+                self._native_schema_unavailable.add((model, schema_name))
+                raise StructuredOutputFallbackRequired(
+                    "Groq strict JSON generation failed; retrying in JSON mode."
+                ) from exc
+            if not _structured_output_unsupported(exc):
+                raise
+            self._native_schema_unavailable.add((model, schema_name))
+            raise StructuredOutputUnsupported(str(exc)) from exc
+
     def native_schema_supported(self, model: str, schema_name: str) -> bool:
         return (model, schema_name) not in self._native_schema_unavailable
 
@@ -254,11 +441,21 @@ class GroqSQLModel:
                 timeout=self.timeout,
                 transport=self.transport,
             ) as client:
+                last_rate_response: httpx.Response | None = None
+                sent_retry_count = 0
                 for attempt in range(3):
                     if attempt:
                         budget = active_request_budget()
                         if budget is not None:
-                            budget.claim("model")
+                            try:
+                                budget.claim("model")
+                            except RequestBudgetExceeded:
+                                # A retry denied locally must not hide the actual
+                                # preceding rate-limit response behind a budget error.
+                                if last_rate_response is not None:
+                                    last_rate_response.raise_for_status()
+                                raise
+                    sent_retry_count = attempt
                     response = await client.post(
                         "chat/completions",
                         headers={
@@ -281,7 +478,15 @@ class GroqSQLModel:
                     )
                     if response.status_code != 429 or attempt == 2:
                         break
-                    await asyncio.sleep(_groq_retry_delay(response))
+                    last_rate_response = response
+                    delay = _groq_retry_delay(response)
+                    budget = active_request_budget()
+                    if delay > 30 or (budget is not None and (
+                        not budget.model_call_available()
+                        or budget.remaining() <= delay
+                    )):
+                        break
+                    await asyncio.sleep(delay)
                 response.raise_for_status()
                 body = response.json()
                 choice = body["choices"][0]
@@ -307,13 +512,14 @@ class GroqSQLModel:
                 "groq", model, phase, exc.response.status_code,
                 code, request_id, round((perf_counter() - started) * 1000),
                 capability_rejection=capability_rejection,
+                retry_count=sent_retry_count,
             )
             logger.warning(
                 "provider_request_failed provider=%s model=%s phase=%s status=%s "
                 "code=%s request_id=%s latency_ms=%s response_format=%s retry_count=%s",
                 problem.provider, problem.model, problem.phase, problem.status,
                 problem.code, problem.request_id, problem.latency_ms,
-                response_format.get("type") if response_format else "text", attempt,
+                response_format.get("type") if response_format else "text", sent_retry_count,
             )
             raise problem from exc
         except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
@@ -321,11 +527,15 @@ class GroqSQLModel:
         if choice.get("finish_reason") == "length":
             raise ModelError(
                 "Groq output was truncated at the completion-token limit.",
-                usage=_token_usage(body.get("usage") or {}),
+                usage=_token_usage(body.get("usage") or {}).model_copy(
+                    update={"provider_retries": sent_retry_count}
+                ),
             )
         if not isinstance(content, str) or not content.strip():
             raise ModelError("Groq returned no text output.")
-        return content, _token_usage(body.get("usage") or {})
+        return content, _token_usage(body.get("usage") or {}).model_copy(
+            update={"provider_retries": sent_retry_count}
+        )
 
 
 class JustDoWorkSQLModel:
@@ -354,7 +564,7 @@ class JustDoWorkSQLModel:
             cast(str | None, kwargs.get("evidence")),
             cast(SchemaInfo, kwargs["schema"]),
             cast(StrategyHints, kwargs["strategy"]),
-            cast(Literal["sqlite", "postgres"], kwargs["dialect"]),
+            cast(DatabaseDialect, kwargs["dialect"]),
             str(kwargs["profile_context"]),
             cast(str | None, kwargs.get("previous_sql")),
             cast(str | None, kwargs.get("feedback")),
@@ -387,12 +597,40 @@ class JustDoWorkSQLModel:
                 raise
             raise StructuredOutputUnsupported(str(exc)) from exc
 
+    async def complete_structured_task(
+        self, model: str, prompt: str, schema_name: str,
+        schema: dict[str, object], task: str,
+    ) -> tuple[str, TokenUsage]:
+        try:
+            return await self._structured_messages_completion(
+                model, prompt, schema_name, schema, max_tokens=_task_token_limit(task)
+            )
+        except ModelError as exc:
+            if not _structured_output_unsupported(exc):
+                raise
+            raise StructuredOutputUnsupported(str(exc)) from exc
+
+    async def complete_task(
+        self, model: str, prompt: str, task: str, *, json_mode: bool = False,
+    ) -> tuple[str, TokenUsage]:
+        if json_mode:
+            try:
+                return await self.complete_structured_task(
+                    model, prompt, "BoundedTaskOutput", {"type": "object"}, task
+                )
+            except StructuredOutputUnsupported:
+                pass
+        return await self.complete_detailed(
+            model, prompt, max_tokens=_task_token_limit(task)
+        )
+
     async def _structured_messages_completion(
         self,
         model: str,
         prompt: str,
         schema_name: str,
         schema: dict[str, object],
+        max_tokens: int = 4_000,
     ) -> tuple[str, TokenUsage]:
         if not self.api_key:
             raise ModelError("JUSTDOWORK_API_KEY is not configured.")
@@ -415,7 +653,7 @@ class JustDoWorkSQLModel:
                     json={
                         "model": model,
                         "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 4_000,
+                        "max_tokens": max_tokens,
                         "temperature": 0,
                         "tools": tools,
                         "tool_choice": tool_choice,
@@ -445,7 +683,9 @@ class JustDoWorkSQLModel:
             raise ModelError("JustDoWork returned no structured decision.")
         return json.dumps(payload, separators=(",", ":")), _token_usage(body.get("usage") or {})
 
-    async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+    async def complete_detailed(
+        self, model: str, prompt: str, max_tokens: int = 4_000,
+    ) -> tuple[str, TokenUsage]:
         if not self.api_key:
             raise ModelError("JUSTDOWORK_API_KEY is not configured.")
         if not self.base_url:
@@ -466,7 +706,7 @@ class JustDoWorkSQLModel:
                     json={
                         "model": model,
                         "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 4_000,
+                        "max_tokens": max_tokens,
                         "temperature": 0,
                     },
                 )
@@ -513,7 +753,7 @@ class CodeCraftSQLModel:
             cast(str | None, kwargs.get("evidence")),
             cast(SchemaInfo, kwargs["schema"]),
             cast(StrategyHints, kwargs["strategy"]),
-            cast(Literal["sqlite", "postgres"], kwargs["dialect"]),
+            cast(DatabaseDialect, kwargs["dialect"]),
             str(kwargs["profile_context"]),
             cast(str | None, kwargs.get("previous_sql")),
             cast(str | None, kwargs.get("feedback")),
@@ -546,6 +786,36 @@ class CodeCraftSQLModel:
                 raise
             raise StructuredOutputUnsupported(str(exc)) from exc
 
+    async def complete_structured_task(
+        self, model: str, prompt: str, schema_name: str,
+        schema: dict[str, object], task: str,
+    ) -> tuple[str, TokenUsage]:
+        try:
+            return await self._complete_detailed(
+                model, prompt,
+                response_format=_openai_schema_format(schema_name, schema),
+                max_tokens=_task_token_limit(task),
+            )
+        except ModelError as exc:
+            if not _structured_output_unsupported(exc):
+                raise
+            raise StructuredOutputUnsupported(str(exc)) from exc
+
+    async def complete_task(
+        self, model: str, prompt: str, task: str, *, json_mode: bool = False,
+    ) -> tuple[str, TokenUsage]:
+        limit = _task_token_limit(task)
+        if json_mode:
+            try:
+                return await self._complete_detailed(
+                    model, prompt, response_format={"type": "json_object"},
+                    max_tokens=limit,
+                )
+            except ModelError as exc:
+                if not _structured_output_unsupported(exc):
+                    raise
+        return await self._complete_detailed(model, prompt, max_tokens=limit)
+
     async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
         return await self._complete_detailed(model, prompt)
 
@@ -554,13 +824,15 @@ class CodeCraftSQLModel:
         model: str,
         prompt: str,
         response_format: dict[str, object] | None = None,
+        *,
+        max_tokens: int = 4_096,
     ) -> tuple[str, TokenUsage]:
         if not self.api_key:
             raise ModelError("CODECRAFT_API_KEY is not configured.")
         payload: dict[str, object] = {
             "model": model,
             "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": 4_096,
+            "max_tokens": max_tokens,
             "stream": False,
             **(
                 {"response_format": response_format} if response_format is not None else {}
@@ -594,6 +866,104 @@ class CodeCraftSQLModel:
         return content, _token_usage(body.get("usage") or {})
 
 
+class OpenRouterSQLModel(CodeCraftSQLModel):
+    """OpenRouter chat-completions adapter with local structured-output validation."""
+
+    def __init__(
+        self,
+        api_key: str | None,
+        base_url: str = "https://openrouter.ai/api/v1",
+        timeout: float = 180.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        super().__init__(api_key, base_url, timeout, transport)
+
+    def native_schema_supported(self, model: str, schema_name: str) -> bool:
+        return False
+
+    async def complete_structured(
+        self, model: str, prompt: str, schema_name: str, schema: dict[str, object],
+    ) -> tuple[str, TokenUsage]:
+        raise StructuredOutputUnsupported(
+            "This OpenRouter free model does not enforce JSON-schema responses."
+        )
+
+    async def complete_task(
+        self, model: str, prompt: str, task: str, *, json_mode: bool = False,
+    ) -> tuple[str, TokenUsage]:
+        # The model does not support response_format; callers validate JSON locally.
+        setting = {
+            "decision": "TEXT2SQL_TOP_DECISION_MAX_TOKENS",
+            "decision_repair": "TEXT2SQL_TOP_REPAIR_MAX_TOKENS",
+            "final_answer": "TEXT2SQL_TOP_ANSWER_MAX_TOKENS",
+            "context": "TEXT2SQL_CONTEXT_MAX_TOKENS",
+            "plotting": "TEXT2SQL_PLOTTING_MAX_TOKENS",
+            "dashboard": "TEXT2SQL_DASHBOARD_MAX_TOKENS",
+        }.get(task, "TEXT2SQL_MAX_COMPLETION_TOKENS")
+        return await self._complete_detailed(
+            model, prompt, max_tokens=int(os.environ.get(setting, "4096"))
+        )
+
+    async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+        return await self._complete_detailed(
+            model, prompt,
+            max_tokens=int(os.environ.get("TEXT2SQL_SQL_MAX_TOKENS", "4096")),
+        )
+
+    async def _complete_detailed(
+        self,
+        model: str,
+        prompt: str,
+        response_format: dict[str, object] | None = None,
+        *,
+        max_tokens: int = 4_096,
+    ) -> tuple[str, TokenUsage]:
+        if not self.api_key:
+            raise ModelError("OPENROUTER_API_KEY is not configured.")
+        if response_format is not None:
+            raise StructuredOutputUnsupported(
+                "This OpenRouter free model does not enforce JSON-schema responses."
+            )
+        started = perf_counter()
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.base_url, timeout=self.timeout, transport=self.transport,
+            ) as client:
+                response = await client.post(
+                    "chat/completions",
+                    headers={
+                        "authorization": f"Bearer {self.api_key}",
+                        "content-type": "application/json",
+                    },
+                    json={
+                        "model": model,
+                        "messages": [{"role": "user", "content": prompt}],
+                        "max_tokens": max_tokens,
+                        "stream": False,
+                    },
+                )
+                response.raise_for_status()
+                body = response.json()
+                choice = body["choices"][0]
+                content = choice["message"]["content"]
+        except httpx.HTTPStatusError as exc:
+            raise ProviderRequestError(
+                "openrouter", model, "completion", exc.response.status_code,
+                "", exc.response.headers.get("x-request-id"),
+                round((perf_counter() - started) * 1000),
+            ) from exc
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+            raise ModelError(
+                "The OpenRouter request failed or returned an invalid response."
+            ) from exc
+        usage = _token_usage(body.get("usage") or {})
+        if choice.get("finish_reason") == "length":
+            raise ModelError("OpenRouter output was truncated at the token limit.", usage=usage)
+        if not isinstance(content, str) or not content.strip():
+            raise ModelError("OpenRouter returned no text output.", usage=usage)
+        return content, usage
+
+
 def _response_detail(response: httpx.Response) -> str:
     """Extract a bounded, non-secret provider error message."""
     try:
@@ -613,12 +983,12 @@ def _groq_retry_delay(response: httpx.Response) -> float:
     header = response.headers.get("retry-after")
     if header:
         try:
-            return min(max(float(header), 0.1), 30.0)
+            return max(float(header) + 0.25, 0.1)
         except ValueError:
             pass
     match = re.search(r"try again in\s+([0-9.]+)s", response.text, re.IGNORECASE)
     if match:
-        return min(max(float(match.group(1)) + 0.25, 0.1), 30.0)
+        return max(float(match.group(1)) + 0.25, 0.1)
     return 2.0
 
 
@@ -650,7 +1020,7 @@ class AgentRouterClaudeModel:
         evidence: str | None,
         schema: SchemaInfo,
         strategy: StrategyHints,
-        dialect: Literal["sqlite", "postgres"],
+        dialect: DatabaseDialect,
         profile_context: str,
         previous_sql: str | None,
         feedback: str | None,
@@ -800,12 +1170,28 @@ class AgentRouterClaudeModel:
                 raise
             raise StructuredOutputUnsupported(str(exc)) from exc
 
+    async def complete_structured_task(
+        self, model: str, prompt: str, schema_name: str,
+        schema: dict[str, object], task: str,
+    ) -> tuple[str, TokenUsage]:
+        if self.transport is None and self.base_url == "https://agentrouter.org":
+            return await self.complete_detailed(model, prompt)
+        try:
+            return await self._structured_messages_completion(
+                model, prompt, schema_name, schema, max_tokens=_task_token_limit(task)
+            )
+        except ModelError as exc:
+            if not _structured_output_unsupported(exc):
+                raise
+            raise StructuredOutputUnsupported(str(exc)) from exc
+
     async def _structured_messages_completion(
         self,
         model: str,
         prompt: str,
         schema_name: str,
         schema: dict[str, object],
+        max_tokens: int = 4_000,
     ) -> tuple[str, TokenUsage]:
         if not self.api_key:
             raise ModelError("AGENTROUTER_API_KEY is not configured.")
@@ -825,7 +1211,7 @@ class AgentRouterClaudeModel:
                     },
                     json={
                         "model": model,
-                        "max_tokens": 4_000,
+                        "max_tokens": max_tokens,
                         "temperature": 0,
                         "messages": [{"role": "user", "content": prompt}],
                         "tools": tools,
@@ -929,7 +1315,7 @@ class AgentRouterCodexModel:
             evidence,
             cast(SchemaInfo, kwargs["schema"]),
             cast(StrategyHints, kwargs["strategy"]),
-            cast(Literal["sqlite", "postgres"], kwargs["dialect"]),
+            cast(DatabaseDialect, kwargs["dialect"]),
             str(kwargs["profile_context"]),
             previous_sql,
             feedback,
@@ -943,6 +1329,21 @@ class AgentRouterCodexModel:
     async def complete(self, model: str, prompt: str) -> str:
         content, _ = await self._complete_detailed(model, prompt)
         return content
+
+    async def complete_task(
+        self, model: str, prompt: str, task: str, *, json_mode: bool = False,
+    ) -> tuple[str, TokenUsage]:
+        """Use task-specific output limits on the HTTP transport."""
+        if self.executable is not None:
+            # The optional Codex CLI transport does not expose a per-request
+            # completion-token limit; the shared request budget still applies.
+            return await self._complete_with_codex_cli(model, prompt)
+        return await self._complete_over_http(
+            model, prompt,
+            schema_name="BoundedTaskOutput" if json_mode else None,
+            schema={"type": "object"} if json_mode else None,
+            max_tokens=_task_token_limit(task),
+        )
 
     async def complete_structured(
         self,
@@ -958,6 +1359,22 @@ class AgentRouterCodexModel:
         try:
             return await self._complete_over_http(
                 model, prompt, schema_name=schema_name, schema=schema
+            )
+        except ModelError as exc:
+            if not _structured_output_unsupported(exc):
+                raise
+            raise StructuredOutputUnsupported(str(exc)) from exc
+
+    async def complete_structured_task(
+        self, model: str, prompt: str, schema_name: str,
+        schema: dict[str, object], task: str,
+    ) -> tuple[str, TokenUsage]:
+        if self.executable is not None:
+            return await self._complete_with_codex_cli(model, prompt)
+        try:
+            return await self._complete_over_http(
+                model, prompt, schema_name=schema_name, schema=schema,
+                max_tokens=_task_token_limit(task),
             )
         except ModelError as exc:
             if not _structured_output_unsupported(exc):
@@ -994,6 +1411,7 @@ class AgentRouterCodexModel:
         *,
         schema_name: str | None = None,
         schema: dict[str, object] | None = None,
+        max_tokens: int | None = None,
     ) -> tuple[str, TokenUsage]:
         failures: list[str] = []
         async with httpx.AsyncClient(
@@ -1016,6 +1434,7 @@ class AgentRouterCodexModel:
                             _CODEX_PREAMBLE + prompt,
                             schema_name=schema_name,
                             schema=schema,
+                            max_tokens=max_tokens,
                         ),
                     )
                 except httpx.HTTPError as exc:
@@ -1120,6 +1539,43 @@ class AgentRouterModel:
     async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
         return await self._select(model).complete_detailed(model, prompt)
 
+    async def complete_task(
+        self, model: str, prompt: str, task: str, *, json_mode: bool = False,
+    ) -> tuple[str, TokenUsage]:
+        """Route task reasoning through the backend's best available JSON transport.
+
+        A backend implementing ``complete_task`` handles the call directly;
+        otherwise JSON mode rides the backend's native structured transport and
+        only a documented structured-output rejection degrades to plain text
+        (whose JSON validity is then checked by the caller).
+        """
+        selected = self._select(model)
+        task_completion = getattr(selected, "complete_task", None)
+        if callable(task_completion):
+            return cast(
+                "tuple[str, TokenUsage]",
+                await task_completion(model, prompt, task, json_mode=json_mode),
+            )
+        if json_mode:
+            structured = getattr(selected, "complete_structured", None)
+            if callable(structured):
+                try:
+                    return cast(
+                        "tuple[str, TokenUsage]",
+                        await structured(model, prompt, "BoundedTaskOutput", {"type": "object"}),
+                    )
+                except StructuredOutputUnsupported:
+                    pass  # JSON output unsupported on this backend; validate locally.
+        return await selected.complete_detailed(model, prompt)
+
+    def native_schema_supported(self, model: str, schema_name: str) -> bool:
+        """Delegate structured-output capability bookkeeping to the selected backend."""
+        selected = self._select(model)
+        capability = getattr(selected, "native_schema_supported", None)
+        if callable(capability):
+            return bool(capability(model, schema_name))
+        return callable(getattr(selected, "complete_structured", None))
+
     async def complete_structured(
         self,
         model: str,
@@ -1138,6 +1594,18 @@ class AgentRouterModel:
             )
         except ModelError:
             raise
+
+    async def complete_structured_task(
+        self, model: str, prompt: str, schema_name: str,
+        schema: dict[str, object], task: str,
+    ) -> tuple[str, TokenUsage]:
+        selected = self._select(model)
+        task_completion = getattr(selected, "complete_structured_task", None)
+        if callable(task_completion):
+            return cast(tuple[str, TokenUsage], await task_completion(
+                model, prompt, schema_name, schema, task
+            ))
+        return await self.complete_structured(model, prompt, schema_name, schema)
 
 
 class TrueSotaSQLModel(AgentRouterCodexModel):
@@ -1171,6 +1639,7 @@ class TrueSotaSQLModel(AgentRouterCodexModel):
     async def _complete_over_http(
         self, model: str, prompt: str, *, schema_name: str | None = None,
         schema: dict[str, object] | None = None,
+        max_tokens: int | None = None,
     ) -> tuple[str, TokenUsage]:
         try:
             async with httpx.AsyncClient(
@@ -1182,6 +1651,7 @@ class TrueSotaSQLModel(AgentRouterCodexModel):
                     json=_gpt_payload(
                         "/v1/responses", model, _CODEX_PREAMBLE + prompt,
                         schema_name=schema_name, schema=schema,
+                        max_tokens=max_tokens,
                     ),
                 )
         except httpx.HTTPError as exc:
@@ -1210,6 +1680,8 @@ class RoutingSQLModel:
         justdowork: JustDoWorkSQLModel,
         codecraft: CodeCraftSQLModel,
         true_sota: TrueSotaSQLModel | None = None,
+        openrouter: OpenRouterSQLModel | None = None,
+        ollama: OllamaCompleter | None = None,
     ) -> None:
         self.providers: dict[str, SQLModel] = {
             "agentrouter": agentrouter,
@@ -1219,6 +1691,10 @@ class RoutingSQLModel:
         }
         if true_sota is not None:
             self.providers["true_sota"] = true_sota
+        if openrouter is not None:
+            self.providers["openrouter"] = openrouter
+        if ollama is not None:
+            self.providers["ollama"] = ollama
 
     async def generate(
         self,
@@ -1229,7 +1705,7 @@ class RoutingSQLModel:
         evidence: str | None,
         schema: SchemaInfo,
         strategy: StrategyHints,
-        dialect: Literal["sqlite", "postgres"],
+        dialect: DatabaseDialect,
         profile_context: str,
         previous_sql: str | None,
         feedback: str | None,
@@ -1305,6 +1781,7 @@ def _gpt_payload(
     *,
     schema_name: str | None = None,
     schema: dict[str, object] | None = None,
+    max_tokens: int | None = None,
 ) -> dict[str, object]:
     """Build the body for whichever OpenAI-compatible wire format ``path`` speaks.
 
@@ -1315,18 +1792,35 @@ def _gpt_payload(
     """
     if path.endswith("/responses"):
         payload: dict[str, object] = {"model": model, "input": instruction, "store": False}
+        if max_tokens is not None:
+            payload["max_output_tokens"] = max_tokens
         if schema is not None:
             payload["text"] = {
                 "format": {"type": "json_schema", "name": schema_name, "schema": schema}
             }
         return payload
     payload = {"model": model, "messages": [{"role": "user", "content": instruction}]}
+    if max_tokens is not None:
+        payload["max_completion_tokens"] = max_tokens
     if schema is not None:
         payload["response_format"] = {
             "type": "json_schema",
             "json_schema": {"name": schema_name, "schema": schema, "strict": True},
         }
     return payload
+
+
+def _task_token_limit(task: str) -> int:
+    setting = {
+        "decision": "TEXT2SQL_TOP_DECISION_MAX_TOKENS",
+        "decision_repair": "TEXT2SQL_TOP_REPAIR_MAX_TOKENS",
+        "final_answer": "TEXT2SQL_TOP_ANSWER_MAX_TOKENS",
+        "context": "TEXT2SQL_CONTEXT_MAX_TOKENS",
+        "plotting": "TEXT2SQL_PLOTTING_MAX_TOKENS",
+        "dashboard": "TEXT2SQL_DASHBOARD_MAX_TOKENS",
+        "sql": "TEXT2SQL_SQL_MAX_TOKENS",
+    }.get(task, "TEXT2SQL_MAX_COMPLETION_TOKENS")
+    return max(1, int(os.environ.get(setting, "2048")))
 
 
 def _gpt_text(body: object) -> str:
@@ -1379,7 +1873,7 @@ def _prompt(
     evidence: str | None,
     schema: SchemaInfo,
     strategy: StrategyHints,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
     profile_context: str,
     previous_sql: str | None,
     feedback: str | None,
@@ -1503,7 +1997,7 @@ def _verified_or_fallback_context(
     profile_context: str,
     schema: SchemaInfo,
     question: str,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
 ) -> tuple[str, dict[str, object]]:
     """Use the authoritative context once; synthesize a compact fallback for direct callers."""
     try:
@@ -1538,7 +2032,14 @@ def _is_optimization_feedback(feedback: str | None) -> bool:
     return bool(feedback and feedback.startswith("Optimize the previously accepted SQL"))
 
 
-def _dialect_rules(dialect: Literal["sqlite", "postgres"]) -> str:
+def _dialect_rules(dialect: DatabaseDialect) -> str:
+    if dialect in {"mysql", "tsql", "snowflake", "bigquery"}:
+        return {
+            "mysql": "Use MySQL 8 SELECT syntax, backtick identifiers and MySQL date functions.",
+            "tsql": "Use SQL Server T-SQL, bracket identifiers and TOP/OFFSET FETCH, not LIMIT.",
+            "snowflake": "Use Snowflake SQL and verified schema-qualified identifiers.",
+            "bigquery": "Use BigQuery GoogleSQL, backticks and verified project/dataset names.",
+        }[dialect] + " Use only read-only queries and the supplied verified schema."
     if dialect == "postgres":
         return "Use PostgreSQL 15 syntax. Never use SQLite-only functions such as IIF or STRFTIME."
     return (
@@ -1551,7 +2052,7 @@ def _dialect_rules(dialect: Literal["sqlite", "postgres"]) -> str:
 
 def _optimization_prompt(
     accepted_sql: str,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
     dialect_rules: str,
     context_payload: dict[str, object],
     feedback: str | None,

@@ -1,7 +1,7 @@
 # V6 conversational bridge
 
-The newer top-layer assistant is described in
-[V6.2 conversational assistant](V6_2_CONVERSATIONAL_ASSISTANT.md). This document
+The current top-layer assistant is described in the
+[architecture specification](V6_4_SPEC.md). This document
 describes only the earlier deterministic metadata bridge, still available as a
 separate fallback when the assistant is disabled.
 

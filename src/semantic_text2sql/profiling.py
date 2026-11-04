@@ -11,7 +11,10 @@ from pathlib import Path
 from statistics import median
 from typing import Any, Literal
 
+from sqlglot import exp
+
 from semantic_text2sql.database import DatabaseRegistry
+from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.models import (
     ColumnInfo,
     ColumnProfile,
@@ -67,7 +70,7 @@ class ProfileStore:
 def profile_database(
     database: Database,
     db_id: str,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
     *,
     sample_limit: int = 10_000,
     top_limit: int = 10,
@@ -151,7 +154,7 @@ def profile_database(
 def _profile_relationships(
     database: Database,
     db_id: str,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
     relationships: list[ForeignKeyInfo],
 ) -> list[RelationshipProfile]:
     grouped: dict[tuple[str, str, str], list[ForeignKeyInfo]] = {}
@@ -195,7 +198,7 @@ def _profile_relationships(
 def _profile_relationship(
     database: Database,
     db_id: str,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
     parent_table: str,
     parent_columns: list[str],
     child_table: str,
@@ -240,7 +243,7 @@ def _profile_relationship(
 def _key_is_unique(
     database: Database,
     db_id: str,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
     table: str,
     columns: list[str],
 ) -> bool:
@@ -586,5 +589,4 @@ def _safe_value(value: str) -> str:
 
 
 def _quote(identifier: str, dialect: str) -> str:
-    del dialect
-    return '"' + identifier.replace('"', '""') + '"'
+    return exp.to_identifier(identifier, quoted=True).sql(dialect=dialect)

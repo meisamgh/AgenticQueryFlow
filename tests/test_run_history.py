@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import time
 from pathlib import Path
 from typing import Any
 
@@ -9,42 +8,7 @@ from fastapi.testclient import TestClient
 from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.api import create_app
 from semantic_text2sql.models import TokenUsage
-from semantic_text2sql.run_history import RunHistoryStore, RunRecord
-
-
-def test_session_memory_scopes_search_and_reset(tmp_path: Path) -> None:
-    store = RunHistoryStore(tmp_path / "memory.sqlite")
-
-    def save(run_id: str, session_id: str, db_id: str, question: str) -> None:
-        store.record(RunRecord(
-            run_id=run_id, session_id=session_id, db_id=db_id,
-            operation="NEW_QUERY", original_message=question,
-            resolved_question=question, provider="test", model="test",
-            accepted=True, execution_status="EXECUTED", sql="SELECT 1",
-            columns=["value"], row_count=1, created_at=time.time(),
-            response_payload={"message": "Verified result", "result_id": f"result_{run_id}"},
-        ))
-
-    save("first", "owner", "shop", "Total spending")
-    save("second", "owner", "shop", "Spending by month")
-    save("foreign", "other", "shop", "Secret result")
-    save("otherdb", "owner", "finance", "Finance result")
-    recent = store.recent_memory("owner", "shop")
-    assert [item.run_id for item in recent] == ["second", "first"]
-    assert all(item.result_id and item.sql_available for item in recent)
-    assert [item.run_id for item in store.search_memory(
-        "owner", "shop", "Compare with the first query"
-    )] == ["first"]
-    assert store.search_memory("owner", "shop", "Unrelated inventory") == []
-    assert store.recent_memory("owner", "finance")[0].run_id == "otherdb"
-    assert not store.recent_memory("unknown", "shop")
-    store.mark_memory_reset("owner")
-    assert store.recent_memory("owner", "shop") == []
-    assert store.search_memory("owner", "shop", "first query") == []
-    assert store.get("first", "owner") is not None  # Audit history remains.
-    reopened = RunHistoryStore(tmp_path / "memory.sqlite")
-    assert reopened.recent_memory("owner", "shop") == []
-    assert reopened.recent_memory("other", "shop")[0].run_id == "foreign"
+from semantic_text2sql.run_history import RunHistoryStore
 
 
 class CountingModel:
@@ -58,6 +22,34 @@ class CountingModel:
             1,
             TokenUsage(input_tokens=10, output_tokens=5),
         )
+
+
+def test_historical_inspection_api_is_read_only_and_reset_scoped(
+    registry, monkeypatch, tmp_path: Path,
+) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
+    monkeypatch.setenv("TEXT2SQL_GLOSSARY_ROOT", str(tmp_path / "glossaries"))
+    monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
+    model = CountingModel()
+    client = TestClient(
+        create_app(TextToSQLAgent(registry, model), run_history=RunHistoryStore(None))
+    )
+    run = client.post("/api/chat", json={
+        "session_id": "owner", "db_id": "shop", "model": "test",
+        "message": "Count orders per customer", "execute": True,
+    }).json()
+    before = model.calls
+    request = {"session_id": "owner", "db_id": "shop", "result_id": run["run_id"],
+               "offset": 0, "page_size": 5}
+    inspected = client.post("/api/results/inspect", json=request)
+    assert inspected.status_code == 200
+    assert inspected.json()["complete"]
+    assert inspected.json()["result_id"] == run["result_id"]
+    for invalid in [{"session_id": "other"}, {"db_id": "other"}]:
+        assert client.post("/api/results/inspect", json={**request, **invalid}).status_code == 404
+    assert model.calls == before
+    client.post("/api/conversations/owner/reset")
+    assert client.post("/api/results/inspect", json=request).status_code == 404
 
 
 def test_reopen_restore_branch_and_rerun_survive_api_restart(

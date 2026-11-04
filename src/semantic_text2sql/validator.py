@@ -7,8 +7,11 @@ from typing import Literal
 
 import sqlglot
 from sqlglot import exp
-from sqlglot.errors import ParseError, TokenError
+from sqlglot.errors import OptimizeError, ParseError, TokenError
+from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
+from sqlglot.optimizer.scope import Scope, traverse_scope
 
+from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.models import (
     SchemaInfo,
     SemanticContract,
@@ -43,7 +46,7 @@ def clean_model_sql(value: str) -> str:
     return stripped.strip().removesuffix(";").strip()
 
 
-def normalize_sql(value: str, *, dialect: Literal["sqlite", "postgres"] = "sqlite") -> str:
+def normalize_sql(value: str, *, dialect: DatabaseDialect = "sqlite") -> str:
     try:
         return sqlglot.parse_one(value, read=dialect).sql(dialect=dialect, pretty=False)
     except (ParseError, TokenError):
@@ -54,7 +57,7 @@ def validate_sql(
     sql: str,
     schema: SchemaInfo,
     *,
-    dialect: Literal["sqlite", "postgres"] = "sqlite",
+    dialect: DatabaseDialect = "sqlite",
     allowed_tables: set[str] | None = None,
     allowed_columns: dict[str, set[str]] | None = None,
 ) -> ValidationResult:
@@ -77,15 +80,18 @@ def validate_sql(
     if any(isinstance(node, exp.Into) for node in root.walk()):
         return _failure("SQL_SELECT_INTO_BLOCKED", "SELECT INTO is blocked.", available)
 
-    cte_names = {cte.alias_or_name.casefold() for cte in root.find_all(exp.CTE)}
-    physical_tables = [
-        table.name
-        for table in root.find_all(exp.Table)
-        if table.name and table.name.casefold() not in cte_names
-    ]
+    try:
+        physical_refs = physical_table_references(root, dialect=dialect)
+    except (OptimizeError, ValueError) as exc:
+        return _failure(
+            "SQL_SCOPE_UNRESOLVED", f"SQL scopes could not be resolved: {exc}", available
+        )
+    physical_tables = [table.name for table in physical_refs if table.name]
     if allowed_tables is not None:
+        authorized = {name.casefold() for name in allowed_tables}
         unauthorized = sorted(
-            {table for table in physical_tables if table.casefold() not in allowed_tables}
+            {table.sql(dialect=dialect) for table in physical_refs
+             if not table_is_allowlisted(table, authorized)}
         )
         if unauthorized:
             return _failure(
@@ -104,15 +110,19 @@ def validate_sql(
         }
         aliases = {
             (table.alias_or_name or table.name).casefold(): table.name.casefold()
-            for table in root.find_all(exp.Table)
-            if table.name and table.name.casefold() not in cte_names
+            for table in physical_refs if table.name
+        }
+        derived_columns = {
+            id(column) for scope in traverse_scope(root) for column in scope.columns
+            if column.table and not column.db and not column.catalog
+            and isinstance(scope.sources.get(column.table), Scope)
         }
         select_aliases = {
             alias.alias.casefold() for alias in root.find_all(exp.Alias) if alias.alias
         }
         unauthorized_columns: list[str] = []
         for column in root.find_all(exp.Column):
-            if not column.name or column.table.casefold() in cte_names:
+            if not column.name or id(column) in derived_columns:
                 continue
             if column.table:
                 owner = aliases.get(column.table.casefold(), column.table.casefold())
@@ -141,12 +151,46 @@ def validate_sql(
     )
 
 
+def physical_table_references(
+    root: exp.Expression, *, dialect: DatabaseDialect = "sqlite",
+) -> list[exp.Table]:
+    """Actual AST table nodes, excluding only lexically visible unqualified CTEs.
+
+    Resolve a copy using engine case rules (including quoted names), returning
+    original nodes without rewriting SQL. Qualified identifiers can never bind
+    a CTE. All table nodes include SEMI/ANTI joins, which selected_sources omits.
+    """
+    resolved = normalize_identifiers(root.copy(), dialect=dialect)
+    original_tables = list(root.find_all(exp.Table))
+    resolved_tables = list(resolved.find_all(exp.Table))
+    if len(original_tables) != len(resolved_tables):
+        raise ValueError("Identifier normalization changed the table-reference structure")
+    cte_references = {
+        id(table) for scope in traverse_scope(resolved) for table in scope.tables
+        if not table.db and not table.catalog
+        and isinstance(table.this, exp.Identifier)
+        and isinstance(scope.cte_sources.get(table.name), Scope)
+    }
+    return [original for original, table in zip(original_tables, resolved_tables, strict=True)
+            if id(table) not in cte_references]
+
+
+def table_is_allowlisted(table: exp.Table, allowed: set[str]) -> bool:
+    """Bare allowlist entries authorize names; qualified entries require identity.
+
+    Engine adapters must independently restrict schemas/catalogs when their
+    configuration uses bare table names.
+    """
+    full_name = ".".join(part.name.casefold() for part in table.parts)
+    return table.name.casefold() in allowed or full_name in allowed
+
+
 def validate_sql_semantics(
     sql: str,
     contract: SemanticContract,
     verified_context: dict[str, object] | None = None,
     *,
-    dialect: Literal["sqlite", "postgres"] = "sqlite",
+    dialect: DatabaseDialect = "sqlite",
 ) -> list[SemanticFinding]:
     """Reject only contract mismatches provable from the SQL AST.
 
@@ -206,7 +250,7 @@ def validate_sql_semantics(
     findings.extend(_measure_findings(root, contract, verified_context))
     findings.extend(_approved_metric_findings(root, contract, dialect))
     findings.extend(_filter_findings(root, contract, verified_context))
-    findings.extend(_fanout_findings(root, verified_context))
+    findings.extend(_fanout_findings(root, verified_context, dialect=dialect))
     findings.extend(_ranking_findings(root, contract))
     if contract.requires_distinct and not any(root.find_all(exp.Distinct)):
         findings.append(SemanticFinding(
@@ -218,7 +262,7 @@ def validate_sql_semantics(
 
 def _approved_metric_findings(
     root: exp.Expression, contract: SemanticContract,
-    dialect: Literal["sqlite", "postgres"],
+    dialect: DatabaseDialect,
 ) -> list[SemanticFinding]:
     findings: list[SemanticFinding] = []
     aliases = {
@@ -261,12 +305,21 @@ def _approved_metric_findings(
                           "its source relation is not proven."),
             ))
         else:
+            projection = (root.expressions[0].unalias()
+                          if isinstance(root, exp.Select) and len(root.expressions) == 1 else None)
+            wrong_direct_function = (
+                not complex_lineage and isinstance(projection, exp.AggFunc)
+                and type(projection) is not type(formula)
+                and isinstance(projection.this, exp.Column)
+                and projection.this.name.casefold() == required_column
+            )
             direct_wrong_input = bool(list(root.find_all(type(formula)))) and all(
                 isinstance(node.this, exp.Column)
                 for node in root.find_all(type(formula))
             )
             findings.append(SemanticFinding(
-                status="FAIL" if direct_wrong_input and not complex_lineage else "UNRESOLVED",
+                status="FAIL" if wrong_direct_function or (
+                    direct_wrong_input and not complex_lineage) else "UNRESOLVED",
                 code="APPROVED_METRIC_INPUT_MISMATCH",
                 evidence=f"No direct {type(formula).__name__.upper()} on "
                          f"{metric.source_relation}.{required_column} implements {metric.id}.",
@@ -482,17 +535,16 @@ def _operator_name(node: exp.Expression) -> str:
 
 
 def _fanout_findings(
-    root: exp.Expression, verified_context: dict[str, object] | None
+    root: exp.Expression, verified_context: dict[str, object] | None,
+    *, dialect: DatabaseDialect = "sqlite",
 ) -> list[SemanticFinding]:
     if not verified_context or not any(root.find_all(exp.Sum, exp.Avg)):
         return []
     relationships = verified_context.get("relationships")
     if not isinstance(relationships, list):
         return []
-    cte_names = {cte.alias_or_name.casefold() for cte in root.find_all(exp.CTE)}
     physical = {
-        table.name.casefold() for table in root.find_all(exp.Table)
-        if table.name.casefold() not in cte_names
+        table.name.casefold() for table in physical_table_references(root, dialect=dialect)
     }
     for relationship in relationships:
         if not isinstance(relationship, dict):
@@ -500,13 +552,13 @@ def _fanout_findings(
         left = str(relationship.get("left") or "").split(".")[0].casefold()
         right = str(relationship.get("right") or "").split(".")[0].casefold()
         if (left in physical and right in physical and left != right
-                and relationship.get("cardinality") == "MANY_TO_MANY"):
+                and (relationship.get("cardinality") == "MANY_TO_MANY"
+                     or relationship.get("fanout_risk") is True)):
             return [SemanticFinding(
                 status="UNRESOLVED",
                 code="FACT_JOIN_FANOUT_RISK",
-                evidence=(f"Aggregating after a many-to-many join between "
-                          f"{left} and {right} may multiply measures; a data-backed "
-                          "cardinality check is needed before rejection."),
+                evidence=(f"Aggregating across {left} and {right} may multiply measures; "
+                          "the measure grain and join keys need a data-backed check."),
             )]
     return []
 
@@ -541,8 +593,12 @@ def _ranking_findings(root: exp.Expression, contract: SemanticContract) -> list[
             if isinstance(outer_order, exp.Order) and outer_order.expressions else None
         )
         key = first.this if isinstance(first, exp.Ordered) else None
-        expected_name = contract.ranked_metric.split(".")[-1].casefold()
+        expected_name = re.sub(
+            r"[\s_-]+", "", contract.ranked_metric.split(".")[-1].casefold()
+        )
         actual_name = key.name.casefold() if isinstance(key, exp.Column) else None
+        if actual_name is not None:
+            actual_name = re.sub(r"[\s_-]+", "", actual_name)
         if actual_name == expected_name:
             findings.append(SemanticFinding(
                 status="PASS", code="RANKED_METRIC_MATCH",
@@ -550,7 +606,7 @@ def _ranking_findings(root: exp.Expression, contract: SemanticContract) -> list[
             ))
         else:
             projected_names = {
-                expression.alias_or_name.casefold()
+                re.sub(r"[\s_-]+", "", expression.alias_or_name.casefold())
                 for expression in root.expressions if expression.alias_or_name
             }
             uncertain = (

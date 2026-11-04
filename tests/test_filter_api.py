@@ -73,10 +73,34 @@ def test_filter_values_returns_bounded_distinct_values(
     assert body["values"] == ["Germany", "Italy"]
     assert body["more_available"] is False
     assert body["cached"] is False
+    assert body["complete_domain"] is True
+    assert body["provenance"] == "LIVE_BOUNDED_QUERY"
     second = client.get("/api/databases/shop/filter-values", params={"table": "customers",
                                                                      "column": "country"})
     assert second.status_code == 200
     assert second.json()["cached"] is True
+
+
+def test_exact_category_verification_and_cache_expiration(
+    registry, monkeypatch, tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    import semantic_text2sql.api as api
+
+    now = [100.0]
+    monkeypatch.setattr(api, "monotonic", lambda: now[0])
+    client = _client(registry, monkeypatch, tmp_path)
+    endpoint = "/api/databases/shop/filter-values"
+    params = {"table": "customers", "column": "country", "search": "germany", "exact": True}
+    first = client.get(endpoint, params=params).json()
+    assert first["values"] == ["Germany"]
+    assert not first["ambiguous"]
+    assert client.get(endpoint, params=params).json()["cached"]
+    now[0] += 61
+    assert not client.get(endpoint, params=params).json()["cached"]
+    params["search"] = "Germ"
+    assert client.get(endpoint, params=params).json()["values"] == []
+    params["exact"] = False
+    assert client.get(endpoint, params=params).json()["values"] == ["Germany"]
 
 
 def test_filter_search_treats_quotes_and_wildcards_as_literal_text(

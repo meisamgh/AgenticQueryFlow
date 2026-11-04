@@ -1,0 +1,3144 @@
+{
+  "scope": "PHASE_0_ONLY; no runtime changes or catalog authoring",
+  "split": {
+    "method": "sha256 of queryflow-phase0-2026-11-04:<case ID>; first ten dev, remainder heldout",
+    "dev_ids": [
+      1471,
+      1472,
+      1479,
+      1480,
+      1482,
+      1498,
+      1506,
+      1521,
+      1531,
+      1533
+    ],
+    "heldout_ids": [
+      1473,
+      1476,
+      1481,
+      1490,
+      1500,
+      1501,
+      1509,
+      1525,
+      1526,
+      1529
+    ],
+    "catalog_authoring_case_ids": [],
+    "warning": "Prospective split only. All 20 gold queries were inspected before this amendment; 16 questions overlap the historical corpus. This is not a pristine holdout. No debit-card catalog has been authored."
+  },
+  "paired": {
+    "all": {
+      "n": 20,
+      "both_correct": 5,
+      "only_retrieval": 1,
+      "only_model1": 1,
+      "neither": 13,
+      "discordant_pairs": 2,
+      "mcnemar_exact_two_sided_p": 1.0,
+      "interpretation": "No evidence of a difference"
+    },
+    "dev": {
+      "n": 10,
+      "both_correct": 3,
+      "only_retrieval": 1,
+      "only_model1": 1,
+      "neither": 5,
+      "discordant_pairs": 2,
+      "mcnemar_exact_two_sided_p": 1.0,
+      "interpretation": "No evidence of a difference"
+    },
+    "heldout": {
+      "n": 10,
+      "both_correct": 2,
+      "only_retrieval": 0,
+      "only_model1": 0,
+      "neither": 8,
+      "discordant_pairs": 0,
+      "mcnemar_exact_two_sided_p": 1.0,
+      "interpretation": "No evidence of a difference"
+    }
+  },
+  "join_structural_agreement": {
+    "retrieval": {
+      "EXACT_MATCH": 14,
+      "DIFFERENT": 6,
+      "UNRESOLVED": 0
+    },
+    "model1": {
+      "EXACT_MATCH": 11,
+      "DIFFERENT": 8,
+      "UNRESOLVED": 1
+    }
+  },
+  "join_structural_paired": {
+    "all": {
+      "n": 19,
+      "both_correct": 11,
+      "only_retrieval": 3,
+      "only_model1": 0,
+      "neither": 5,
+      "discordant_pairs": 3,
+      "mcnemar_exact_two_sided_p": 0.25,
+      "interpretation": "No evidence of a difference",
+      "unresolved_pairs": 1
+    },
+    "dev": {
+      "n": 10,
+      "both_correct": 7,
+      "only_retrieval": 2,
+      "only_model1": 0,
+      "neither": 1,
+      "discordant_pairs": 2,
+      "mcnemar_exact_two_sided_p": 0.5,
+      "interpretation": "No evidence of a difference",
+      "unresolved_pairs": 0
+    },
+    "heldout": {
+      "n": 9,
+      "both_correct": 4,
+      "only_retrieval": 1,
+      "only_model1": 0,
+      "neither": 4,
+      "discordant_pairs": 1,
+      "mcnemar_exact_two_sided_p": 1.0,
+      "interpretation": "No evidence of a difference",
+      "unresolved_pairs": 1
+    }
+  },
+  "historical_latency": {
+    "retrieval": {
+      "p50_ms": 12399.0,
+      "p95_ms_nearest_rank": 31615,
+      "status": "MEASURED_FROM_SAVED_ARTIFACT_NOT_RERUN"
+    },
+    "model1": {
+      "p50_ms": 21279.0,
+      "p95_ms_nearest_rank": 37113,
+      "status": "MEASURED_FROM_SAVED_ARTIFACT_NOT_RERUN"
+    }
+  },
+  "history": {
+    "records": 399,
+    "databases": 11,
+    "fields": [
+      "dataset_index",
+      "db_id",
+      "question",
+      "sql",
+      "success"
+    ],
+    "question_overlap_ids": [
+      1482,
+      1476,
+      1531,
+      1533,
+      1472,
+      1473,
+      1480,
+      1490,
+      1501,
+      1506,
+      1509,
+      1521,
+      1529,
+      1498,
+      1500,
+      1525
+    ],
+    "heldout_overlap_ids": [
+      1473,
+      1476,
+      1490,
+      1500,
+      1501,
+      1509,
+      1525,
+      1529
+    ],
+    "paired_predictions_available": false,
+    "note": "SQL labels are candidate references, not execution/business verification; success is set true by the builder."
+  },
+  "false_repairs": {
+    "status": "NOT_RUN",
+    "count": null,
+    "reason": "Saved artifact has no recovery traces or repair outcomes"
+  },
+  "not_run": {
+    "business_correctness": "Reference definitions need adjudication; row agreement is not business truth",
+    "current_latency_tokens_recovery": "Saved SQL was re-executed, not regenerated; a new paired model/recovery run is needed",
+    "provider_credentials_validity": "No provider request attempted at the Phase 0 gate",
+    "graph_vs_baseline_accuracy": "No paired graph-on predictions available"
+  },
+  "taxonomy": {
+    "joins": {
+      "case_ids": [
+        1500,
+        1501,
+        1526,
+        1529,
+        1533
+      ],
+      "status": "MEASURED_SAVED_SQL_DIFFERENCE",
+      "note": "Reference divergence, not a proven causal pipeline-stage failure",
+      "structural_difference_case_ids": [
+        1481,
+        1526,
+        1531,
+        1533,
+        1480,
+        1501,
+        1529,
+        1500,
+        1525
+      ],
+      "unresolved_case_ids": [
+        1481
+      ]
+    },
+    "metric_semantics": {
+      "case_ids": [
+        1473,
+        1481,
+        1482,
+        1490,
+        1525,
+        1526,
+        1529,
+        1531,
+        1533
+      ],
+      "status": "MEASURED_SAVED_SQL_DIFFERENCE",
+      "note": "Reference divergence, not a proven causal pipeline-stage failure"
+    },
+    "filters_time": {
+      "case_ids": [
+        1480,
+        1482,
+        1500,
+        1501,
+        1525,
+        1526,
+        1529
+      ],
+      "status": "MEASURED_SAVED_SQL_DIFFERENCE",
+      "note": "Reference divergence, not a proven causal pipeline-stage failure"
+    },
+    "sql_generation": {
+      "case_ids": [
+        1472,
+        1479,
+        1480,
+        1482,
+        1498,
+        1500,
+        1531,
+        1533
+      ],
+      "status": "MEASURED_SAVED_SQL_DIFFERENCE",
+      "note": "Reference divergence, not a proven causal pipeline-stage failure"
+    },
+    "retrieval": {
+      "confirmed_case_ids": [],
+      "unresolved_case_ids": [
+        1472,
+        1473,
+        1479,
+        1480,
+        1481,
+        1482,
+        1490,
+        1498,
+        1500,
+        1501,
+        1525,
+        1526,
+        1529,
+        1531,
+        1533
+      ],
+      "status": "UNRESOLVED",
+      "reason": "Selected counts are saved, not retrieved identifiers/prompts"
+    },
+    "validation": {
+      "case_ids": [
+        1472,
+        1473,
+        1479,
+        1480,
+        1481,
+        1482,
+        1490,
+        1498,
+        1500,
+        1501,
+        1525,
+        1526,
+        1529,
+        1531,
+        1533
+      ],
+      "status": "MEASURED_ACCEPTANCE_REFERENCE_GAP",
+      "accepted_reference_mismatches": 28,
+      "note": "Not evidence of failed SQL safety; reference validity/output shape confound grading"
+    },
+    "recovery": {
+      "confirmed_case_ids": [],
+      "unresolved_case_ids": [
+        1472,
+        1473,
+        1479,
+        1480,
+        1481,
+        1482,
+        1490,
+        1498,
+        1500,
+        1501,
+        1525,
+        1526,
+        1529,
+        1531,
+        1533
+      ],
+      "status": "NOT_RUN",
+      "reason": "No recovery traces or repaired SQL retained"
+    }
+  },
+  "cases": [
+    {
+      "question_id": 1481,
+      "split": "heldout",
+      "historical_corpus_question_overlap": false,
+      "assessment": {
+        "categories": [
+          "metric_semantics"
+        ],
+        "finding": "Reference selects rows at the global minimum Consumption, then divides segment sums by a shared row count. Predictions select segment minima of annual customer aggregates. These are different minimum scopes and denominators.",
+        "business_verdict": "UNRESOLVED: least consumption and annual average need owner-defined grain"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": true,
+            "on_predicates_equal": false,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "'KAM' = customers.segment",
+                "'LAM' = customers.segment",
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN",
+                "INNER:JOIN",
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "UNRESOLVED",
+            "joined_tables_equal": true,
+            "on_predicates_equal": false,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid",
+                "customers.segment = customers.segment",
+                "unresolved:a.annual_consumption = unresolved:m.minimum_annual_consumption"
+              ],
+              "join_kinds": [
+                "INNER:JOIN",
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": [
+                "unresolved:a.annual_consumption = unresolved:m.minimum_annual_consumption"
+              ]
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1482,
+      "split": "dev",
+      "historical_corpus_question_overlap": true,
+      "assessment": {
+        "categories": [
+          "metric_semantics",
+          "filters_time",
+          "sql_generation"
+        ],
+        "finding": "Reference returns three scalar segment changes and has no EUR predicate. Both predictions filter EUR and return segment-ranked rows. Output contract and population differ.",
+        "business_verdict": "REFERENCE_QUESTION_CONFLICT: question requests EUR and biggest/lowest segments; reference does not implement those literally"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:CROSS",
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1526,
+      "split": "heldout",
+      "historical_corpus_question_overlap": false,
+      "assessment": {
+        "categories": [
+          "metric_semantics",
+          "filters_time",
+          "joins"
+        ],
+        "finding": "Question says paid 634.8. Predictions filter Amount=634.8; reference filters Price=1513.12 and joins gasstations. Money-versus-quantity and literal/population differences coexist.",
+        "business_verdict": "REFERENCE_QUESTION_CONFLICT: reference amount differs from the question; do not train a metric to reproduce it"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": false,
+            "on_predicates_equal": false,
+            "physical_tables_equal": false,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": false,
+            "on_predicates_equal": false,
+            "physical_tables_equal": false,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1476,
+      "split": "heldout",
+      "historical_corpus_question_overlap": true,
+      "assessment": null,
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": true,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": true,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1531,
+      "split": "dev",
+      "historical_corpus_question_overlap": true,
+      "assessment": {
+        "categories": [
+          "metric_semantics",
+          "sql_generation"
+        ],
+        "finding": "Reference chooses CustomerID by highest single yearmonth Consumption and SUMs transaction unit prices. Predictions rank total transaction spending and AVG unit prices; retrieval also returns total spending.",
+        "business_verdict": "REFERENCE_QUESTION_CONFLICT: top spending and average differ from the reference selector and SUM"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": false,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "customers.customerid = transactions_1k.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "customers",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "customers.customerid = transactions_1k.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": false,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "customers.customerid = transactions_1k.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "customers",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "customers.customerid = transactions_1k.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1533,
+      "split": "dev",
+      "historical_corpus_question_overlap": true,
+      "assessment": {
+        "categories": [
+          "metric_semantics",
+          "joins",
+          "sql_generation"
+        ],
+        "finding": "Reference preserves transaction-to-month join multiplicity and returns Consumption only. Predictions deduplicate qualifying customers or use EXISTS and return customer IDs; retrieval SUMs consumption by customer.",
+        "business_verdict": "UNRESOLVED: customer-versus-transaction multiplicity and output contract need adjudication"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "transactions_1k.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "transactions_1k.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": false,
+            "on_predicates_equal": false,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "transactions_1k.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1472,
+      "split": "dev",
+      "historical_corpus_question_overlap": true,
+      "assessment": {
+        "categories": [
+          "sql_generation"
+        ],
+        "finding": "Both predictions retain the customer/annual SUM/filter/ranking logic but add total consumption to the result and a deterministic CustomerID tie-breaker. Reference returns CustomerID only.",
+        "business_verdict": "OUTPUT_SHAPE_OR_TIE_POLICY: extra columns alone can fail the stored comparator; IDs cannot be rechecked without the database"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1473,
+      "split": "heldout",
+      "historical_corpus_question_overlap": true,
+      "assessment": {
+        "categories": [
+          "metric_semantics"
+        ],
+        "finding": "Reference computes AVG(Consumption)/12. Retrieval averages summed month totals; Model 1 averages customer-month totals. Population, denominator and aggregation grain differ.",
+        "business_verdict": "UNRESOLVED: average monthly consumption requires an explicit metric definition"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1479,
+      "split": "dev",
+      "historical_corpus_question_overlap": false,
+      "assessment": {
+        "categories": [
+          "sql_generation"
+        ],
+        "finding": "Only Model 1 fails: it adds total consumption to the selected year. Retrieval returns the year alone, matching the reference shape.",
+        "business_verdict": "OUTPUT_SHAPE: no evidence that Model 1 chose the wrong year"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": true,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1480,
+      "split": "dev",
+      "historical_corpus_question_overlap": true,
+      "assessment": {
+        "categories": [
+          "sql_generation",
+          "filters_time"
+        ],
+        "finding": "Reference returns two-character month; predictions return YYYYMM plus total consumption. Model 1 uses EXISTS rather than the reference JOIN.",
+        "business_verdict": "OUTPUT_SHAPE_AND_FORMAT: date representation is different; do not infer a bad relationship from EXISTS"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": false,
+            "on_predicates_equal": false,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1490,
+      "split": "heldout",
+      "historical_corpus_question_overlap": true,
+      "assessment": {
+        "categories": [
+          "metric_semantics"
+        ],
+        "finding": "Reference percentage counts joined customer-month rows. Retrieval counts customers above a summed-consumption threshold, including zero-filled LEFT JOIN rows; Model 1 counts distinct customers with any qualifying month.",
+        "business_verdict": "UNRESOLVED: monthly rows, customer totals and any-month qualification are different metrics"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "LEFT:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "customers.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1501,
+      "split": "heldout",
+      "historical_corpus_question_overlap": true,
+      "assessment": {
+        "categories": [
+          "filters_time",
+          "joins"
+        ],
+        "finding": "Reference constrains yearmonth.Date after joining by CustomerID. Predictions constrain the actual transaction Date in June 2013. Missing yearmonth is observable, but selected-table counts do not prove retrieval omitted it.",
+        "business_verdict": "REFERENCE_QUESTION_CONFLICT: consumption-period membership is not the same as transaction event time"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": false,
+            "on_predicates_equal": false,
+            "physical_tables_equal": false,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid",
+                "transactions_1k.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER",
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": false,
+            "on_predicates_equal": false,
+            "physical_tables_equal": false,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid",
+                "transactions_1k.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER",
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1506,
+      "split": "dev",
+      "historical_corpus_question_overlap": true,
+      "assessment": null,
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": true,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "products",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "products",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid",
+                "products.productid = transactions_1k.productid"
+              ],
+              "join_kinds": [
+                "INNER:INNER",
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "products",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "products",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid",
+                "products.productid = transactions_1k.productid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN",
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": true,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "products",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "products",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid",
+                "products.productid = transactions_1k.productid"
+              ],
+              "join_kinds": [
+                "INNER:INNER",
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "products",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "products",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid",
+                "products.productid = transactions_1k.productid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN",
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1509,
+      "split": "heldout",
+      "historical_corpus_question_overlap": true,
+      "assessment": null,
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": true,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": true,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1521,
+      "split": "dev",
+      "historical_corpus_question_overlap": true,
+      "assessment": null,
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": true,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": true,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1529,
+      "split": "heldout",
+      "historical_corpus_question_overlap": true,
+      "assessment": {
+        "categories": [
+          "filters_time",
+          "joins",
+          "metric_semantics"
+        ],
+        "finding": "Reference joins transactions to every yearmonth for the customer, SUMs Price at that multiplied grain and gates January using yearmonth.Date. Predictions use transaction dates and avoid that fanout.",
+        "business_verdict": "REFERENCE_FANOUT_RISK: cannot label avoidance of multiplication a business error without adjudication"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": false,
+            "on_predicates_equal": false,
+            "physical_tables_equal": false,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid",
+                "transactions_1k.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER",
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": false,
+            "on_predicates_equal": false,
+            "physical_tables_equal": false,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "gasstations",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "gasstations.gasstationid = transactions_1k.gasstationid",
+                "transactions_1k.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER",
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "gasstations",
+                "transactions_1k"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1471,
+      "split": "dev",
+      "historical_corpus_question_overlap": false,
+      "assessment": null,
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": true,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": true,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1498,
+      "split": "dev",
+      "historical_corpus_question_overlap": true,
+      "assessment": {
+        "categories": [
+          "sql_generation"
+        ],
+        "finding": "Only retrieval fails: it returns month plus monthly consumption, whereas reference and Model 1 return the maximum monthly total alone.",
+        "business_verdict": "OUTPUT_SHAPE: extra month column is sufficient to break exact result-shape comparison"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "yearmonth"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "yearmonth"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": true,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "yearmonth"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "yearmonth"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1500,
+      "split": "heldout",
+      "historical_corpus_question_overlap": true,
+      "assessment": {
+        "categories": [
+          "filters_time",
+          "joins",
+          "sql_generation"
+        ],
+        "finding": "Reference filters yearmonth.Date, joins by customer and retains descriptions with join multiplicity. Predictions filter transaction dates and use DISTINCT descriptions.",
+        "business_verdict": "REFERENCE_TIME_AND_GRAIN_RISK: event time and duplicate policy require adjudication"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": false,
+            "on_predicates_equal": false,
+            "physical_tables_equal": false,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "products",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "products",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "products.productid = transactions_1k.productid",
+                "transactions_1k.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER",
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "products",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "products",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "products.productid = transactions_1k.productid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": false,
+            "on_predicates_equal": false,
+            "physical_tables_equal": false,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "products",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "joined_tables": [
+                "products",
+                "transactions_1k",
+                "yearmonth"
+              ],
+              "on_predicates": [
+                "products.productid = transactions_1k.productid",
+                "transactions_1k.customerid = yearmonth.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER",
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "products",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "products",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "products.productid = transactions_1k.productid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    },
+    {
+      "question_id": 1525,
+      "split": "heldout",
+      "historical_corpus_question_overlap": true,
+      "assessment": {
+        "categories": [
+          "metric_semantics",
+          "filters_time"
+        ],
+        "finding": "Retrieval counts distinct customers on the requested transaction day; reference counts transaction-weighted customer rows. Model 1 substitutes August yearmonth membership for the explicitly requested day.",
+        "business_verdict": "CONFIRMED_MODEL1_DAY_FILTER_LOSS; retrieval-versus-reference denominator still needs adjudication"
+      },
+      "modes": {
+        "retrieval": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "EXACT_MATCH",
+            "joined_tables_equal": true,
+            "on_predicates_equal": true,
+            "physical_tables_equal": true,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "customers",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "customers.customerid = transactions_1k.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "customers",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "customers.customerid = transactions_1k.customerid"
+              ],
+              "join_kinds": [
+                "INNER:JOIN"
+              ],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        },
+        "model1": {
+          "stored_reference_match": false,
+          "stored_accepted": true,
+          "join_comparison": {
+            "status": "DIFFERENT",
+            "joined_tables_equal": false,
+            "on_predicates_equal": false,
+            "physical_tables_equal": false,
+            "gold": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "transactions_1k"
+              ],
+              "joined_tables": [
+                "customers",
+                "transactions_1k"
+              ],
+              "on_predicates": [
+                "customers.customerid = transactions_1k.customerid"
+              ],
+              "join_kinds": [
+                "INNER:INNER"
+              ],
+              "unresolved_predicates": []
+            },
+            "predicted": {
+              "parse_status": "PARSED",
+              "physical_tables": [
+                "customers",
+                "yearmonth"
+              ],
+              "joined_tables": [],
+              "on_predicates": [],
+              "join_kinds": [],
+              "unresolved_predicates": []
+            },
+            "meaning": "Structural agreement only; EXISTS/CTE rewrites can be equivalent."
+          }
+        }
+      }
+    }
+  ],
+  "source_sha256": "e5d8f268aab4f4fad87662e9d3da454a87522ea73ecedf1173b4e04ea0962be6",
+  "split_sha256": "cb2ebce4554902b93e242e903091afb827e892d91ebab571c1514b52240a292a",
+  "annotations_sha256": "e22182c8ee80610258ffba7bacad2b96835cb6bf5e644895ea024bee50e14082",
+  "saved_sql_execution_recheck": {
+    "status": "MEASURED",
+    "model_calls": 0,
+    "sql_execution_calls": 60,
+    "metadata_inspections": 1,
+    "row_limit": 500,
+    "query_timeout_seconds": 5,
+    "raw_rows_persisted": false,
+    "cases": [
+      {
+        "question_id": 1481,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 140.41062502656132
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 124.49524999829009
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 54.80795801850036
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1482,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 69.13679203717038
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 2,
+            "execution_ms": 30.277749989181757
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 2,
+            "execution_ms": 18.178165948484093
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1526,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 7.795249985065311
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 0,
+            "execution_ms": 55.19437504699454
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 0,
+            "execution_ms": 21.89720800379291
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1476,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 22.406875039450824
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 38.812166021671146
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 35.13604198815301
+          }
+        },
+        "reference_match": {
+          "retrieval": true,
+          "model1": true
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": true,
+          "model1": true
+        }
+      },
+      {
+        "question_id": 1531,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 12.650709017179906
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 0.5799579666927457
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 0.4356250283308327
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1533,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 10,
+            "execution_ms": 0.18508400535210967
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 9,
+            "execution_ms": 17.214166990015656
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 9,
+            "execution_ms": 417.899124964606
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1472,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 19.403290993068367
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 19.404958002269268
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 19.375542004127055
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1473,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 20.552125002723187
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 62.37612495897338
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 74.46950004668906
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1479,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 76.58341701608151
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 89.64424999430776
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 90.02537501510233
+          }
+        },
+        "reference_match": {
+          "retrieval": true,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": true,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1480,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 53.4063340164721
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 64.12783300038427
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 64.78245899779722
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1490,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 15.394125017337501
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 70.14879200141877
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 42.94474999187514
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1501,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 2,
+            "execution_ms": 1.6039169859141111
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 0,
+            "execution_ms": 0.23983296705409884
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 0,
+            "execution_ms": 0.15583401545882225
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1506,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 21,
+            "execution_ms": 0.3044160548597574
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 21,
+            "execution_ms": 0.2885420108214021
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 21,
+            "execution_ms": 0.28416700661182404
+          }
+        },
+        "reference_match": {
+          "retrieval": true,
+          "model1": true
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": true,
+          "model1": true
+        }
+      },
+      {
+        "question_id": 1509,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 0.3168749972246587
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 0.22437499137595296
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 0.22437499137595296
+          }
+        },
+        "reference_match": {
+          "retrieval": true,
+          "model1": true
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": true,
+          "model1": true
+        }
+      },
+      {
+        "question_id": 1521,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 0.15575002180412412
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 0.15420798445120454
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 0.15770801110193133
+          }
+        },
+        "reference_match": {
+          "retrieval": true,
+          "model1": true
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": true,
+          "model1": true
+        }
+      },
+      {
+        "question_id": 1529,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 9.250541043002158
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 0.16679195687174797
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 0.15508400974795222
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1471,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 1.515874988399446
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 1.47779198596254
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 1.4064169954508543
+          }
+        },
+        "reference_match": {
+          "retrieval": true,
+          "model1": true
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": true,
+          "model1": true
+        }
+      },
+      {
+        "question_id": 1498,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 40.985875006299466
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 44.93941698456183
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 44.44349999539554
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": true
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": true
+        }
+      },
+      {
+        "question_id": 1500,
+        "checks": {
+          "gold": {
+            "status": "TRUNCATED",
+            "rows": 500,
+            "execution_ms": 0.6829579942859709
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 0,
+            "execution_ms": 0.17629098147153854
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 0,
+            "execution_ms": 0.15249999705702066
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "DIFFERENT_ROW_COUNT_BY_TRUNCATION_LOWER_BOUND",
+          "model1": "DIFFERENT_ROW_COUNT_BY_TRUNCATION_LOWER_BOUND"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      },
+      {
+        "question_id": 1525,
+        "checks": {
+          "gold": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 0.28858298901468515
+          },
+          "retrieval": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 0.2969169872812927
+          },
+          "model1": {
+            "status": "EXECUTED",
+            "rows": 1,
+            "execution_ms": 23.701666039414704
+          }
+        },
+        "reference_match": {
+          "retrieval": false,
+          "model1": false
+        },
+        "comparison_proof": {
+          "retrieval": "COMPLETE_RETURNED_ROWS",
+          "model1": "COMPLETE_RETURNED_ROWS"
+        },
+        "stored_match": {
+          "retrieval": false,
+          "model1": false
+        }
+      }
+    ],
+    "note": "Uses the original comparator; reference agreement is not business correctness"
+  },
+  "largest_available_schema": {
+    "status": "MEASURED",
+    "selection": "most columns, then most tables",
+    "db_id": "european_football_2",
+    "tables": 7,
+    "columns": 199,
+    "relationships": 31,
+    "schema_fingerprint": "sha256:71cb3f319d9868285037b10218f4a476f18835a3ee01f621122c6e1090a09ff0",
+    "traversal_seeds": [
+      "Country",
+      "League",
+      "Match",
+      "Player",
+      "Player_Attributes"
+    ],
+    "snapshot_bytes": 84024,
+    "schemas_inspected": 11,
+    "model_calls": 0,
+    "business_sql_calls": 0,
+    "metrics": {
+      "current_compile_and_networkx_build": {
+        "p50_ms": 3.0677089816890657,
+        "p95_ms_nearest_rank": 3.1806249753572047,
+        "iterations": 101
+      },
+      "networkx_build_from_compiled_metadata": {
+        "p50_ms": 0.21145801292732358,
+        "p95_ms_nearest_rank": 0.21533295512199402,
+        "iterations": 101
+      },
+      "cold_snapshot_load": {
+        "p50_ms": 2.0198749843984842,
+        "p95_ms_nearest_rank": 2.160249976441264,
+        "iterations": 101
+      },
+      "warm_snapshot_load": {
+        "p50_ms": 0.7939999923110008,
+        "p95_ms_nearest_rank": 0.8057079976424575,
+        "iterations": 101
+      },
+      "traversal": {
+        "p50_ms": 0.3766669542528689,
+        "p95_ms_nearest_rank": 0.3846249892376363,
+        "iterations": 101,
+        "status": "BUDGET_EXHAUSTED"
+      }
+    },
+    "note": "Existing metadata compiler only, no catalog authoring or runtime changes"
+  },
+  "execution_recheck_paired": {
+    "all": {
+      "n": 20,
+      "both_correct": 5,
+      "only_retrieval": 1,
+      "only_model1": 1,
+      "neither": 13,
+      "discordant_pairs": 2,
+      "mcnemar_exact_two_sided_p": 1.0,
+      "interpretation": "No evidence of a difference",
+      "unresolved_pairs": 0
+    },
+    "dev": {
+      "n": 10,
+      "both_correct": 3,
+      "only_retrieval": 1,
+      "only_model1": 1,
+      "neither": 5,
+      "discordant_pairs": 2,
+      "mcnemar_exact_two_sided_p": 1.0,
+      "interpretation": "No evidence of a difference",
+      "unresolved_pairs": 0
+    },
+    "heldout": {
+      "n": 10,
+      "both_correct": 2,
+      "only_retrieval": 0,
+      "only_model1": 0,
+      "neither": 8,
+      "discordant_pairs": 0,
+      "mcnemar_exact_two_sided_p": 1.0,
+      "interpretation": "No evidence of a difference",
+      "unresolved_pairs": 0
+    }
+  }
+}

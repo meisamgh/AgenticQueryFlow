@@ -1,0 +1,426 @@
+{
+  "scope": "Offline synthetic microbenchmark, not end-to-end accuracy/latency",
+  "measurements": {
+    "legacy_bfs": {
+      "p50_ms": 0.0008330098353326321,
+      "p95_ms": 0.0009579816833138466,
+      "iterations": 101,
+      "model_calls": 0,
+      "database_calls": 0
+    },
+    "shared_resolver": {
+      "p50_ms": 0.024874985683709383,
+      "p95_ms": 0.029374961741268635,
+      "iterations": 101,
+      "model_calls": 0,
+      "database_calls": 0
+    },
+    "graph_resolver": {
+      "p50_ms": 0.02258300082758069,
+      "p95_ms": 0.02458301605656743,
+      "iterations": 101,
+      "model_calls": 0,
+      "database_calls": 0
+    },
+    "graph_plus_local_ontology": {
+      "p50_ms": 0.08349999552592635,
+      "p95_ms": 0.08824997348710895,
+      "iterations": 101,
+      "model_calls": 0,
+      "database_calls": 0
+    },
+    "warm_load": {
+      "p50_ms": 0.02958404365926981,
+      "p95_ms": 0.04054198507219553,
+      "iterations": 101,
+      "model_calls": 0,
+      "database_calls": 0
+    },
+    "cold_load": {
+      "p50_ms": 0.08141604484990239,
+      "p95_ms": 0.1069169957190752,
+      "iterations": 101,
+      "model_calls": 0,
+      "database_calls": 0
+    },
+    "offline_compile": {
+      "p50_ms": 0.08858297951519489,
+      "p95_ms": 0.0950830290094018,
+      "iterations": 101,
+      "model_calls": 0,
+      "database_calls": 0
+    }
+  },
+  "historical_baseline_not_rerun": {
+    "benchmark": "debit_card_specializing labelled hard-20 paired A/B",
+    "provider": "agentrouter",
+    "model": "gpt-5.6-sol",
+    "completed_count": 20,
+    "retrieval": {
+      "correct": 6,
+      "execution_accuracy": 0.3,
+      "accepted": 20,
+      "average_latency_ms": 18989,
+      "average_selected_tables": 3.95,
+      "average_selected_columns": 15.5
+    },
+    "model1": {
+      "correct": 6,
+      "execution_accuracy": 0.3,
+      "accepted": 20,
+      "average_latency_ms": 23402,
+      "average_selected_tables": 1.95,
+      "average_selected_columns": 5.3
+    },
+    "paired": {
+      "both_correct": 5,
+      "retrieval_only": 1,
+      "model1_only": 1,
+      "neither": 13
+    }
+  },
+  "stored_paired_failures": [
+    {
+      "question_id": 1481,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": true,
+          "filter_or_time_literals_missing": [
+            "0",
+            "201301",
+            "201312"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": true,
+          "filter_or_time_literals_missing": [
+            "0",
+            "201301",
+            "201312"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    },
+    {
+      "question_id": 1482,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": true,
+          "filter_or_time_literals_missing": [
+            "'2012%'",
+            "'2013%'"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": true,
+          "filter_or_time_literals_missing": [
+            "'2012%'",
+            "'2013%'"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    },
+    {
+      "question_id": 1526,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [
+            "gasstations"
+          ],
+          "join_or_generation_extra_relations": [
+            "customers"
+          ],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [
+            "1513.12"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [
+            "gasstations"
+          ],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": true,
+          "filter_or_time_literals_missing": [
+            "1513.12"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    },
+    {
+      "question_id": 1531,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [
+            "yearmonth"
+          ],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": true,
+          "filter_or_time_literals_missing": [],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [
+            "yearmonth"
+          ],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": true,
+          "filter_or_time_literals_missing": [],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    },
+    {
+      "question_id": 1533,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": true,
+          "filter_or_time_literals_missing": [
+            "'201208'"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    },
+    {
+      "question_id": 1472,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    },
+    {
+      "question_id": 1473,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": true,
+          "filter_or_time_literals_missing": [
+            "12"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": true,
+          "filter_or_time_literals_missing": [
+            "12"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    },
+    {
+      "question_id": 1480,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [
+            "2",
+            "5"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [
+            "2",
+            "5"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    },
+    {
+      "question_id": 1490,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": true,
+          "filter_or_time_literals_missing": [],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": true,
+          "filter_or_time_literals_missing": [
+            "1",
+            "100"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    },
+    {
+      "question_id": 1501,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [
+            "yearmonth"
+          ],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [
+            "'201306'"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [
+            "yearmonth"
+          ],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [
+            "'201306'"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    },
+    {
+      "question_id": 1529,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [
+            "yearmonth"
+          ],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [
+            "'201201'",
+            "'38508'"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [
+            "yearmonth"
+          ],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [
+            "'201201'",
+            "'38508'"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    },
+    {
+      "question_id": 1500,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [
+            "yearmonth"
+          ],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [
+            "'201309'"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [
+            "yearmonth"
+          ],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [
+            "'201309'"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    },
+    {
+      "question_id": 1525,
+      "signals": {
+        "retrieval": {
+          "retrieval_or_generation_missing_relations": [],
+          "join_or_generation_extra_relations": [],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [],
+          "accepted_but_wrong_in_stored_evaluation": true
+        },
+        "model1": {
+          "retrieval_or_generation_missing_relations": [
+            "transactions_1k"
+          ],
+          "join_or_generation_extra_relations": [
+            "yearmonth"
+          ],
+          "metric_semantics_aggregate_shape_differs": false,
+          "filter_or_time_literals_missing": [
+            "'2012-08-25'"
+          ],
+          "accepted_but_wrong_in_stored_evaluation": true
+        }
+      },
+      "root_cause": "UNADJUDICATED: AST differences are not causal proof"
+    }
+  ],
+  "not_run": [
+    "fresh debit-card SQL execution",
+    "business-semantic adjudication",
+    "live model tokens",
+    "recovery success/false repairs",
+    "NVIDIA integration"
+  ]
+}

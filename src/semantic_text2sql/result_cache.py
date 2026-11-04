@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import Any
 
+from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.models import (
     ChartSpec,
     ChatResponse,
+    FilterCatalog,
     GenerateResponse,
     ModelProvider,
     ResultPresentation,
@@ -25,7 +27,7 @@ class RecentResult:
     question: str
     provider: ModelProvider
     model: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     strategy: StrategyHints
     sql: str
     columns: list[str]
@@ -36,7 +38,10 @@ class RecentResult:
     summary: str
     provenance: list[str]
     verified_context: dict[str, Any]
-    semantic_contract: SemanticContract | None
+    execution_timestamp: float | None = None
+    semantic_contract: SemanticContract | None = None
+    filter_catalog: FilterCatalog | None = None
+    execution_status: str = "ACCEPTED"
 
     @property
     def message(self) -> str:
@@ -54,6 +59,12 @@ class RecentResult:
                 else response.run_id
             ),
             result_id=response.result_id,
+            execution_timestamp=generation.execution_timestamp,
+            semantic_contract=generation.semantic_contract or (
+                response.state.semantic_contract if response.state else None
+            ),
+            filter_catalog=response.suggested_filters,
+            execution_status=generation.execution_status,
             chart_id=response.chart_id,
             db_id=generation.db_id,
             question=generation.question,
@@ -81,13 +92,14 @@ class RecentResult:
                     "historical_examples",
                 }
             },
-            semantic_contract=generation.semantic_contract,
         )
 
     @property
     def generation(self) -> GenerateResponse:
         """Materialize only the accepted rows needed by the existing chart API."""
         return GenerateResponse(
+            execution_timestamp=self.execution_timestamp,
+            semantic_contract=self.semantic_contract,
             db_id=self.db_id,
             question=self.question,
             provider=self.provider,
@@ -103,7 +115,6 @@ class RecentResult:
             truncated=self.truncated,
             termination_reason="accepted",
             model_context=self.verified_context or None,
-            semantic_contract=self.semantic_contract,
         )
 
     @property

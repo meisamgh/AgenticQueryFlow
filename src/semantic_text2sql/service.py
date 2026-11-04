@@ -22,26 +22,33 @@ from semantic_text2sql.context_planner import (
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.formulas import apply_structural_formulas
 from semantic_text2sql.glossary import GlossaryStore
+from semantic_text2sql.graph_grounding import compact_grounding, resolve_metrics
 from semantic_text2sql.historical import HistoricalQueryStore
 from semantic_text2sql.hybrid_retrieval import HybridSchemaRetriever, metadata_requests
+from semantic_text2sql.join_resolver import resolve_joins
 from semantic_text2sql.llm import ModelError
 from semantic_text2sql.models import (
     CallLedgerEntry,
+    ContextRelationship,
     ContextRequest,
     GenerateRequest,
     GenerateResponse,
     HistoricalExample,
     ModelProvider,
+    PipelineTelemetry,
     PlannerMetadataRequirement,
     RetrievalTrace,
     SemanticContract,
     TokenUsage,
     VerifiedSchemaSnapshot,
 )
+from semantic_text2sql.ontology import LocalOntologyAdapter
 from semantic_text2sql.postgres import PostgresRegistry
 from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.recovery import RecoveryCoordinator, RecoveryTools, recovery_feedback
 from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded
+from semantic_text2sql.semantic_catalog import SemanticCatalogStore
+from semantic_text2sql.semantic_graph import SemanticGraphStore, graph_identity
 from semantic_text2sql.strategy import route_question
 from semantic_text2sql.validator import validate_sql
 
@@ -74,6 +81,8 @@ class TextToSQLService:
         retriever: HybridSchemaRetriever,
         agent: TextToSQLAgent,
         context_completers: Mapping[ModelProvider, ContextPlannerCompleter],
+        semantic_catalogs: SemanticCatalogStore | None = None,
+        graph_store: SemanticGraphStore | None = None,
     ) -> None:
         self.database = database
         self.postgres = postgres
@@ -83,6 +92,8 @@ class TextToSQLService:
         self.retriever = retriever
         self.agent = agent
         self.context_completers = context_completers
+        self.semantic_catalogs = semantic_catalogs
+        self.graph_store = graph_store
 
     async def execute_question(
         self,
@@ -118,15 +129,18 @@ class TextToSQLService:
             progress("retrieval")
         database = self._database(db_id)
         schema = await budget.wait(asyncio.to_thread(database.inspect, db_id), kind="database")
-        schema_inspection_ms = round((perf_counter() - routing_started) * 1_000)
         dialect = schema.dialect
         database_profile = await budget.wait(
             asyncio.to_thread(self.profiles.load, dialect, db_id), kind="work"
         )
+        ontology = (LocalOntologyAdapter(schema, database_profile, self.semantic_catalogs,
+                                         self.graph_store, self.glossaries)
+                    if self.semantic_catalogs and self.graph_store else None)
         correctness_trace = None
         if correctness_review and previous_sql:
             correctness_trace = await RecoveryCoordinator(
-                RecoveryTools(database, db_id, schema, database_profile, budget=budget)
+                RecoveryTools(database, db_id, schema, database_profile, budget=budget,
+                              ontology=ontology)
             ).ainvestigate(
                 question=question,
                 failed_sql=previous_sql,
@@ -136,8 +150,8 @@ class TextToSQLService:
                 mode="CORRECTNESS",
                 progress=progress,
                 completer=self.agent.model,
-                provider=provider,
-                model=model,
+                provider=os.environ.get("TEXT2SQL_RECOVERY_PROVIDER") or provider,
+                model=os.environ.get("TEXT2SQL_RECOVERY_MODEL") or model,
                 budget=budget,
             )
             evidence = "\n\n".join(
@@ -156,6 +170,31 @@ class TextToSQLService:
             "\n".join(item for item in (evidence, value_alias_context) if item) or None
         )
         contract = semantic_contract or SemanticContract()
+        graph_context = None
+        graph_latency_ms: int | None = None
+        catalog_relationships: list[ContextRelationship] = []
+        graph_enabled = os.environ.get("TEXT2SQL_GRAPH_ENABLED", "false").lower() == "true"
+        try:
+            catalog = (self.semantic_catalogs.load(db_id)
+                       if graph_enabled and self.semantic_catalogs else None)
+        except (OSError, ValueError):
+            logger.warning("semantic_catalog_unavailable db_id=%s", db_id)
+            catalog = None
+        metric_facts: list[dict[str, Any]] = []
+        if graph_enabled:
+            try:
+                contract, metric_facts = resolve_metrics(question, schema, catalog, contract)
+            except ValueError as exc:
+                return QuestionExecution(generated=GenerateResponse(
+                    db_id=db_id, question=question, provider=provider, model=model, dialect=dialect,
+                    strategy=route_question(question), semantic_contract=contract, sql=None,
+                    accepted=False, termination_reason="context_error", model_error=str(exc)),
+                    approved_tables=[], semantic_contract=contract, planner_usage=TokenUsage(),
+                    routing_ms=round((perf_counter() - routing_started) * 1000),
+                    planning_ms=0, generation_ms=0)
+            if metric_facts:
+                retrieval_evidence = "\n".join(filter(None, [retrieval_evidence,
+                    "Approved metric columns: " + ", ".join(contract.required_columns)]))[:8000]
         retrieval_trace: RetrievalTrace | None = None
 
         if optimization_required and previous_approved_tables:
@@ -203,6 +242,18 @@ class TextToSQLService:
                     for kind, target in metadata
                 ],
             )
+        try:
+            semantic_context = (compact_grounding(metric_facts, graph_context)
+                                if graph_context or metric_facts else "")
+        except ValueError as exc:
+            return QuestionExecution(generated=GenerateResponse(
+                db_id=db_id, question=question, provider=provider, model=model, dialect=dialect,
+                strategy=route_question(question), semantic_contract=contract, sql=None,
+                accepted=False, termination_reason="context_error", model_error=str(exc)),
+                approved_tables=proposed_tables, semantic_contract=contract,
+                planner_usage=TokenUsage(),
+                routing_ms=round((perf_counter() - routing_started) * 1000),
+                planning_ms=0, generation_ms=0)
         routing_ms = round((perf_counter() - routing_started) * 1_000)
 
         planning_started = perf_counter()
@@ -234,7 +285,6 @@ class TextToSQLService:
 
         planner_usage = TokenUsage()
         planner_call_used = False
-        planner_call_ms: int | None = None
         if context_mode == "model1" and not optimization_required:
             configured_context_provider = os.environ.get("TEXT2SQL_CONTEXT_PROVIDER")
             planner_provider = context_provider or (
@@ -244,7 +294,6 @@ class TextToSQLService:
             )
             planner_model = context_model or os.environ.get("TEXT2SQL_CONTEXT_MODEL") or model
             try:
-                planner_call_started = perf_counter()
                 selection, planner_usage = await budget.wait(
                     plan_context_detailed(
                         self.context_completers[planner_provider],
@@ -260,9 +309,76 @@ class TextToSQLService:
                 )
                 context_request = selection_to_context_request(selection)
                 planner_call_used = True
-                planner_call_ms = round((perf_counter() - planner_call_started) * 1_000)
             except (KeyError, ModelError, ValueError):
                 pass
+
+        if graph_enabled and self.graph_store:
+            graph_started = perf_counter()
+            graph_store = self.graph_store
+            snapshot = await budget.wait(asyncio.to_thread(lambda: graph_store.load(
+                db_id, identity=graph_identity(schema, catalog, database_profile,
+                                               self.glossaries.load(db_id)))), kind="work")
+            if snapshot:
+                resolution = await budget.wait(asyncio.to_thread(resolve_joins,
+                    list(dict.fromkeys([*context_request.tables, *[item.source_relation
+                        for item in contract.approved_metrics]])), schema, snapshot=snapshot),
+                    kind="work")
+                graph_context = {"status": resolution.status,
+                    "snapshot_id": snapshot.identity, "catalog_version": snapshot.catalog_version,
+                    "explanation": resolution.explanation,
+                    "relationships": [item.model_dump(mode="json")
+                                      for item in resolution.relationships]}
+                if resolution.status == "CONNECTED":
+                    context_request.tables = resolution.tables
+                    for rel in resolution.relationships:
+                        if rel.provenance == "approved_catalog":
+                            child = rel.source.removeprefix("table:")
+                            parent = rel.target.removeprefix("table:")
+                            cardinality = rel.facts.get("cardinality", "unknown").upper()
+                            catalog_relationships.append(ContextRelationship(
+                                left_table=child, right_table=parent,
+                                left_column=rel.facts["child_columns"][0],
+                                right_column=rel.facts["parent_columns"][0],
+                                left_columns=rel.facts["child_columns"],
+                                right_columns=rel.facts["parent_columns"],
+                                state="APPROVED_CATALOG", join_cardinality=cardinality,
+                                recommended_strategy=("UNRESOLVED" if cardinality == "UNKNOWN"
+                                                      else "PRE_AGGREGATE"
+                                                      if cardinality == "MANY_TO_MANY"
+                                                      else "JOIN"),
+                                fanout_risk=cardinality not in {"MANY_TO_ONE", "ONE_TO_ONE"}))
+                        for table, names in ((rel.source.removeprefix("table:"),
+                                              rel.facts.get("child_columns", [])),
+                                             (rel.target.removeprefix("table:"),
+                                              rel.facts.get("parent_columns", []))):
+                            context_request.columns[table] = list(dict.fromkeys([
+                                *context_request.columns.get(table, []), *names]))
+                    proposed_tables = resolution.tables
+                    contract = contract.model_copy(update={"required_columns": list(dict.fromkeys([
+                        *contract.required_columns,
+                        *[f"{rel.source.removeprefix('table:')}.{column}"
+                          for rel in resolution.relationships
+                          for column in rel.facts["child_columns"]],
+                        *[f"{rel.target.removeprefix('table:')}.{column}"
+                          for rel in resolution.relationships
+                          for column in rel.facts["parent_columns"]],
+                    ]))})
+            graph_latency_ms = round((perf_counter() - graph_started) * 1000)
+        try:
+            semantic_context = (compact_grounding(metric_facts, graph_context)
+                                if graph_context or metric_facts else "")
+        except ValueError as exc:
+            return QuestionExecution(generated=GenerateResponse(
+                db_id=db_id, question=question, provider=provider, model=model, dialect=dialect,
+                strategy=route_question(question), semantic_contract=contract, sql=None,
+                accepted=False, termination_reason="context_error", model_error=str(exc),
+                token_usage=planner_usage, telemetry=PipelineTelemetry(
+                    planner_call_used=planner_call_used, planner_call=planner_usage,
+                    total_model_calls=budget.model_calls,
+                    total_database_calls=budget.database_calls)),
+                approved_tables=proposed_tables, semantic_contract=contract,
+                planner_usage=planner_usage, routing_ms=routing_ms,
+                planning_ms=round((perf_counter() - planning_started) * 1000), generation_ms=0)
 
         approved_concepts = self.glossaries.relevant_concept_ids(db_id, question)
         if progress:
@@ -285,6 +401,9 @@ class TextToSQLService:
             business_context = "\n".join(
                 item for item in (business_context, value_alias_context) if item
             )
+        if graph_context or metric_facts:
+            business_context = "\n".join(filter(None, [business_context,
+                "Governed semantic grounding: " + semantic_context]))
         historical_examples: list[HistoricalExample] = []
         history_enabled = os.environ.get("TEXT2SQL_HISTORY_ENABLED", "false").casefold() == "true"
         if history_enabled:
@@ -333,6 +452,8 @@ class TextToSQLService:
                 db_id=db_id, dialect=dialect, live_schema=schema, profile=database_profile,
             ),
         )
+        generation_request._catalog_relationships = catalog_relationships
+        generation_request._ontology_adapter = ontology
         try:
             generated = await budget.wait(
                 self.agent.generate(generation_request, progress=progress, budget=budget),
@@ -364,7 +485,8 @@ class TextToSQLService:
                 progress("result_review")
             review_mode = "ZERO_RESULT" if generated.row_count == 0 else "NULL_RESULT"
             review_trace = await RecoveryCoordinator(
-                RecoveryTools(database, db_id, schema, database_profile, budget=budget)
+                RecoveryTools(database, db_id, schema, database_profile, budget=budget,
+                              ontology=ontology)
             ).ainvestigate(
                 question=question,
                 failed_sql=generated.sql or "",
@@ -378,8 +500,8 @@ class TextToSQLService:
                 mode=review_mode,
                 progress=progress,
                 completer=self.agent.model,
-                provider=provider,
-                model=generation_request.model,
+                provider=os.environ.get("TEXT2SQL_RECOVERY_PROVIDER") or provider,
+                model=os.environ.get("TEXT2SQL_RECOVERY_MODEL") or generation_request.model,
                 budget=budget,
             )
             generated = generated.model_copy(update={"recovery": review_trace})
@@ -453,25 +575,9 @@ class TextToSQLService:
                 component="schema_inspection",
                 kind="DATABASE",
                 status="SUCCEEDED",
-                latency_ms=schema_inspection_ms,
+                latency_ms=routing_ms,
             )
         ]
-        call_ledger.append(
-            CallLedgerEntry(
-                component="schema_retrieval",
-                kind="TOOL",
-                status="SUCCEEDED",
-                latency_ms=max(0, routing_ms - schema_inspection_ms),
-            )
-        )
-        call_ledger.append(
-            CallLedgerEntry(
-                component="context_grounding",
-                kind="TOOL",
-                status="SUCCEEDED",
-                latency_ms=max(0, planning_ms - (planner_call_ms or 0)),
-            )
-        )
         if planner_call_used:
             call_ledger.append(
                 CallLedgerEntry(
@@ -483,9 +589,14 @@ class TextToSQLService:
                     effective_model=context_model or model,
                     input_tokens=planner_usage.input_tokens,
                     output_tokens=planner_usage.output_tokens,
-                    latency_ms=planner_call_ms,
+                    latency_ms=planning_ms,
+                    retry_count=planner_usage.provider_retries,
                 )
             )
+        if graph_latency_ms is not None:
+            call_ledger.append(CallLedgerEntry(component="semantic_graph_lookup",
+                                                kind="TOOL", status="SUCCEEDED",
+                                                latency_ms=graph_latency_ms))
         call_ledger.extend(
             CallLedgerEntry(
                 component="sql_generation" if index == 0 else "sql_repair",
@@ -497,27 +608,19 @@ class TextToSQLService:
                 input_tokens=attempt.token_usage.input_tokens,
                 output_tokens=attempt.token_usage.output_tokens,
                 latency_ms=attempt.latency_ms,
+                retry_count=attempt.token_usage.provider_retries,
             )
             for index, attempt in enumerate(generated.attempts)
         )
         call_ledger.extend(
             CallLedgerEntry(
-                component=f"sql_validation_{attempt.number}",
-                kind="TOOL",
-                status="SUCCEEDED" if attempt.validation.valid else "FAILED",
-                latency_ms=attempt.validation_ms,
-            )
-            for attempt in generated.attempts
-        )
-        call_ledger.extend(
-            CallLedgerEntry(
-                component=f"sql_optimization_{attempt.number}",
+                component="sql_validation",
                 kind="TOOL",
                 status="SUCCEEDED",
-                latency_ms=attempt.optimization_ms,
+                latency_ms=attempt.validation_latency_ms,
             )
             for attempt in generated.attempts
-            if attempt.optimization_ms is not None and attempt.optimization_ms > 0
+            if attempt.validation_latency_ms is not None
         )
         if generated.recovery and generated.recovery.usage.llm_calls:
             call_ledger.extend(
@@ -545,10 +648,10 @@ class TextToSQLService:
                     status=(
                         "FAILED" if attempt.validation.code == "DATABASE_ERROR" else "SUCCEEDED"
                     ),
-                    latency_ms=attempt.execution_ms,
+                    latency_ms=attempt.execution_latency_ms,
                 )
                 for attempt in generated.attempts
-                if attempt.validation.valid or attempt.validation.code == "DATABASE_ERROR"
+                if attempt.execution_latency_ms is not None
             )
         if generated.recovery and generated.recovery.usage.database_probe_count:
             call_ledger.extend(
@@ -563,7 +666,7 @@ class TextToSQLService:
             update={
                 "telemetry": generated.telemetry.model_copy(
                     update={
-                        "model1_latency_ms": planner_call_ms,
+                        "model1_latency_ms": planning_ms,
                         "ab_context_mode": context_mode,
                         "retrieval": retrieval_trace,
                         "selected_table_count": len(context_request.tables),
@@ -581,7 +684,13 @@ class TextToSQLService:
                         ],
                         "call_ledger": call_ledger,
                         "total_model_calls": sum(item.kind == "MODEL" for item in call_ledger),
-                        "total_database_calls": budget.database_calls,
+                        "total_database_calls": budget.database_calls
+                        + sum(item.component == "sql_execution" for item in call_ledger)
+                        + (
+                            generated.recovery.usage.database_probe_count
+                            if generated.recovery
+                            else 0
+                        ),
                     }
                 )
             }

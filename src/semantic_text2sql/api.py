@@ -8,16 +8,19 @@ import os
 from contextvars import ContextVar
 from datetime import UTC, datetime
 from pathlib import Path
-from time import monotonic, perf_counter
+from time import monotonic, perf_counter, time
 from typing import Any, cast
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import Field
+from sqlglot import parse_one
 from starlette.middleware.gzip import GZipMiddleware
 
 from semantic_text2sql.agent import TextToSQLAgent
+from semantic_text2sql.ai_dashboard_designer import DashboardRevisions, design_dashboard
 from semantic_text2sql.analytics_planner import (
     PlannerDecisionRecord,
     metrics_ledger,
@@ -43,9 +46,24 @@ from semantic_text2sql.conversation import (
 )
 from semantic_text2sql.conversational_agent import ConversationalAnalyticsAgent
 from semantic_text2sql.conversational_bridge import ConversationalAnalyticsBridge
+from semantic_text2sql.dashboard_proposals import ProposalStore
+from semantic_text2sql.dashboard_service import (
+    DashboardError,
+    DashboardRequest,
+    DashboardSpec,
+    build_dashboard,
+)
+from semantic_text2sql.dashboard_store import (
+    DashboardDocument,
+    DashboardSnapshot,
+    DashboardStore,
+    SavedDashboard,
+)
+from semantic_text2sql.dashboard_studio import studio_router
 from semantic_text2sql.data_requirement_validator import validate_reusability
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.explanation import deterministic_explanation, explain_turn_detailed
+from semantic_text2sql.external_connections import external_connections_from_environment
 from semantic_text2sql.filter_discovery import (
     _SENSITIVE_TYPES as _FILTER_FORBIDDEN_SEMANTIC_TYPES,
 )
@@ -68,6 +86,8 @@ from semantic_text2sql.llm import (
     GroqSQLModel,
     JustDoWorkSQLModel,
     ModelError,
+    OllamaCompleter,
+    OpenRouterSQLModel,
     RoutingSQLModel,
     TrueSotaSQLModel,
 )
@@ -80,6 +100,8 @@ from semantic_text2sql.models import (
     CheckRequest,
     CheckResponse,
     ConversationState,
+    DashboardDesignFailure,
+    DashboardTarget,
     DatabaseOption,
     FilterValuesResponse,
     GenerateResponse,
@@ -88,6 +110,7 @@ from semantic_text2sql.models import (
     ModelProvider,
     PresentationState,
     ResultPresentation,
+    StrictModel,
     TokenUsage,
     TurnInterpretation,
     ValidationResult,
@@ -97,6 +120,7 @@ from semantic_text2sql.presentation import present_result
 from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.provider_registry import configured_model_options, supports_model
 from semantic_text2sql.recovery_events import recovery_events
+from semantic_text2sql.remote_databases import RemoteDatabaseRegistry
 from semantic_text2sql.result_cache import RecentResult
 from semantic_text2sql.run_history import RunHistoryStore, RunRecord, build_run_record
 from semantic_text2sql.runtime import (
@@ -110,6 +134,7 @@ from semantic_text2sql.semantic_catalog_validation import (
     sqlite_runner,
     verify_catalog,
 )
+from semantic_text2sql.semantic_graph import SemanticGraphStore, compile_graph
 from semantic_text2sql.service import TextToSQLService
 from semantic_text2sql.sql_diffs import (
     SqlDiffRequest,
@@ -143,6 +168,14 @@ from semantic_text2sql.voice import (
 logger = logging.getLogger(__name__)
 
 
+class ResultPageRequest(StrictModel):
+    session_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    result_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
+    offset: int = Field(ge=0, le=9_900)
+    page_size: int = Field(default=20, ge=1, le=100)
+
+
 def _planner_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
@@ -165,8 +198,21 @@ def create_app(
         )
     runs = run_history or RunHistoryStore.from_environment()
     postgres_databases = postgres_databases_from_environment()
-    postgres = PostgresRegistry(postgres_databases) if postgres_databases else None
+    external_connections = external_connections_from_environment()
+    postgres = (
+        RemoteDatabaseRegistry(postgres_databases, external_connections)
+        if external_connections
+        else PostgresRegistry(postgres_databases) if postgres_databases else None
+    )
     sqlite = DatabaseRegistry(Path(os.environ.get("TEXT2SQL_DATABASE_ROOT", "data")))
+    if runs.path is not None and any(
+        sqlite.resolve(identity).resolve() == runs.path.resolve() for identity in sqlite.list_ids()
+    ):
+        raise ValueError("History/dashboard storage must not be an exposed business database.")
+    saved_dashboards = DashboardStore(runs.path) if runs.path is not None else None
+    design_proposals = ProposalStore(saved_dashboards) if saved_dashboards else None
+    if set(sqlite.list_ids()) & set(external_connections):
+        raise ValueError("Database IDs must be unique across SQLite and remote connections.")
     profiles = ProfileStore(Path(os.environ.get("TEXT2SQL_PROFILE_ROOT", "profiles")))
     glossaries = GlossaryStore(
         Path(os.environ.get("TEXT2SQL_GLOSSARY_ROOT", "data/business_glossaries"))
@@ -213,9 +259,18 @@ def create_app(
         os.environ.get("TRUE_SOTA_BASE_URL", "https://true-sota.com"),
         float(os.environ.get("TRUE_SOTA_TIMEOUT_SECONDS", "180")),
     )
+    openrouter = OpenRouterSQLModel(
+        os.environ.get("OPENROUTER_API_KEY"),
+        os.environ.get("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+        float(os.environ.get("OPENROUTER_TIMEOUT_SECONDS", "180")),
+    )
+    ollama = OllamaCompleter(
+        os.environ.get("OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
+        float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "180")),
+    )
     active_agent = agent or TextToSQLAgent(
         sqlite,
-        RoutingSQLModel(agentrouter, groq, justdowork, codecraft, true_sota),
+        RoutingSQLModel(agentrouter, groq, justdowork, codecraft, true_sota, openrouter, ollama),
         postgres,
         profiles,
     )
@@ -225,12 +280,16 @@ def create_app(
         "justdowork": justdowork,
         "codecraft": codecraft,
         "true_sota": true_sota,
+        "openrouter": openrouter,
+        "ollama": ollama,
     }
+
     def conversational_agent_enabled() -> bool:
         return (
             os.environ.get("TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED", "false").casefold()
             == "true"
         )
+
     app = FastAPI(
         title="Semantic Text-to-SQL v5",
         version="0.5.0",
@@ -239,6 +298,24 @@ def create_app(
             "safety-first validation, and read-only execution."
         ),
     )
+    if isinstance(postgres, RemoteDatabaseRegistry):
+        app.router.add_event_handler("shutdown", postgres.close)
+
+    @app.exception_handler(DatabaseError)
+    async def database_error_response(request: Request, exc: DatabaseError) -> JSONResponse:
+        del request
+        safe_messages = {
+            "DATABASE_DRIVER_MISSING": "Install the selected database extra and its system driver.",
+            "READ_ONLY_ROLE_REQUIRED": "Provision and confirm a read-only database role first.",
+            "DATABASE_CONNECTION_FAILED": "Check the local connection settings and credentials.",
+            "DATABASE_INSPECTION_FAILED": "Check schema access and table permissions.",
+            "CONNECTION_NOT_CONFIGURED": "Set the configured connection environment variable.",
+        }
+        return JSONResponse(status_code=503, content={
+            "code": exc.code,
+            "detail": safe_messages.get(exc.code, "The database operation could not be completed."),
+        })
+
     if os.environ.get("TEXT2SQL_GZIP_ENABLED", "true").casefold() == "true":
         app.add_middleware(
             GZipMiddleware,
@@ -286,7 +363,31 @@ def create_app(
         retriever=hybrid_retriever,
         agent=active_agent,
         context_completers=cast(dict[ModelProvider, Any], turn_completers),
+        semantic_catalogs=semantic_catalogs,
+        graph_store=SemanticGraphStore(Path(os.environ.get("TEXT2SQL_GRAPH_ROOT", "graphs"))),
     )
+    async def prepare_semantic_graphs() -> None:
+        if os.environ.get("TEXT2SQL_GRAPH_ENABLED", "false").lower() != "true":
+            return
+        def build() -> None:
+            registries: list[DatabaseRegistry | PostgresRegistry] = [sqlite]
+            if postgres:
+                registries.append(postgres)
+            for registry in registries:
+                identities = (registry.list_ids() if isinstance(registry, DatabaseRegistry)
+                              else registry.configured_ids())
+                for identity in identities:
+                    try:
+                        schema = registry.inspect(identity)
+                        profile = profiles.load(schema.dialect, identity)
+                        snapshot = compile_graph(schema, semantic_catalogs.load(identity),
+                                                 profile, glossaries.load(identity))
+                        if question_service.graph_store:
+                            question_service.graph_store.save(snapshot)
+                    except (ValueError, OSError, DatabaseError) as exc:
+                        logger.warning("semantic_graph_unavailable type=%s", type(exc).__name__)
+        await asyncio.to_thread(build)
+    app.router.add_event_handler("startup", prepare_semantic_graphs)
     conversation_store_value = os.environ.get("TEXT2SQL_CONVERSATION_STORE")
     conversation_path = Path(conversation_store_value) if conversation_store_value else None
     conversations = ConversationStore(
@@ -296,11 +397,24 @@ def create_app(
     # Complete bounded results are kept only for the active process. Persisted
     # history retains a smaller preview and is reused only when it is complete.
     recent_results: dict[tuple[str, str], RecentResult] = {}
+    # Display-only index of the same typed snapshots, never agent memory.
+    # Allows reopening earlier chart turns after the active result changes.
+    chart_snapshots: dict[tuple[str, str, str], RecentResult] = {}
     branch_context: ContextVar[
         tuple[str, ConversationState, RecentResult | None, int | None] | None
     ] = ContextVar("queryflow_branch_context", default=None)
+    provisional_context: ContextVar[tuple[str, ConversationState] | None] = ContextVar(
+        "queryflow_provisional_context", default=None
+    )
+    history_anchor: ContextVar[str | None] = ContextVar("queryflow_history_anchor", default=None)
+    studio_context: ContextVar[SavedDashboard | None] = ContextVar(
+        "queryflow_dashboard_studio", default=None
+    )
 
     def accepted_state(session_id: str) -> ConversationState | None:
+        provisional = provisional_context.get()
+        if provisional and provisional[0] == session_id:
+            return provisional[1]
         branch = branch_context.get()
         return branch[1] if branch and branch[0] == session_id else conversations.get(session_id)
 
@@ -308,7 +422,155 @@ def create_app(
         branch = branch_context.get()
         if branch and branch[0] == session_id:
             return branch[2] if branch[1].db_id == db_id else None
-        return recent_results.get((session_id, db_id))
+        key = (session_id, db_id)
+        cached = recent_results.get(key)
+        if cached is not None:
+            return cached
+        # The bounded in-process cache is lost on restart. Reuse history only
+        # when it contains every executed row for the currently accepted SQL;
+        # a preview or a run from another branch must never stand in for data.
+        state = accepted_state(session_id)
+        if state is None or state.db_id != db_id or not state.last_sql:
+            return None
+        for record in runs.list_sessions(session_id):
+            if record.db_id != db_id or record.sql != state.last_sql:
+                continue
+            if (
+                record.state_snapshot is None
+                or record.state_snapshot.resolved_question != state.resolved_question
+            ):
+                continue
+            restored = result_from_history(record)
+            if restored is not None:
+                recent_results[key] = restored
+                return restored
+            break
+        return None
+
+    dashboard_revisions = DashboardRevisions()
+    dashboard_bundles: dict[tuple[str, str, str], dict[str, RecentResult]] = {}
+
+    def dashboard_source(session: str, db: str, identity: str) -> RecentResult | None:
+        current = recent_results.get((session, db))
+        if current is not None and current.result_id == identity:
+            return current
+        return next((snapshot for (owner, database, _), snapshot
+                     in reversed(chart_snapshots.items())
+                     if owner == session and database == db
+                     and snapshot.result_id == identity), None)
+
+    @app.post("/api/dashboards", response_model=DashboardSpec)
+    async def create_dashboard(request: DashboardRequest, response: Response) -> DashboardSpec:
+        response.headers["Cache-Control"] = "no-store"
+        configured = request.db_id in sqlite.list_ids() or (
+            postgres is not None and request.db_id in postgres.configured_ids()
+        )
+        if not configured:
+            raise HTTPException(404, "Database is unavailable.")
+
+        try:
+            source = dashboard_source(request.session_id, request.db_id, request.result_id)
+            previous = dashboard_revisions.get(request.session_id, request.db_id, request.result_id)
+            expected = previous.revision_id if previous else None
+            if request.design_mode == "ai":
+                if source is None:
+                    raise DashboardError("The accepted result is unavailable.", 404)
+                provider = os.environ.get("TEXT2SQL_DASHBOARD_PROVIDER", "")
+                model = os.environ.get("TEXT2SQL_DASHBOARD_MODEL", "")
+                outcome = await design_dashboard(
+                    source=source, request=request, completer=turn_completers.get(provider),
+                    provider=provider, model=model, previous=previous,
+                    budget=active_request_budget() or RequestBudget(
+                        timeout_seconds=15, max_model_calls=1, max_database_calls=0
+                    ),
+                )
+                if outcome.spec is None:
+                    raise HTTPException(409, {"code": outcome.status, "message": outcome.reason})
+                spec = outcome.spec
+            else:
+                spec = await asyncio.to_thread(build_dashboard, request, lambda *_: source)
+            return dashboard_revisions.commit(request.session_id, spec, expected)
+        except DashboardError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from exc
+
+    @app.post("/api/dashboards/undo", response_model=DashboardSpec)
+    async def undo_dashboard(request: DashboardRequest, response: Response) -> DashboardSpec:
+        response.headers["Cache-Control"] = "no-store"
+        source = dashboard_source(request.session_id, request.db_id, request.result_id)
+        configured = request.db_id in sqlite.list_ids() or (
+            postgres is not None and request.db_id in postgres.configured_ids()
+        )
+        if source is None or not configured:
+            raise HTTPException(404, "The accepted result is unavailable.")
+        if (source.execution_status != "ACCEPTED" or source.truncated
+                or source.row_count != len(source.rows)):
+            raise HTTPException(409, "Undo requires the complete accepted source result.")
+        try:
+            return dashboard_revisions.undo(request.session_id, request.db_id, request.result_id)
+        except DashboardError as exc:
+            raise HTTPException(exc.status_code, str(exc)) from exc
+
+    @app.post("/api/results/page")
+    async def result_page(request: ResultPageRequest) -> dict[str, Any]:
+        """Page an accepted result without accepting SQL from the browser.
+
+        The first 500 rows come from the exact in-process accepted snapshot. A
+        later page re-executes that SQL only when it has an outer ORDER BY and
+        the saved prefix still matches, avoiding silent unstable page changes.
+        """
+        source = accepted_result(request.session_id, request.db_id)
+        if source is None or source.result_id != request.result_id:
+            raise HTTPException(404, "The accepted result is unavailable or has changed.")
+        end = request.offset + request.page_size
+        if end <= len(source.rows):
+            page_rows = source.rows[request.offset:end]
+            has_more = source.truncated or end < len(source.rows)
+        else:
+            if not source.truncated:
+                page_rows = source.rows[request.offset:end]
+                has_more = False
+            else:
+                try:
+                    statement = parse_one(source.sql, read=source.dialect)
+                except Exception as exc:
+                    raise HTTPException(409, "Saved SQL cannot be paged safely.") from exc
+                if statement is None or statement.args.get("order") is None:
+                    raise HTTPException(
+                        409, "More rows require an explicit outer ORDER BY for stable paging."
+                    )
+                if end > 10_000:
+                    raise HTTPException(422, "Paging is limited to the first 10,000 rows.")
+                database = (
+                    sqlite if source.dialect == "sqlite" and request.db_id in sqlite.list_ids()
+                    else postgres if postgres is not None
+                    and request.db_id in postgres.configured_ids() else None
+                )
+                if database is None:
+                    raise HTTPException(404, "The selected database is unavailable.")
+                try:
+                    columns, fetched, has_more = await asyncio.to_thread(
+                        database.execute, request.db_id, source.sql,
+                        max_rows=end, timeout_seconds=5.0,
+                    )
+                except DatabaseError as exc:
+                    raise HTTPException(409, "The saved result could not be paged.") from exc
+                if columns != source.columns or fetched[:len(source.rows)] != source.rows:
+                    raise HTTPException(
+                        409, "The result changed since the first page. Run the question again."
+                    )
+                page_rows = fetched[request.offset:end]
+        limit_reached = end >= 10_000 and has_more
+        return {
+            "result_id": source.result_id,
+            "columns": source.columns,
+            "rows": page_rows,
+            "offset": request.offset,
+            "displayed_count": len(page_rows),
+            "returned_count": source.row_count,
+            "total_available": None if source.truncated else source.row_count,
+            "has_more": has_more and not limit_reached,
+            "limit_reached": limit_reached,
+        }
 
     def result_from_history(record: RunRecord) -> RecentResult | None:
         if not record.accepted or record.preview_truncated or record.truncated:
@@ -339,6 +601,7 @@ def create_app(
         restored = result_from_history(record)
         if restored is not None:
             recent_results[key] = restored
+
     chat_jobs: dict[str, dict[str, Any]] = {}
     job_ttl_seconds = max(60, int(os.environ.get("TEXT2SQL_JOB_TTL_SECONDS", "3600")))
     max_jobs = max(10, int(os.environ.get("TEXT2SQL_MAX_JOBS", "500")))
@@ -466,12 +729,58 @@ def create_app(
             raise HTTPException(status_code=404, detail="Run not found.")
         return record
 
+    @app.post("/api/results/inspect")
+    async def inspect_historical_result(
+        request: ResultPageRequest, response: Response,
+    ) -> dict[str, Any]:
+        response.headers["Cache-Control"] = "no-store"
+        current = accepted_state(request.session_id)
+        configured = request.db_id in sqlite.list_ids() or (
+            postgres is not None and request.db_id in postgres.configured_ids()
+        )
+        if not configured:
+            raise HTTPException(404, "Database is unavailable.")
+        if current is None or current.db_id != request.db_id:
+            raise HTTPException(404, "No active analytical context for this historical result.")
+        data = await asyncio.to_thread(
+            runs.inspect_result, request.session_id, request.db_id, request.result_id,
+            offset=request.offset, page_size=request.page_size,
+        )
+        if data is None:
+            raise HTTPException(404, "Historical result is unavailable in this context.")
+        return data
+
     @app.get("/api/history/{run_id}/turns", response_model=list[RunRecord])
     async def history_turns(response: Response, run_id: str, session_id: str) -> list[RunRecord]:
         response.headers["Cache-Control"] = "no-store"
         if runs.get(run_id, session_id) is None:
             raise HTTPException(status_code=404, detail="Conversation turn not found.")
-        return runs.lineage(session_id, run_id)
+        records = runs.lineage(session_id, run_id)
+        configured = set(sqlite.list_ids())
+        if postgres is not None:
+            configured.update(postgres.configured_ids())
+        restored = []
+        for record in records:
+            cached = chart_snapshots.get((session_id, record.db_id, record.run_id))
+            payload = record.response_payload
+            if (
+                cached is not None and record.db_id in configured and record.accepted
+                and cached.result_id == payload.get("result_id")
+                and cached.chart_id == payload.get("chart_id")
+                and cached.sql == record.sql and not cached.truncated
+                and cached.row_count == len(cached.rows) and cached.chart_spec is not None
+            ):
+                payload = {
+                    **payload,
+                    "generation": {**(payload.get("generation") or {}), "rows": cached.rows},
+                    "presentation": {
+                        **(payload.get("presentation") or {}),
+                        "chart_spec": cached.chart_spec.model_dump(mode="json"),
+                    },
+                }
+                record = record.model_copy(update={"response_payload": payload})
+            restored.append(record)
+        return restored
 
     @app.post("/api/history/{run_id}/continue", response_model=ConversationState)
     async def continue_history(run_id: str, session_id: str) -> ConversationState:
@@ -496,13 +805,20 @@ def create_app(
     @app.post("/api/sql/diff", response_model=SqlDiffResponse)
     async def sql_diff(payload: SqlDiffRequest, response: Response) -> SqlDiffResponse:
         response.headers["Cache-Control"] = "no-store"
-        dialect = "postgres" if payload.dialect == "postgres" else "sqlite"
+        dialect = payload.dialect
         return sql_changelog(payload.previous_sql, payload.updated_sql, dialect=dialect)
 
     @app.delete("/api/history", status_code=204)
     async def history_clear(response: Response, session_id: str) -> Response:
         response.headers["Cache-Control"] = "no-store"
         runs.drop_session(session_id)
+        if design_proposals:
+            design_proposals.clear(session_id)
+        dashboard_revisions.clear(session_id)
+        for bundle_key in [key for key in dashboard_bundles if key[0] == session_id]:
+            dashboard_bundles.pop(bundle_key, None)
+        for snapshot_key in [key for key in chart_snapshots if key[0] == session_id]:
+            chart_snapshots.pop(snapshot_key, None)
         return Response(status_code=204)
 
     @app.post("/api/conversations/{session_id}/reset", status_code=204)
@@ -510,7 +826,12 @@ def create_app(
         """Start a fresh conversation without invoking any model or deleting audit history."""
         response.headers["Cache-Control"] = "no-store"
         conversations.reset(session_id)
-        runs.mark_memory_reset(session_id)
+        if design_proposals:
+            design_proposals.clear(session_id)
+        dashboard_revisions.clear(session_id)
+        for bundle_key in [key for key in dashboard_bundles if key[0] == session_id]:
+            dashboard_bundles.pop(bundle_key, None)
+        await asyncio.to_thread(runs.mark_memory_reset, session_id)
         for key in [key for key in recent_results if key[0] == session_id]:
             recent_results.pop(key, None)
         return Response(status_code=204, headers={"Cache-Control": "no-store"})
@@ -530,7 +851,7 @@ def create_app(
         ]
         if postgres is not None:
             options.extend(
-                DatabaseOption(db_id=db_id, dialect="postgres", configured=True)
+                DatabaseOption(db_id=db_id, dialect=postgres.dialect_for(db_id), configured=True)
                 for db_id in postgres.configured_ids()
             )
         elif not postgres_databases:
@@ -617,7 +938,8 @@ def create_app(
 
     @app.get("/api/databases/{db_id}/filter-values", response_model=FilterValuesResponse)
     async def filter_values(
-        db_id: str, table: str, column: str, search: str | None = None
+        db_id: str, table: str, column: str, search: str | None = None,
+        exact: bool = False,
     ) -> FilterValuesResponse:
         """Bounded, read-only distinct values for one verified filter field.
 
@@ -660,7 +982,7 @@ def create_app(
             raise HTTPException(status_code=404, detail="Unknown filter field.")
         physical = column_info.data_type.casefold().split("(", 1)[0]
         if not (
-            physical.startswith(("text", "varchar", "char"))
+            physical.startswith(("text", "varchar", "char", "nvarchar", "nchar", "string"))
             or physical in {"date", "datetime", "timestamp"}
         ):
             raise HTTPException(status_code=400, detail="Only text or date fields support values.")
@@ -684,7 +1006,9 @@ def create_app(
                 status_code=403,
                 detail="This field is not available for value discovery.",
             )
-        cache_key = (db_id, table, column, search_term)
+        # Profile/schema changes invalidate domains even inside the cache TTL.
+        version = str(profile.profiled_at) if profile else schema.model_dump_json()
+        cache_key = (db_id, table, column, search_term + "\x00" + str(exact) + version)
         cached = filter_values_cache.get(cache_key)
         if cached is not None and monotonic() - cached[0] < 60:
             _, cached_values, cached_more = cached
@@ -696,6 +1020,9 @@ def create_app(
                 values=cached_values,
                 more_available=cached_more,
                 cached=True,
+                expires_in_seconds=max(0, int(60 - (monotonic() - cached[0]))),
+                complete_domain=not search_term and not cached_more,
+                ambiguous=bool(search_term and len(cached_values) > 1),
             )
         if search_term:
             # Treat the user's text literally; it is never SQL or a LIKE pattern.
@@ -705,6 +1032,8 @@ def create_app(
                 if schema.dialect == "sqlite"
                 else f'strpos(lower(CAST("{column}" AS TEXT)), lower({placeholder})) > 0'
             )
+            if exact:
+                predicate = f'lower(CAST("{column}" AS TEXT)) = lower({placeholder})'
             sql = (
                 f'SELECT DISTINCT CAST("{column}" AS TEXT) FROM "{table}" '
                 f'WHERE "{column}" IS NOT NULL AND {predicate} ORDER BY 1 LIMIT 101'
@@ -717,14 +1046,15 @@ def create_app(
             )
             parameters = ()
         try:
-            _, rows, _ = await asyncio.to_thread(
-                database.execute,
-                db_id,
-                sql,
-                max_rows=101,
-                timeout_seconds=2.0,
-                parameters=parameters,
-            )
+            if isinstance(database, RemoteDatabaseRegistry) and db_id in database.connections:
+                _, rows, _ = await asyncio.to_thread(
+                    database.lookup_values, db_id, table, column, search_term, exact=exact,
+                )
+            else:
+                _, rows, _ = await asyncio.to_thread(
+                    database.execute, db_id, sql, max_rows=101,
+                    timeout_seconds=2.0, parameters=parameters,
+                )
         except DatabaseError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         values: list[str] = [str(row[0]) for row in rows if row and row[0] is not None]
@@ -738,6 +1068,8 @@ def create_app(
             column=column,
             search=search_term or None,
             values=values[:100],
+            complete_domain=not search_term and not more_available,
+            ambiguous=bool(search_term and len(values) > 1),
             more_available=more_available,
             cached=False,
         )
@@ -754,7 +1086,7 @@ def create_app(
             dialect = "sqlite"
             schema = sqlite.inspect(db_id)
         elif postgres is not None and db_id in postgres.configured_ids():
-            dialect = "postgres"
+            dialect = postgres.dialect_for(db_id)
             schema = postgres.inspect(db_id)
         else:
             raise HTTPException(status_code=404, detail="Database was not found or configured.")
@@ -881,7 +1213,9 @@ def create_app(
     async def process_chat(
         request: ChatRequest, *, persist_state: bool = True
     ) -> ChatResponse:
-        assistant_enabled = conversational_agent_enabled()
+        # Studio invokes the same Top layer even when legacy chat compatibility
+        # is enabled; never reinterpret its already-typed SQL objective.
+        assistant_enabled = conversational_agent_enabled() or studio_context.get() is not None
         if enforce_model_catalog and not supports_model(request.provider, request.model):
             raise HTTPException(
                 status_code=422,
@@ -1320,7 +1654,7 @@ def create_app(
                     latency_ms=conversation_ms,
                 )
             ]
-            if interpretation.source == "model"
+            if interpretation.source == "model" and not assistant_enabled
             else []
         )
         if interpretation.operation in STATE_REQUIRED_OPERATIONS and not has_matching_state:
@@ -1393,7 +1727,10 @@ def create_app(
                 )
             pending = pending.model_copy(update={"semantic_contract": updated_contract})
         if operation == "RESET_CONTEXT":
+            if design_proposals:
+                design_proposals.clear(request.session_id)
             conversations.reset(request.session_id)
+            await asyncio.to_thread(runs.mark_memory_reset, request.session_id)
             return ChatResponse(
                 session_id=request.session_id,
                 operation="RESET_CONTEXT",
@@ -1457,14 +1794,16 @@ def create_app(
                     operation=operation,
                     client_message=request.message,
                     state=pending,
-                    dialect=("sqlite" if request.db_id in sqlite.list_ids() else "postgres"),
+                    dialect=("sqlite" if request.db_id in sqlite.list_ids()
+                             else postgres.dialect_for(request.db_id) if postgres else "postgres"),
                 )
                 explanation_model_succeeded = True
             except (ModelError, ValueError):
                 explanation = deterministic_explanation(
                     operation,
                     pending,
-                    "sqlite" if request.db_id in sqlite.list_ids() else "postgres",
+                    "sqlite" if request.db_id in sqlite.list_ids()
+                    else postgres.dialect_for(request.db_id) if postgres else "postgres",
                 )
             return ChatResponse(
                 session_id=request.session_id,
@@ -1683,7 +2022,9 @@ def create_app(
                 model=request.model,
                 provider=request.provider,
                 budget=request_budget,
-                visualization=viz_intent,
+                # Top-layer mode owns chart creation through change_visualization.
+                # Keep deterministic chart planning only for the legacy route.
+                visualization=None if assistant_enabled else viz_intent,
             )
             presentation_ledger.extend(presentation_entries)
         chart_recommendations = None
@@ -1695,16 +2036,17 @@ def create_app(
             and operation not in {"CHECK_CORRECTNESS", "OPTIMIZE"}
             and not human_review
         ):
-            try:
-                chart_recommendations = recommend_charts(
-                    pending.resolved_question,
-                    generated.columns,
-                    generated.rows,
-                    truncated=False,
-                )
-            except Exception:
-                logger.warning("Chart recommendation failed", exc_info=True)
-                chart_recommendations = None
+            if not assistant_enabled:
+                try:
+                    chart_recommendations = recommend_charts(
+                        pending.resolved_question,
+                        generated.columns,
+                        generated.rows,
+                        truncated=False,
+                    )
+                except Exception:
+                    logger.warning("Chart recommendation failed", exc_info=True)
+                    chart_recommendations = None
             if (
                 viz_intent.requested
                 and len(generated.columns) > 2
@@ -1750,7 +2092,8 @@ def create_app(
                 except Exception:
                     logger.warning("LLM chart recommendation failed", exc_info=True)
             if (
-                presentation is not None
+                not assistant_enabled
+                and presentation is not None
                 and viz_intent.requested
                 and chart_recommendations is not None
             ):
@@ -1888,7 +2231,14 @@ def create_app(
             return
         key = (request.session_id, request.db_id)
         recent_results.pop(key, None)
-        recent_results[key] = RecentResult.from_response(response)
+        snapshot = RecentResult.from_response(response)
+        recent_results[key] = snapshot
+        if response.run_id and snapshot.chart_spec is not None:
+            chart_key = (request.session_id, request.db_id, response.run_id)
+            chart_snapshots.pop(chart_key, None)
+            chart_snapshots[chart_key] = snapshot
+            if len(chart_snapshots) > 100:
+                chart_snapshots.pop(next(iter(chart_snapshots)))
         if len(recent_results) > 100:
             recent_results.pop(next(iter(recent_results)))
 
@@ -1985,6 +2335,8 @@ def create_app(
             response = await process_chat(
                 request, persist_state=persist and branch_context.get() is None
             )
+            if request.parent_run_id:
+                response = response.model_copy(update={"parent_run_id":request.parent_run_id})
             if previous and previous.db_id == request.db_id and response.operation != "NEW_QUERY":
                 response = response.model_copy(update={"previous_sql": previous.last_sql})
             return await save_response(request, response) if persist else response
@@ -1995,7 +2347,29 @@ def create_app(
     async def assistant_sql_handler(request: ChatRequest) -> ChatResponse:
         # The top model still has to produce its final answer. Save the
         # completed turn once, after that answer has been attached.
-        return await execute_chat(request, persist=False)
+        if request._history_source_run_id and runs.sql_memory(
+            request.session_id, request.db_id, request._history_source_run_id,
+            parent_run_id=history_anchor.get(),
+        ) is None:
+            return ChatResponse(
+                session_id=request.session_id, operation="REFINE",
+                resolved_question=request.message,
+                message="The historical analysis is unavailable in this session and database.",
+            )
+        token = (
+            provisional_context.set((request.session_id, request._turn_state))
+            if request._turn_state is not None else None
+        )
+        try:
+            response = await execute_chat(request, persist=False)
+            if response.state_commit_pending and request._turn_state is not None:
+                response = response.model_copy(update={
+                    "state_expected_version": request._turn_expected_version,
+                })
+            return response
+        finally:
+            if token is not None:
+                provisional_context.reset(token)
 
     async def assistant_investigation_handler(request: ChatRequest) -> ChatResponse:
         # Investigation state is request-local. Never save an intermediate turn
@@ -2015,11 +2389,256 @@ def create_app(
         retriever=hybrid_retriever,
         sql_handler=execute_chat,
     )
+
     def reset_assistant_context(session_id: str) -> None:
+        if design_proposals:
+            design_proposals.clear(session_id)
         conversations.reset(session_id)
         runs.mark_memory_reset(session_id)
         for key in [key for key in recent_results if key[0] == session_id]:
             recent_results.pop(key, None)
+
+    def inspect_assistant_history(session: str, db: str, reference: str) -> dict[str, Any] | None:
+        if db not in sqlite.list_ids() and (
+            postgres is None or db not in postgres.configured_ids()
+        ):
+            return None
+        if reference.startswith("snapshot:"):
+            memory = runs.sql_memory(
+                session, db, reference.removeprefix("snapshot:"),
+                parent_run_id=history_anchor.get(),
+            )
+            if memory is None:
+                return None
+            snapshot = runs.inspect_result(session, db, str(memory["run_id"]), page_size=100)
+            if snapshot is None or not snapshot["calculation_allowed"]:
+                return {"evidence_kind":"SNAPSHOT_UNAVAILABLE", "run_id":memory["run_id"],
+                        "verified_numerical_evidence":False,
+                        "limitation":"No complete snapshot or time-travel source is available."}
+            return {**snapshot, "evidence_kind":"HISTORICAL_SNAPSHOT",
+                    "execution_timestamp":memory["execution_timestamp"],
+                    "verified_numerical_evidence":True}
+        return runs.sql_memory(session, db, reference, parent_run_id=history_anchor.get())
+
+    async def refresh_assistant_history(request: ChatRequest, reference: str) -> ChatResponse:
+        memory = inspect_assistant_history(request.session_id, request.db_id, reference)
+        if memory is None:
+            return ChatResponse(
+                session_id=request.session_id, operation="REFINE",
+                resolved_question=request.message,
+                message="The historical analysis is unavailable.",
+            )
+        try:
+            current = accepted_state(request.session_id)
+            return await refresh_historical_sql(
+                str(memory["run_id"]), request.session_id, persist=False,
+                budget=active_request_budget(),
+                expected_version=(request._turn_expected_version if request._turn_state else
+                    (current.version if current else None)),
+            )
+        except HTTPException:
+            return ChatResponse(
+                session_id=request.session_id, operation="REFINE",
+                resolved_question=request.message,
+                message="The historical SQL cannot be refreshed safely.",
+            )
+
+    async def assistant_dashboard_handler(
+        request: ChatRequest, objective: str, source: RecentResult | ChatResponse | None, undo: bool
+    ) -> ChatResponse:
+        # Legacy proposals remain stored for audit, but never seed or authorize a build.
+        if request._dashboard_design_action in {"APPROVE", "REJECT"}:
+            return ChatResponse(
+                session_id=request.session_id, operation="VISUALIZE",
+                resolved_question=objective,
+                message="Dashboard design no longer needs approval. Request a new dashboard "
+                        "or edit an existing dashboard; historical proposals are unchanged.",
+                provenance=["dashboard_design_validation_failed"],
+            )
+        if source is None:
+            return ChatResponse(
+                session_id=request.session_id,
+                operation="VISUALIZE",
+                resolved_question=objective,
+                message="Investigate the required analysis before proposing a design.",
+            )
+        retained = (
+            source if isinstance(source, RecentResult) else RecentResult.from_response(source)
+        )
+        if not retained.result_id:
+            raise DashboardError("The accepted result has no immutable identity.")
+        design_request = DashboardRequest(
+            session_id=request.session_id, db_id=request.db_id, result_id=retained.result_id,
+            design_mode="ai", objective=objective,
+        )
+        previous = dashboard_revisions.get(request.session_id, request.db_id, retained.result_id)
+
+        if previous is None:
+            for prior_id in request._dashboard_source_ids:
+                candidate = dashboard_revisions.get(request.session_id, request.db_id, prior_id)
+                if candidate is not None:
+                    previous = candidate
+                    break
+        saved = studio_context.get()
+        evidence: dict[str, RecentResult] = dict(dashboard_bundles.get(
+            (request.session_id, request.db_id, retained.result_id), {}
+        ))
+
+        if previous:
+            evidence.update(dashboard_bundles.get(
+                (request.session_id, request.db_id, previous.result_id), {}
+            ))
+        if saved is not None:
+            evidence.update({key: value.result()
+                             for key, value in saved.document.results().items()})
+        for key, item in request._dashboard_sources.items():
+            evidence[key] = (item if isinstance(item, RecentResult)
+                             else RecentResult.from_response(item))
+        evidence[retained.result_id] = retained
+        if saved is not None:
+            retained = saved.document.source.result()
+            assert retained.result_id is not None
+            design_request = design_request.model_copy(update={"result_id": retained.result_id})
+            previous = saved.document.spec
+        if request._dashboard_source_ids:
+            selected = set(request._dashboard_source_ids)
+            for identity in selected - set(evidence):
+                cached_source = dashboard_source(request.session_id, request.db_id, identity)
+                if cached_source is not None:
+                    evidence[identity] = cached_source
+            if (not selected.issubset(evidence) or retained.result_id not in selected
+                    or len(selected) != len(request._dashboard_source_ids)):
+                return ChatResponse(session_id=request.session_id, operation="VISUALIZE",
+                    resolved_question=objective,
+                    message="Some requested analysis is unavailable. Reopen the dashboard.")
+            evidence = {key: evidence[key] for key in request._dashboard_source_ids}
+        if len(evidence) > 4:
+            return ChatResponse(session_id=request.session_id, operation="VISUALIZE",
+                resolved_question=objective,
+                message="This dashboard supports up to four separate analyses. Narrow its scope.")
+        assert retained.result_id is not None
+        usage = TokenUsage()
+        ledger: list[CallLedgerEntry] = []
+        design_failures: list[Any] = []
+        try:
+            if undo:
+                if saved is not None:
+                    raise DashboardError(
+                        "Use Undo in Dashboard Studio to restore a saved revision."
+                    )
+                # Validate current source authorization/completeness before undo.
+                build_dashboard(design_request, lambda *_: retained)
+                spec = dashboard_revisions.undo(
+                    request.session_id, request.db_id, retained.result_id
+                )
+            else:
+                provider = os.environ.get("TEXT2SQL_DASHBOARD_PROVIDER") or request.provider
+                model = os.environ.get("TEXT2SQL_DASHBOARD_MODEL") or request.model
+                # Capture the expected revision before awaiting model work. Never
+                # overwrite an edit that arrived while the designer was running.
+                expected = dashboard_revisions.get(
+                    request.session_id, request.db_id, retained.result_id
+                )
+                outcome = await design_dashboard(
+                    source=retained, request=design_request,
+                    completer=turn_completers.get(provider), provider=provider, model=model,
+                    budget=active_request_budget() or RequestBudget(timeout_seconds=15),
+                    previous=previous,
+                    patch_only=previous is not None,
+                    sources=evidence,
+                    repair=True,
+                    target_widget_id=request._dashboard_widget_id,
+                    investigation_evidence=request._dashboard_investigation_evidence,
+                    request_id=request._dashboard_request_id,
+                )
+                usage, ledger = outcome.usage, list(outcome.ledger)
+                design_failures = list(outcome.failures)
+                if outcome.spec is None:
+                    return ChatResponse(
+                        session_id=request.session_id, operation="VISUALIZE",
+                        resolved_question=objective, message=outcome.reason,
+                        provenance=([] if outcome.status == "REQUERY_REQUIRED"
+                                    else ["dashboard_design_validation_failed"]),
+                        token_usage=usage, call_ledger=ledger,
+                        dashboard_design_failures=design_failures,
+                    )
+                spec = outcome.spec
+                if outcome.status == "FALLBACK":
+                    return ChatResponse(
+                        session_id=request.session_id, operation="VISUALIZE",
+                        resolved_question=objective,
+                        message=outcome.reason + (" Your previous dashboard is unchanged."
+                                                  if previous else " No dashboard was created."),
+                        provenance=["dashboard_design_validation_failed"],
+                        token_usage=usage, call_ledger=ledger,
+                        dashboard_design_failures=design_failures,
+                    )
+                # Validate snapshots before exposing a revision or replacing retained evidence.
+                document = DashboardDocument(
+                    spec=spec, source=DashboardSnapshot.capture(retained),
+                    sources={key: DashboardSnapshot.capture(value)
+                             for key, value in evidence.items()}
+                    if spec.schema_version == 2 else {},
+                )
+                document.verify()
+                spec = dashboard_revisions.commit(
+                    request.session_id, spec, expected.revision_id if expected else None
+                )
+                dashboard_bundles[(request.session_id, request.db_id, spec.result_id)] = evidence
+            response = ChatResponse(
+                session_id=request.session_id, result_id=retained.result_id,
+                operation="VISUALIZE", resolved_question=objective,
+                generation=retained.generation, presentation=None,
+                message="The dashboard is ready from the accepted result.",
+                dashboard=spec.model_dump(mode="json"), token_usage=usage, call_ledger=ledger,
+                dashboard_design_failures=design_failures,
+                state_commit_pending=(source.state_commit_pending
+                                      if isinstance(source, ChatResponse) else False),
+                state_expected_version=(source.state_expected_version
+                                        if isinstance(source, ChatResponse) else None),
+                state=(source.state if isinstance(source, ChatResponse)
+                       else accepted_state(request.session_id)),
+            )
+            response._dashboard_evidence = evidence
+            return response
+        except DashboardError as exc:
+            conflict = str(exc) == "Dashboard changed concurrently; reopen before editing."
+            failure = DashboardDesignFailure(
+                code="REVISION_CONFLICT" if conflict else "SOURCE_VALIDATION_FAILED",
+                field="revision_id" if conflict else "source",
+                message=str(exc) if conflict
+                else "The dashboard source could not be validated safely.",
+                repairable=False, request_id=request._dashboard_request_id or uuid4().hex,
+                proposal_id=uuid4().hex, attempt=min(2, len(design_failures) + 1),
+                exception_type=type(exc).__name__,
+            )
+            logger.warning("dashboard_design_rejected request_id=%s proposal_id=%s attempt=%s "
+                           "code=%s field=%s repairable=false exception=%s", failure.request_id,
+                           failure.proposal_id, failure.attempt, failure.code, failure.field,
+                           failure.exception_type)
+            return ChatResponse(
+                session_id=request.session_id, operation="VISUALIZE", resolved_question=objective,
+                message=failure.message, token_usage=usage, call_ledger=ledger,
+                dashboard_design_failures=[*design_failures, failure],
+                provenance=["dashboard_design_validation_failed"],
+            )
+
+    def dashboard_summary(session: str, db: str, result: str) -> dict[str, Any] | None:
+
+        saved = studio_context.get()
+        spec = (saved.document.spec if saved is not None
+                else dashboard_revisions.get(session, db, result))
+        if spec is None:
+            return None
+        return {"result_id": result, "revision_id": spec.revision_id, "title": spec.title,
+                "source_result_ids": list(spec.sources) or [spec.result_id],
+                "theme": spec.theme, "kpis": [{"id": k.kpi_id, "title": k.title}
+                                              for k in spec.kpis],
+                "charts": [{"id": w.widget_id, "title": w.chart_spec.title,
+                            "type": w.chart_spec.chart_type, "width": w.column_span,
+                            "analytical_role": w.analytical_role,
+                            "source_result_id": w.result_id}
+                           for w in spec.widgets]}
 
     conversational_agent = ConversationalAnalyticsAgent(
         bridge=bridge,
@@ -2027,22 +2646,58 @@ def create_app(
         get_state=accepted_state,
         get_last_response=accepted_result,
         reset_handler=reset_assistant_context,
-        get_recent_memory=lambda session_id, db_id, parent_run_id: runs.recent_memory(
-            session_id, db_id, parent_run_id=parent_run_id
-        ),
-        search_memory=lambda session_id, db_id, question, parent_run_id: runs.search_memory(
-            session_id, db_id, question, parent_run_id=parent_run_id
-        ),
-        get_historical_result=lambda session_id, db_id, result_id, parent_run_id: (
-            result_from_history(record)
-            if (record := runs.authorized_result_record(
-                session_id, db_id, result_id, parent_run_id=parent_run_id
-            )) is not None
-            else None
-        ),
         sql_handler=assistant_sql_handler,
         investigation_handler=assistant_investigation_handler,
+        history_inspector=inspect_assistant_history,
+        history_refresher=refresh_assistant_history,
+        dashboard_handler=assistant_dashboard_handler,
+        dashboard_inspector=dashboard_summary,
     )
+
+    async def edit_saved_dashboard(saved: SavedDashboard, message: str) -> ChatResponse:
+        source = saved.document.source.result()
+        if saved._selected_widget:
+            widget_source = next((w.result_id for w in saved.document.spec.widgets
+                                  if w.widget_id == saved._selected_widget), None)
+            widget_source = widget_source or next((k.result_id for k in saved.document.spec.kpis
+                                                  if k.kpi_id == saved._selected_widget), None)
+            if widget_source:
+                source = saved.document.results()[widget_source].result()
+        session = f"studio-{saved.dashboard_id}"
+        state = ConversationState(
+            session_id=session, db_id=source.db_id, root_question=source.question,
+            resolved_question=source.question, semantic_contract=source.semantic_contract,
+            last_sql=source.sql, last_columns=source.columns, last_row_count=source.row_count,
+            last_model_context=source.verified_context,
+        )
+        branch_token = branch_context.set((session, state, source, None))
+        studio_token = studio_context.set(saved)
+        request = ChatRequest(session_id=session, db_id=source.db_id, message=message)
+        request._dashboard_snapshot_only = True
+        request._dashboard_widget_id = saved._selected_widget
+        request.dashboard_target = DashboardTarget(
+            dashboard_id=saved.dashboard_id, revision_id=str(saved.version),
+            widget_id=saved._selected_widget,
+        )
+        request._dashboard_sources = {key: value.result() for key, value
+                                     in saved.document.results().items()}
+        try:
+            # Same LangGraph, no HTTP recursion or intermediate accepted-state save.
+            return await conversational_agent.run(request)
+        finally:
+            studio_context.reset(studio_token)
+            branch_context.reset(branch_token)
+
+    def studio_source(session: str, db: str, identity: str) -> RecentResult | None:
+        return (dashboard_bundles.get((session, db, identity), {}).get(identity)
+                or dashboard_source(session, db, identity))
+
+    app.include_router(studio_router(
+        saved_dashboards, dashboard_revisions, studio_source, edit_saved_dashboard,
+        source_bundle=lambda session, db, identity: dashboard_bundles.get(
+            (session, db, identity), {}
+        ),
+    ))
 
     @app.post("/api/chat", response_model=ChatResponse)
     async def chat(request: ChatRequest) -> ChatResponse:
@@ -2059,13 +2714,29 @@ def create_app(
                     request.session_id, parent.state_snapshot, result_from_history(parent),
                     current.version if current else None,
                 ))
+            anchor_token = history_anchor.set(request.parent_run_id)
             try:
+                if request.dashboard_target:
+                    current_result = accepted_result(request.session_id, request.db_id)
+                    current_design = (dashboard_revisions.get(
+                        request.session_id, request.db_id, current_result.result_id
+                    ) if current_result and current_result.result_id else None)
+                    target = request.dashboard_target
+                    if (current_design is None or current_design.dashboard_id != target.dashboard_id
+                            or current_design.revision_id != target.revision_id
+                            or (target.widget_id is not None and target.widget_id not in
+                                {w.widget_id for w in current_design.widgets}
+                                | {k.kpi_id for k in current_design.kpis})):
+                        raise HTTPException(409, "That dashboard component changed; reopen it.")
+                    request._dashboard_widget_id = target.widget_id
+                    request._dashboard_snapshot_only = True
                 response = await conversational_agent.run(request)
                 return (
                     response if response.history_saved
                     else await save_response(request, response)
                 )
             finally:
+                history_anchor.reset(anchor_token)
                 if token is not None:
                     branch_context.reset(token)
         if os.environ.get("TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED", "false").casefold() != "true":
@@ -2078,13 +2749,17 @@ def create_app(
             return outcome.response
         return await save_response(request, outcome.response)
 
-    @app.post("/api/history/{run_id}/rerun", response_model=ChatResponse)
-    async def rerun_history(run_id: str, session_id: str) -> ChatResponse:
+    async def refresh_historical_sql(
+        run_id: str, session_id: str, *, persist: bool = True,
+        budget: RequestBudget | None = None, expected_version: int | None = None,
+    ) -> ChatResponse:
         record = runs.get(run_id, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Conversation turn not found.")
         if not record.accepted or not record.sql or record.state_snapshot is None:
             raise HTTPException(status_code=409, detail="This turn has no accepted SQL to rerun.")
+        if record.state_snapshot.last_sql != record.sql:
+            raise HTTPException(status_code=409, detail="Historical SQL/state identity mismatch.")
         context = (record.response_payload.get("generation") or {}).get("model_context") or {}
         tables = context.get("tables") or context.get("execution_context", {}).get("tables") or {}
         allowed_tables = set(tables) or set(record.state_snapshot.approved_tables)
@@ -2099,7 +2774,10 @@ def create_app(
         )
         original = record.response_payload.get("generation") or {}
         dialect = original.get("dialect", "sqlite")
-        budget = RequestBudget(15, max_model_calls=0, max_database_calls=2)
+        budget = budget or RequestBudget(15, max_model_calls=0, max_database_calls=2)
+        current = conversations.get(session_id)
+        if persist:
+            expected_version = current.version if current else None
         started = perf_counter()
         try:
             checked = await budget.wait(
@@ -2134,8 +2812,10 @@ def create_app(
             model=record.model,
             strategy=route_question(record.resolved_question),
             sql=record.sql if valid else None,
+            semantic_contract=record.state_snapshot.semantic_contract,
             accepted=valid,
             execution_status="EXECUTABLE" if valid else "NOT_EXECUTED",
+            execution_timestamp=time() if valid else None,
             columns=checked.columns,
             rows=checked.rows,
             row_count=checked.row_count,
@@ -2155,33 +2835,34 @@ def create_app(
         )
         response_state = record.state_snapshot
         if valid:
-            current = conversations.get(session_id)
-            response_state = conversations.put(
-                response_state.model_copy(
+            response_state = response_state.model_copy(
                     update={
                         "last_sql": record.sql,
                         "last_columns": checked.columns,
                         "last_row_count": checked.row_count,
                         "last_truncated": checked.truncated,
                     }
-                ),
-                expected_version=current.version if current else None,
             )
-        return await save_response(
-            ChatRequest(
+        refresh_request = ChatRequest(
                 session_id=session_id,
                 db_id=record.db_id,
                 message="Rerun the saved SQL.",
                 parent_run_id=record.run_id,
                 provider=cast(ModelProvider, record.provider),
                 model=record.model,
-            ),
-            ChatResponse(
+            )
+        response = ChatResponse(
                 session_id=session_id,
                 operation="REFINE",
                 resolved_question=record.resolved_question,
                 state=response_state,
                 generation=generated,
+                parent_run_id=record.run_id,
+                result_id=uuid4().hex if valid else None,
+                state_commit_pending=valid,
+                state_expected_version=expected_version,
+                provenance=[f"historical_sql_source_run:{record.run_id}",
+                            "refreshed_current_data_not_historical_snapshot"],
                 message=(
                     f"Reran the saved SQL against current data: {checked.row_count} rows returned."
                     if valid
@@ -2189,8 +2870,12 @@ def create_app(
                 ),
                 timings_ms={"total": elapsed},
                 token_usage=TokenUsage(input_tokens=0, output_tokens=0),
-            ),
-        )
+            )
+        return await save_response(refresh_request, response) if persist else response
+
+    @app.post("/api/history/{run_id}/rerun", response_model=ChatResponse)
+    async def rerun_history(run_id: str, session_id: str) -> ChatResponse:
+        return await refresh_historical_sql(run_id, session_id)
 
     async def run_chat_job(job_id: str, request: ChatRequest) -> None:
         job = chat_jobs[job_id]

@@ -48,11 +48,13 @@ def test_ordinary_question_calls_no_chart_model_and_has_no_chart() -> None:
     result, usage, entries, presenter, budget = _present("Show counts by currency.")
     assert result.chart_spec is None
     assert result.chart_type == "none"
-    assert result.summary == "Two currencies are represented."
-    assert usage.total_tokens == 18
-    assert budget.model_calls == 1
-    assert [entry.component for entry in entries] == ["result_interpretation"]
-    assert "chart_type" not in presenter.prompts[0]
+    assert result.summary == (
+        "The query returned 2 rows. View the result table for the exact values."
+    )
+    assert usage.total_tokens is None
+    assert budget.model_calls == 0
+    assert entries == []
+    assert presenter.prompts == []
 
 
 def test_explicit_chart_is_deterministic_and_uses_full_result() -> None:
@@ -63,8 +65,8 @@ def test_explicit_chart_is_deterministic_and_uses_full_result() -> None:
         {"Currency": "EUR", "Count": 2},
         {"Currency": "CZK", "Count": 30},
     ]
-    assert budget.model_calls == 1
-    assert [entry.component for entry in entries] == ["result_interpretation"]
+    assert budget.model_calls == 0
+    assert entries == []
 
 
 def test_truncated_result_is_not_plotted() -> None:

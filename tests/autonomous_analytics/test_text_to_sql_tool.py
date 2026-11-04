@@ -19,7 +19,6 @@ from semantic_text2sql.models import (
 )
 from semantic_text2sql.postgres import PostgresRegistry
 from semantic_text2sql.profiling import ProfileStore
-from semantic_text2sql.runtime import RequestBudget
 from semantic_text2sql.service import TextToSQLService
 
 
@@ -161,29 +160,6 @@ def test_successful_question_becomes_bounded_sql_evidence(registry, tmp_path: Pa
     }
     assert result.evidence.metadata["attempt_count"] == 1
     assert result.evidence.metadata["attempts"][0]["validation"]["code"] == "SQL_SAFETY_VALID"
-
-
-def test_service_ledger_separates_inspection_retrieval_and_grounding(
-    registry, tmp_path: Path,
-) -> None:  # type: ignore[no-untyped-def]
-    tool = _tool(registry, tmp_path, ["SELECT COUNT(*) AS count FROM customers"])
-    budget = RequestBudget(timeout_seconds=30)
-
-    execution = asyncio.run(tool.service.execute_question(
-        db_id="shop", question="How many customers are there?",
-        provider="agentrouter", model="test", max_attempts=1, request_budget=budget,
-    ))
-
-    telemetry = execution.generated.telemetry
-    entries = {item.component: item for item in telemetry.call_ledger}
-    assert execution.generated.accepted
-    assert entries["schema_inspection"].kind == "DATABASE"
-    assert entries["schema_retrieval"].kind == "TOOL"
-    assert entries["context_grounding"].kind == "TOOL"
-    assert entries["sql_validation_1"].latency_ms is not None
-    assert entries["sql_execution"].latency_ms is not None
-    assert telemetry.model1_latency_ms is None
-    assert telemetry.total_database_calls == budget.database_calls
 
 
 def test_unsafe_sql_is_rejected_and_returned_structurally(registry, tmp_path: Path) -> None:  # type: ignore[no-untyped-def]

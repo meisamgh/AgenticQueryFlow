@@ -3,15 +3,21 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, computed_field, model_validator
 
+from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.sql_formatting import format_sql_for_display
+
+if TYPE_CHECKING:
+    from semantic_text2sql.ontology import OntologyAdapter
 
 DEFAULT_MODEL = "gpt-5.6-sol"
 GROQ_QWEN_MODEL = "qwen/qwen3.8-27b"
-ModelProvider = Literal["agentrouter", "groq", "justdowork", "codecraft", "true_sota"]
+ModelProvider = Literal[
+    "agentrouter", "groq", "justdowork", "codecraft", "true_sota", "openrouter", "ollama"
+]
 
 
 class StrictModel(BaseModel):
@@ -45,7 +51,7 @@ class TableInfo(StrictModel):
 
 class SchemaInfo(StrictModel):
     db_id: str
-    dialect: Literal["sqlite", "postgres"] = "sqlite"
+    dialect: DatabaseDialect = "sqlite"
     tables: list[TableInfo]
     relationships: list[ForeignKeyInfo] = Field(default_factory=list)
 
@@ -130,7 +136,7 @@ class RelationshipProfile(StrictModel):
 
 class DatabaseProfile(StrictModel):
     db_id: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     profiled_at: str
     columns: list[ColumnProfile]
     tables: list[TableProfile] = Field(default_factory=list)
@@ -175,6 +181,7 @@ class TokenUsage(StrictModel):
     output_tokens: int | None = Field(default=None, ge=0)
     cache_read_tokens: int | None = Field(default=None, ge=0)
     cache_creation_tokens: int | None = Field(default=None, ge=0)
+    provider_retries: int = Field(default=0, ge=0)
 
     @property
     def total_tokens(self) -> int | None:
@@ -346,7 +353,7 @@ class ContextRelationship(StrictModel):
     right_column: str
     left_columns: list[str] | None = None
     right_columns: list[str] | None = None
-    state: Literal["VERIFIED_FK", "INFERRED_KEY_RELATIONSHIP", "UNRESOLVED"]
+    state: Literal["VERIFIED_FK", "APPROVED_CATALOG", "INFERRED_KEY_RELATIONSHIP", "UNRESOLVED"]
     join_cardinality: Literal["ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY", "UNKNOWN"]
     left_key_unique: bool | None = None
     right_key_unique: bool | None = None
@@ -375,7 +382,7 @@ class VerifiedRelationship(StrictModel):
     right: str
     left_columns: list[str] | None = None
     right_columns: list[str] | None = None
-    state: Literal["VERIFIED_FK", "INFERRED_KEY_RELATIONSHIP", "UNRESOLVED"]
+    state: Literal["VERIFIED_FK", "APPROVED_CATALOG", "INFERRED_KEY_RELATIONSHIP", "UNRESOLVED"]
     cardinality: Literal["ONE_TO_ONE", "ONE_TO_MANY", "MANY_TO_ONE", "MANY_TO_MANY", "UNKNOWN"]
     left_key_unique: bool | None = None
     right_key_unique: bool | None = None
@@ -384,7 +391,7 @@ class VerifiedRelationship(StrictModel):
 
 class VerifiedContext(StrictModel):
     question: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     tables: dict[str, VerifiedTable] = Field(default_factory=dict)
     relationships: list[VerifiedRelationship] = Field(default_factory=list)
     business_context: str | None = None
@@ -483,12 +490,15 @@ class CallLedgerEntry(StrictModel):
     component: str
     kind: Literal["MODEL", "DATABASE", "TOOL"]
     status: Literal["SUCCEEDED", "FAILED", "CANCELLED", "UNKNOWN"]
+    task: str | None = None
+    retry_count: int | None = Field(default=None, ge=0)
     provider: str | None = None
     requested_model: str | None = None
     effective_model: str | None = None
     input_tokens: int | None = Field(default=None, ge=0)
     output_tokens: int | None = Field(default=None, ge=0)
     latency_ms: int | None = Field(default=None, ge=0)
+    validation_issues: list[str] = Field(default_factory=list, max_length=4)
 
 
 class PipelineTelemetry(StrictModel):
@@ -581,9 +591,8 @@ class Attempt(StrictModel):
     normalized_sql: str
     validation: ValidationResult
     latency_ms: int = Field(ge=0)
-    validation_ms: int | None = Field(default=None, ge=0)
-    optimization_ms: int | None = Field(default=None, ge=0)
-    execution_ms: int | None = Field(default=None, ge=0)
+    validation_latency_ms: int | None = Field(default=None, ge=0)
+    execution_latency_ms: int | None = Field(default=None, ge=0)
     token_usage: TokenUsage = Field(default_factory=TokenUsage)
 
 
@@ -604,8 +613,10 @@ class RecoveryClaim(StrictModel):
         "NULL_CAUSE",
         "SQL_FAILURE",
         "UNCERTAINTY",
+        "METRIC_DEFINITION",
     ]
     statement: str = Field(min_length=1, max_length=500)
+    metric_id: str | None = Field(default=None, max_length=64)
     evidence_ids: list[str] = Field(min_length=1, max_length=6)
     table: str | None = Field(default=None, max_length=128)
     column: str | None = Field(default=None, max_length=128)
@@ -686,16 +697,18 @@ class VerifiedSchemaSnapshot(StrictModel):
     """Live schema/profile inspected once within a governed SQL request."""
 
     db_id: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     live_schema: SchemaInfo
     profile: DatabaseProfile | None = None
 
 
 class GenerateRequest(StrictModel):
+    _catalog_relationships: list[ContextRelationship] = PrivateAttr(default_factory=list)
+    _ontology_adapter: OntologyAdapter | None = PrivateAttr(default=None)
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     question: str = Field(min_length=1, max_length=4_000)
     evidence: str | None = Field(default=None, max_length=8_000)
-    dialect: Literal["sqlite", "postgres"] = "sqlite"
+    dialect: DatabaseDialect = "sqlite"
     provider: ModelProvider = "agentrouter"
     model: str = Field(default=DEFAULT_MODEL, min_length=1, max_length=200)
     max_attempts: int = Field(default=3, ge=1, le=3)
@@ -714,7 +727,25 @@ class GenerateRequest(StrictModel):
     schema_snapshot: VerifiedSchemaSnapshot | None = Field(default=None, exclude=True)
 
 
+class DashboardTarget(StrictModel):
+    dashboard_id: str = Field(min_length=1, max_length=100)
+    revision_id: str = Field(min_length=1, max_length=100)
+    widget_id: str | None = Field(default=None, min_length=1, max_length=100)
+
+
 class ChatRequest(StrictModel):
+    _dashboard_snapshot_only: bool = PrivateAttr(default=False)
+    _dashboard_sources: dict[str, Any] = PrivateAttr(default_factory=dict)
+    _dashboard_design_action: str = PrivateAttr(default="PROPOSE")
+    _dashboard_proposal_id: str | None = PrivateAttr(default=None)
+    _dashboard_proposal_version: int | None = PrivateAttr(default=None)
+    _dashboard_approval_quote: str | None = PrivateAttr(default=None)
+    _dashboard_investigation_evidence: list[dict[str, Any]] = PrivateAttr(default_factory=list)
+    _dashboard_source_ids: list[str] = PrivateAttr(default_factory=list)
+    _dashboard_widget_id: str | None = PrivateAttr(default=None)
+    _dashboard_request_id: str | None = PrivateAttr(default=None)
+    _dashboard_previous_result_id: str | None = PrivateAttr(default=None)
+    dashboard_target: DashboardTarget | None = None
     model_config = ConfigDict(extra="forbid", validate_default=True)
     session_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
@@ -776,6 +807,10 @@ class ChatRequest(StrictModel):
     ] | None = None
     assistant_changes: list[RequestedChange] = Field(default_factory=list, max_length=10)
     assistant_original_question: str | None = Field(default=None, max_length=4_000)
+    # Request-local Top-layer handoff; not accepted from or serialized to API JSON.
+    _turn_state: ConversationState | None = PrivateAttr(default=None)
+    _turn_expected_version: int | None = PrivateAttr(default=None)
+    _history_source_run_id: str | None = PrivateAttr(default=None)
 
 
 class ConversationState(StrictModel):
@@ -978,6 +1013,10 @@ class FilterValuesResponse(StrictModel):
     values: list[str] = Field(default_factory=list, max_length=100)
     more_available: bool = False
     cached: bool = False
+    provenance: str = "LIVE_BOUNDED_QUERY"
+    expires_in_seconds: int = 60
+    complete_domain: bool = False
+    ambiguous: bool = False
 
 
 class RecommendedChart(StrictModel):
@@ -999,7 +1038,26 @@ class ChartRecommendations(StrictModel):
     alternative_charts: list[RecommendedChart] = Field(default_factory=list, max_length=6)
 
 
+class DashboardDesignFailure(StrictModel):
+    code: str
+    field: str
+    message: str
+    repairable: bool
+    request_id: str
+    proposal_id: str
+    attempt: int = Field(ge=1, le=2)
+    exception_type: str = ""
+
+
 class ChatResponse(StrictModel):
+    _dashboard_evidence: dict[str, Any] = PrivateAttr(default_factory=dict)
+    # Validated DashboardSpec serialized at the specialist boundary; kept here
+    # as a JSON envelope to avoid importing dashboard_service back into models.
+    dashboard: dict[str, Any] | None = None
+    dashboard_design_proposal: dict[str, Any] | None = None
+    dashboard_design_failures: list[DashboardDesignFailure] = Field(
+        default_factory=list, max_length=2
+    )
     session_id: str
     run_id: str | None = None
     result_id: str | None = Field(default=None, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
@@ -1056,11 +1114,12 @@ class ChatResponse(StrictModel):
 
 
 class GenerateResponse(StrictModel):
+    execution_timestamp: float | None = None
     db_id: str
     question: str
     provider: ModelProvider
     model: str
-    dialect: Literal["sqlite", "postgres"] = "sqlite"
+    dialect: DatabaseDialect = "sqlite"
     strategy: StrategyHints
     schema_selection: SchemaSelection | None = None
     semantic_contract: SemanticContract | None = None
@@ -1097,14 +1156,14 @@ class GenerateResponse(StrictModel):
 class CheckRequest(StrictModel):
     db_id: str = Field(min_length=1, max_length=100, pattern=r"^[A-Za-z0-9_-]+$")
     sql: str = Field(min_length=1, max_length=50_000)
-    dialect: Literal["sqlite", "postgres"] = "sqlite"
+    dialect: DatabaseDialect = "sqlite"
     execute: bool = False
     max_rows: int = Field(default=100, ge=1, le=500)
 
 
 class CheckResponse(StrictModel):
     db_id: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     validation: ValidationResult
     rows: list[list[Any]] = Field(default_factory=list)
     columns: list[str] = Field(default_factory=list)
@@ -1122,5 +1181,5 @@ class ModelOption(StrictModel):
 
 class DatabaseOption(StrictModel):
     db_id: str
-    dialect: Literal["sqlite", "postgres"]
+    dialect: DatabaseDialect
     configured: bool

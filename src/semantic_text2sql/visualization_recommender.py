@@ -553,6 +553,21 @@ Instructions:
 9. Return only valid JSON matching the existing LLMChartProposals schema: one
    primary chart and up to three meaningful alternatives.
 
+Column selection:
+- Evaluate every available column as a candidate for X-axis, Y-axis, series,
+  or exclusion. Choose the smallest useful combination that answers the request;
+  do not use every column merely because it exists.
+- Prefer temporal columns for trends, categorical columns for comparisons,
+  and compatible numeric measures for relationships. Use cardinality, types,
+  units and accepted grain, not column names alone.
+- Exclude identifiers and irrelevant free text unless explicitly requested.
+  Respect explicitly requested columns; do not introduce an unrequested measure.
+- Combine separate Year and Month columns into a chronological X-axis when
+  appropriate, using the existing x_components representation, without aggregation.
+- For chart-type-only changes, preserve accepted encodings rather than choosing
+  new candidates. Never change aggregation or grain to make a chart fit; use
+  the application's supported insufficiency flow when governed SQL is needed.
+
 JSON schema shape (return ONLY this object):
 {{"primary_chart": {{"chart_type": str, "x": str|null, "x_components": [str], "y": str,
 "y_measures": [str], "series": str|null, "reason": str}},
@@ -562,7 +577,9 @@ Use only explicitly requested plot columns when the request names two or more.
 For separate Year and Month columns, you may set x="Year-Month" and
 x_components=["Year", "Month"] for a monthly time axis. Otherwise x_components=[].
 The y and y_measures fields must reference numeric result columns. Prefer multiple
-measures only when their units are compatible. Keep reason to one short sentence.
+measures only when their units are compatible. Use reason only to explain why
+the chart design is appropriate; do not explain the analytical result or infer
+business conclusions. Keep reason to one short sentence.
 
 Context:
 - Current user chart request: {question}
@@ -573,13 +590,14 @@ Context:
 - Available columns and profiles: {profile}
 - Executed row count: {rows_count}
 - Bounded sample: {sample}
+- Accepted analytical metadata (not new data): {analytical_context}
 
 Prioritize analytical correctness, stakeholder readability, and faithful
 preservation of the accepted result.
 """
 
 
-def _result_profile(
+def profile_chart_result(
     columns: list[str], rows: list[list[Any]], *, sample_rows: int = 5
 ) -> tuple[str, str]:
     """Bounded textual profile: role + unit + distinct values per column."""
@@ -606,7 +624,7 @@ def _result_profile(
     return "; ".join(lines), str(sample[:sample_rows])
 
 
-def _validated_rank_chart(
+def validate_chart_proposal(
     proposal: LLMChartProposal,
     *,
     columns: list[str],
@@ -677,6 +695,15 @@ def _validated_rank_chart(
         )
     except VisualizationError:
         return None
+    # The planner may reject incompatible extra measures or normalize a shape.
+    # Such a change is not validation of the model's original proposal.
+    if (
+        {spec.y, *spec.y_measures} != {proposal.y, *proposal.y_measures}
+        or proposal.x is not None and spec.x != proposal.x
+        or spec.series != proposal.series
+        or spec.x_components != proposal.x_components
+    ):
+        return None
     return candidate.model_copy(update={"title": spec.title, "score": round(score, 3)})
 
 
@@ -695,6 +722,7 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     previous_chart: ChartSpec | None = None,
     chart_changes: list[RequestedChange] | None = None,
     preserve_previous_encodings: bool = False,
+    analytical_context: dict[str, Any] | None = None,
 ) -> tuple[ChartRecommendations | None, TokenUsage, int]:
     """One bounded model call proposing charts for an executed result.
 
@@ -706,7 +734,7 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     started = perf_counter()
     if truncated or not rows or len(columns) < 2:
         return None, usage, 0
-    profile, sample = _result_profile(columns, rows)
+    profile, sample = profile_chart_result(columns, rows)
     prior_context = (
         json.dumps({
             "chart_type": previous_chart.chart_type,
@@ -731,6 +759,7 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
         profile=profile,
         rows_count=len(rows),
         sample=sample,
+        analytical_context=json.dumps(analytical_context or {}, separators=(",", ":")),
     )
     try:
         task_completion = getattr(completer, "complete_task", None)
@@ -755,7 +784,7 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     except Exception:  # noqa: BLE001 - optional chart advice never aborts a completed query
         return None, usage, round((perf_counter() - started) * 1000)
 
-    primary = _validated_rank_chart(
+    primary = validate_chart_proposal(
         parsed.primary_chart,
         columns=columns,
         rows=rows,
@@ -781,7 +810,7 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     }
     llm_score = 0.95
     for proposal in parsed.alternative_charts:
-        validated = _validated_rank_chart(
+        validated = validate_chart_proposal(
             proposal,
             columns=columns,
             rows=rows,

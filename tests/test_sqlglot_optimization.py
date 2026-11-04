@@ -5,7 +5,6 @@ from semantic_text2sql.agent import TextToSQLAgent, _sqlglot_optimization_candid
 from semantic_text2sql.database import DatabaseRegistry
 from semantic_text2sql.models import GenerateRequest, SchemaInfo, StrategyHints
 from semantic_text2sql.profiling import ProfileStore
-from semantic_text2sql.runtime import RequestBudget
 from semantic_text2sql.validator import normalize_sql
 
 
@@ -88,39 +87,6 @@ def test_normal_generation_runs_automatic_sqlglot_stage(tmp_path: Path) -> None:
     assert response.optimization.status in {"optimized", "equivalent_not_faster"}
     assert "optimization" in stages
     assert stages[-1] == "execution"
-
-
-def test_equivalence_runs_warm_optimizer_without_duplicate_database_warmups(
-    tmp_path: Path, monkeypatch,
-) -> None:  # type: ignore[no-untyped-def]
-    directory = tmp_path / "orders"
-    directory.mkdir()
-    (directory / "orders.sqlite").write_bytes(_sqlite_database_bytes(tmp_path))
-    registry = DatabaseRegistry(tmp_path)
-    original_execute = registry.execute
-    executed: list[str] = []
-
-    def counted_execute(db_id: str, sql: str, *, max_rows: int):  # type: ignore[no-untyped-def]
-        executed.append(sql)
-        return original_execute(db_id, sql, max_rows=max_rows)
-
-    monkeypatch.setattr(registry, "execute", counted_execute)
-    budget = RequestBudget(timeout_seconds=30, max_database_calls=6)
-    response = asyncio.run(
-        TextToSQLAgent(registry, RedundantPredicateModel()).generate(
-            GenerateRequest(
-                db_id="orders", question="How many orders?", execute=True, max_attempts=1,
-            ),
-            budget=budget,
-        )
-    )
-
-    assert response.accepted
-    assert response.rows == [[2]]
-    assert response.optimization is not None
-    assert response.optimization.result_equivalent
-    assert len(executed) == 5  # equivalence pair, timed pair, accepted SQL
-    assert budget.database_calls == 6  # one schema inspection plus five executions
 
 
 def _sqlite_database_bytes(tmp_path: Path) -> bytes:

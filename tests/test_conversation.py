@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import time
@@ -15,6 +16,7 @@ from semantic_text2sql.conversation import (
     ConversationConflict,
     ConversationStore,
     classify_operation,
+    interpret_turn_detailed,
     requires_model_interpretation,
     resolve_semantic_contract,
     resolve_turn,
@@ -182,6 +184,33 @@ def test_change_period_removes_old_date_bounds_not_country_filter() -> None:
     ]
 
 
+def test_change_period_keeps_unrelated_future_date_bound() -> None:
+    base = SemanticContract(active_period="2025", filters=[
+        SemanticFilter(operand="orders.order_date", operator=">=", value="2025-01-01"),
+        SemanticFilter(operand="orders.order_date", operator="<", value="2026-06-01"),
+    ])
+    updated = resolve_semantic_contract(
+        base, original_question="Use 2026", resolved_question="Show 2026",
+        changes=[RequestedChange(operation="CHANGE_PERIOD", target="year", new_value="2026")],
+    )
+    assert [(item.operator, item.value) for item in updated.filters] == [
+        ("<", "2026-06-01")
+    ]
+
+
+def test_ranking_delta_keeps_multiword_metric() -> None:
+    updated = resolve_semantic_contract(
+        SemanticContract(), original_question="Rank customers", resolved_question="Rank customers",
+        changes=[RequestedChange(
+            operation="CHANGE_RANKING", target="ranking",
+            new_value="top 5 by total annual consumption descending",
+        )],
+    )
+    assert updated.ranked_metric == "total annual consumption"
+    assert updated.limit == 5
+    assert updated.ranking_direction == "DESC"
+
+
 def test_add_conflicting_equality_requires_explicit_intent() -> None:
     base = SemanticContract(filters=[
         SemanticFilter(operand="Country", operator="=", value="Germany"),
@@ -274,6 +303,49 @@ class ConversationModel:
     ) -> tuple[str, int]:
         self.previous_sql.append(previous_sql)
         return self.responses.pop(0), 1
+
+
+def test_interpret_turn_prefers_task_aware_json_mode() -> None:
+    class TaskModel:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, str, str, bool]] = []
+
+        async def complete_task(
+            self, model: str, prompt: str, task: str, *, json_mode: bool = False,
+        ) -> tuple[str, TokenUsage]:
+            self.calls.append((model, prompt, task, json_mode))
+            return (
+                json.dumps({
+                    "operation": "NEW_QUERY", "depends_on_previous": False,
+                    "resolved_instruction": "How many orders?", "confidence": 1.0,
+                }),
+                TokenUsage(input_tokens=5, output_tokens=3),
+            )
+
+        async def complete_detailed(self, model: str, prompt: str) -> tuple[str, TokenUsage]:
+            raise AssertionError("complete_task should take precedence")
+
+    previous = ConversationState(
+        session_id="task-aware",
+        db_id="books",
+        root_question="Count the orders",
+        resolved_question="Total orders per month",
+    )
+    model = TaskModel()
+    interpretation, usage = asyncio.run(interpret_turn_detailed(
+        model,  # type: ignore[arg-type]
+        provider="agentrouter",
+        model="test-model",
+        message="How many orders?",
+        previous=previous,
+    ))
+    assert interpretation.operation == "NEW_QUERY"
+    assert interpretation.source == "model"
+    assert usage.input_tokens == 5
+    assert model.calls == [
+        ("test-model", model.calls[0][1], "decision", True),
+    ]
+    assert "How many orders?" in model.calls[0][1]
 
 
 class TurnModel:

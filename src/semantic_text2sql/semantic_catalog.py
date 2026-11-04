@@ -134,6 +134,7 @@ class MetricCatalogEntry(ApprovableFact):
     rollup: str | None = None
     missing_data_policy: str | None = None
     version: int = Field(default=1, ge=1)
+    dependencies: list[str] = Field(default_factory=list)
 
 
 class CatalogDocument(StrictModel):
