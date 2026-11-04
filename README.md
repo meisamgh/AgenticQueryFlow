@@ -7,7 +7,12 @@ Queryflow is a conversational analytics app for **SQLite** and allowlisted **Pos
 https://github.com/user-attachments/assets/cea65003-e31e-4846-a532-904ffcb6e25f
 
 <p align="center">
-  <img src="Arch-pic.png" alt="Queryflow architecture" width="900" />
+  <img src="Arch-pic_ont.png" alt="Queryflow architecture" width="900" />
+</p>
+
+<p align="center">
+
+  <img src="WorkFlow.png" alt="Queryflow architecture" width="900" />
 </p>
 
 ## Features
