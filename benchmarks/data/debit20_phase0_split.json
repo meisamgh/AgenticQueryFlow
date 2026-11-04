@@ -1,0 +1,7 @@
+{
+  "method": "sha256 of queryflow-phase0-2026-11-04:<case ID>; first ten dev, remainder heldout",
+  "dev_ids": [1471, 1472, 1479, 1480, 1482, 1498, 1506, 1521, 1531, 1533],
+  "heldout_ids": [1473, 1476, 1481, 1490, 1500, 1501, 1509, 1525, 1526, 1529],
+  "catalog_authoring_case_ids": [],
+  "warning": "Prospective split only. All 20 gold queries were inspected before this amendment; 16 questions overlap the historical corpus. This is not a pristine holdout. No debit-card catalog has been authored."
+}

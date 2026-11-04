@@ -1,5 +1,37 @@
 # V6.4 progress checkpoint
 
+## 2026-11-04 — Amendment Phase 0 stop gate
+
+Only evaluation/docs/tests changed; no new runtime work or debit-card catalog
+authoring. Saved-artifact SQLGlot table/ON comparison, case annotations, a frozen
+prospective 10/10 split, raw paired counts/exact McNemar and read-only saved-SQL
+rechecks are in SEMANTIC_GRAPH_PHASE0.md and semantic_graph_phase0.json.
+DB files do exist outside repository data/; provider keys are present but no
+provider validity/generation/recovery request was made. False repairs remain
+NOT_RUN/null, not zero. No raw result rows, secrets or database files were saved.
+
+Largest inspected schema: european_football_2, 7 tables/199 columns/31 FKs. Timings
+measure the retained compiler, NetworkX build, snapshot loads and bounded traversal;
+the last returns BUDGET_EXHAUSTED, not a successful join plan. Default graph and
+ontology flags remain OFF. A distinct persistence-OFF flag and requested ambiguity
+warnings are pending AFTER this stop gate; existing working code was not deleted.
+
+The history fixture has 399 SQL-labeled records, 16/20 question overlaps; 8/10
+prospective heldout questions overlap it. All 20 gold queries were previously
+inspected, so this is not a pristine holdout. Authoring IDs remain empty. Source
+definitions, output shape and time/population conflicts require adjudication
+before treating exact reference matches as business correctness. No NVIDIA work,
+commit/push/restart or changes to unrelated images/environment were performed.
+
+Phase 0 verification: 716 Python tests passed, 2 PostgreSQL integrations skipped;
+198 frontend/voice tests passed with Deno (Node unavailable). Executed uv run
+pytest/ruff/mypy with an offline temporary UV cache; pytest addopts override made
+the summary visible. Ruff src/tests and the two new benchmark scripts, mypy
+(70 source files), and diff whitespace checks passed. Twelve new evaluation tests
+cover lexical alias/CTE handling, wrong keys/qualification, unprovable lineage,
+McNemar, prospective split integrity/leakage disclosure, and actual read-only SQL
+rejection/truncation proofs. No later runtime phase is marked VERIFIED.
+
 ## 2026-11-04 — Offline graph-enhanced semantic grounding
 
 Checkpoint before implementation: `7375d8f`. Added deterministic NetworkX
