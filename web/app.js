@@ -91,14 +91,11 @@ async function initialize() {
     await Promise.all([loadDatabaseSchema(), refreshHistory(), loadGlossary($("#databaseSelect").value)]);
     const configuredSql = models.find(item => item.provider === uiConfig.sql_provider
       && item.model === uiConfig.sql_model && item.configured);
-    const configuredContext = uiConfig.context_mode !== "model1" || models.some(item =>
-      item.provider === uiConfig.context_provider && item.model === uiConfig.context_model && item.configured);
     state.modelConfig = uiConfig;
-    state.ready = !!$("#databaseSelect").value && !!configuredSql && configuredContext;
+    state.ready = !!$("#databaseSelect").value && !!configuredSql;
     $("#sendButton").disabled = !state.ready || !!voiceInput?.busy;
     if (!$("#databaseSelect").value) showError(`Database ${uiConfig.default_db_id} is not configured. Check TEXT2SQL_DEFAULT_DB_ID and TEXT2SQL_DATABASE_ROOT in .env.`);
     else if (!configuredSql) showError("The SQL model configured in .env is unavailable. Check TEXT2SQL_SQL_PROVIDER and TEXT2SQL_SQL_MODEL.");
-    else if (!configuredContext) showError("The context model configured in .env is unavailable. Check TEXT2SQL_CONTEXT_PROVIDER and TEXT2SQL_CONTEXT_MODEL.");
   } catch (error) {
     setHealth(false);
     showError(error.message);
@@ -346,7 +343,7 @@ const progressLabels = {
   completed: "Finished",
 };
 
-function appendProgress(contextMode) {
+function appendProgress() {
   $("#emptyState").hidden = true;
   const fragment = $("#progressTemplate").content.cloneNode(true);
   const article = fragment.querySelector("article");
@@ -459,9 +456,8 @@ async function send(message, feedbackCategory = null, dashboardTarget = null) {
   $("#sendButton").disabled = true;
   ["#databaseSelect", "#resetButton"].forEach(id => { $(id).disabled = true; });
   appendUser(message.trim());
-  const contextMode = state.modelConfig?.context_mode || "retrieval";
   const started = performance.now();
-  const progress = appendProgress(contextMode);
+  const progress = appendProgress();
   state.cancelled = false;
   state.pendingVizRequest = vizRequested(message);
   $("#cancelButton").hidden = false;
@@ -2921,18 +2917,20 @@ function renderPipelineDetails(fragment, timings, body, generation) {
     ["Top-layer decisions", timings.top_decisions],
     ["Analytics planning model", timings.analytics_planning],
     ["Context planning", timings.context_planning],
+    ["Context grounding", timings.context_grounding],
     ["SQL generation and repair", timings.sql_generation],
     ["SQL validation", timings.sql_validation],
     ["Database execution", timings.sql_execution],
     ["Result analysis", timings.result_analysis],
     ["Result explanation", timings.result_explanation],
     ["Charting model", timings.charting_model],
+    ["Chart validation", timings.chart_validation],
     ["Top-layer final answer", timings.top_final_answer],
   ] : [
     ["Conversation interpretation", timings.conversation_interpretation],
     ["Analytics planning", timings.analytics_planning],
     ["Routing", timings.routing],
-    ["Context planning", timings.planning],
+    ["Context grounding", timings.planning],
     ["Generation / validation / execution", timings.generation_validation_execution],
   ];
   stages.forEach(([label, milliseconds]) => {

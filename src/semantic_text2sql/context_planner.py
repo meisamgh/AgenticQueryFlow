@@ -1,12 +1,8 @@
-"""Bounded LLM context planning and deterministic schema/glossary verification."""
+"""Deterministic schema/glossary verification and legacy selection adapters."""
 
 from __future__ import annotations
 
-import json
-import re
-from typing import Any, Protocol, cast
-
-from pydantic import ValidationError
+from typing import Any, Protocol
 
 from semantic_text2sql.glossary import BusinessGlossary
 from semantic_text2sql.models import (
@@ -20,8 +16,6 @@ from semantic_text2sql.models import (
     SemanticContract,
     TokenUsage,
 )
-
-_FENCE = re.compile(r"^```(?:json)?\s*(.*?)\s*```$", re.I | re.S)
 
 
 class ContextPlannerCompleter(Protocol):
@@ -38,59 +32,16 @@ async def plan_context_detailed(
     previous_intent: SemanticContract | None = None,
     candidate_relationships: list[dict[str, str]] | None = None,
 ) -> tuple[ContextManifest, TokenUsage]:
-    """Ask LLM 1 what grounded information is required; never ask it for SQL strategy."""
-    shape = ContextManifest.model_json_schema()
-    prompt = f"""You are the Context Selector in a Text-to-SQL pipeline.
-Select only the information another model needs to reason about and generate SQL. Return JSON only,
-matching the supplied schema exactly. Decide only relevant tables, relevant columns, relevant
-approved business concepts, and extra metadata types needed. Do not define outputs, filters,
-measures, aggregation, grouping, grain, ranking, derived metrics, or temporal operations. Never
-generate SQL and never recommend JOIN, EXISTS, CTE, DISTINCT, or another implementation strategy.
-Use only candidate table and column identifiers. Keep metadata requests minimal and specific.
-Use the resolved question and trusted evidence as authoritative. For follow-ups or corrections,
-preserve approved business definitions and unaffected requirements from the previous accepted
-context. Select enough context to answer the whole request, but do not add unrelated schema or
-invent database facts. Candidate schema, glossary entries, and previous context are inputs to
-selection, not a final answer to the client.
-Select a business concept only when it appears in RELEVANT APPROVED GLOSSARY and directly helps the
-resolved question. If that section is None or an empty list, return business_concepts as [].
+    """Deprecated compatibility adapter; never invokes the supplied completer.
 
-RESOLVED QUESTION:
-{question}
-
-TRUSTED EVIDENCE:
-{evidence or "None"}
-
-CANDIDATE SCHEMA:
-{_candidate_schema(candidate_schema)}
-
-COMPACT CANDIDATE RELATIONSHIP TOPOLOGY (facts only; no SQL strategy):
-{json.dumps(candidate_relationships or [], separators=(",", ":"))}
-
-RELEVANT APPROVED GLOSSARY:
-{_glossary_context(glossary, question)}
-
-MINIMUM PREVIOUS ACCEPTED CONTEXT (follow-up/correction only):
-{_previous_context(previous_intent)}
-
-REQUIRED JSON SCHEMA:
-{json.dumps(shape, separators=(",", ":"))}
-"""
-    task_completion = getattr(completer, "complete_task", None)
-    detailed = getattr(completer, "complete_detailed", None)
-    if callable(task_completion):
-        raw, usage = await cast(Any, task_completion)(model, prompt, "context", json_mode=True)
-    elif callable(detailed):
-        raw, usage = await cast(Any, detailed)(model, prompt)
-    else:
-        raw = await completer.complete(model, prompt)
-        usage = TokenUsage()
-    match = _FENCE.fullmatch(raw.strip())
-    value = match.group(1) if match else raw.strip()
-    try:
-        return ContextManifest.model_validate(json.loads(value)), usage
-    except (json.JSONDecodeError, ValidationError) as exc:
-        raise ValueError("Context Planner returned an invalid ContextRequest.") from exc
+    Candidates are already bounded by retrieval. Dependency restoration and
+    verified metadata remain the responsibility of verify_context_request.
+    """
+    return ContextManifest(
+        selected_tables=[table.name for table in candidate_schema.tables],
+        selected_columns={table.name: [column.name for column in table.columns]
+                          for table in candidate_schema.tables},
+    ), TokenUsage()
 
 
 def selection_to_context_request(selection: ContextManifest) -> ContextRequest:
@@ -336,44 +287,6 @@ def fallback_context_request(contract: SemanticContract) -> ContextRequest:
         measures=contract.measures,
         business_concepts=[item.id for item in contract.structural_formulas],
     )
-
-
-def _candidate_schema(schema: SchemaInfo) -> str:
-    """Compact high-recall candidates only; deterministic enrichment happens after Model 1."""
-    payload = {table.name: [column.name for column in table.columns] for table in schema.tables}
-    return json.dumps(payload, separators=(",", ":"))
-
-
-def _glossary_context(glossary: BusinessGlossary | None, question: str) -> str:
-    if glossary is None:
-        return "None"
-    words = {item.casefold() for item in re.findall(r"[A-Za-z0-9]+", question)}
-    selected = []
-    for term in glossary.terms:
-        aliases = " ".join([term.term, *term.synonyms])
-        if words & {item.casefold() for item in re.findall(r"[A-Za-z0-9]+", aliases)}:
-            selected.append(
-                {
-                    "term": term.term,
-                    "synonyms": term.synonyms,
-                    "definition": term.definition,
-                    "formula": term.formula,
-                    "columns": term.columns,
-                    "grain": term.grain,
-                }
-            )
-    return json.dumps(selected[:8], separators=(",", ":"))
-
-
-def _previous_context(contract: SemanticContract | None) -> str:
-    if contract is None:
-        return "None"
-    payload = {
-        "tables": contract.proposed_tables,
-        "columns": contract.required_columns,
-        "business_concepts": [item.id for item in contract.structural_formulas],
-    }
-    return json.dumps(payload, separators=(",", ":"))
 
 
 def _verified_metadata(

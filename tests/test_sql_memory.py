@@ -200,9 +200,8 @@ def test_historical_refresh_and_plot_share_new_result_without_regeneration(
     assert plotted["presentation_state"]["source_result_id"] == plotted["result_id"]
     assert plotted["chart_id"]
     assert len(sql.calls) == 1
-    assert planner.calls == (3 if integrated else 4)
-    if not integrated:
-        assert "Accepted analytical metadata" in planner.prompts[-1]
+    assert planner.calls == 3
+    assert not any("Accepted analytical metadata" in prompt for prompt in planner.prompts)
     assert plotted["generation"]["sql"] == first["generation"]["sql"]
 
 

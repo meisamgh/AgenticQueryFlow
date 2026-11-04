@@ -144,6 +144,32 @@ def test_controlled_planning_latency_and_call_counts() -> None:
 
     for integrated in (False, True):
         calls, durations = asyncio.run(measure(integrated))
-        assert calls == (0 if integrated else 30)
+        assert calls == 0
         print(f"integrated={integrated}: calls={calls}, "
               f"p50={median(durations):.3f}ms p95={sorted(durations)[28]:.3f}ms")
+
+
+@pytest.mark.parametrize("proposal", [None, LLMChartProposal(
+    chart_type="line", x="month", y="invented",
+)])
+def test_missing_or_invalid_proposal_falls_back_with_zero_model_budget(
+    proposal: LLMChartProposal | None,
+) -> None:
+    budget = RequestBudget(timeout_seconds=5, max_model_calls=0)
+    outcome = asyncio.run(design_chart(
+        result=result(), objective="Plot revenue by month", completer=NoModel(),
+        budget=budget, fresh_result=True, provisional_proposal=proposal,
+    ))
+    assert outcome.status == "CHART_READY"
+    assert outcome.spec and outcome.spec.y == "revenue"
+    assert budget.model_calls == 0 and budget.database_calls == 0
+    assert outcome.usage.total_tokens in (None, 0)
+    assert all(entry.kind != "MODEL" for entry in outcome.ledger)
+
+
+def test_chart_requires_immutable_result_reference() -> None:
+    outcome = asyncio.run(design_chart(
+        result=result().model_copy(update={"result_id": None}), objective="Plot it",
+        budget=RequestBudget(timeout_seconds=5, max_model_calls=0),
+    ))
+    assert outcome.status == "REQUERY_REQUIRED" and outcome.spec is None

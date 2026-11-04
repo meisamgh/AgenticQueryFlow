@@ -1,6 +1,6 @@
-"""Bounded plotting specialist over complete accepted query results.
+"""Deterministic chart execution over complete accepted query results.
 
-The model proposes chart design only. Existing chart planning validates axes,
+The Top layer proposes chart design. Existing chart planning validates axes,
 row identity, chart shape, and truncation before any proposal reaches Plotly.
 """
 
@@ -34,7 +34,6 @@ from semantic_text2sql.visualization_recommender import (
     LLMChartProposal,
     materialize_recommendation,
     recommend_charts,
-    refine_charts_with_model,
     validate_chart_proposal,
 )
 
@@ -85,9 +84,10 @@ async def design_chart(
     *,
     result: ChatResponse | RecentResult | None,
     objective: str,
-    completer: Any,
-    provider: str,
-    model: str,
+    # Deprecated adapter arguments cannot invoke a model.
+    completer: Any = None,
+    provider: str = "",
+    model: str = "",
     budget: RequestBudget,
     previous: ConversationState | None = None,
     db_id: str | None = None,
@@ -99,6 +99,8 @@ async def design_chart(
     generation = result.generation if result is not None else None
     if generation is None or not generation.accepted:
         return PlottingOutcome("REQUERY_REQUIRED", "No accepted result is available to plot.")
+    if result is None or not result.result_id:
+        return PlottingOutcome("REQUERY_REQUIRED", "The accepted result has no stable source ID.")
     if generation.truncated or generation.row_count != len(generation.rows):
         return PlottingOutcome(
             "REQUERY_REQUIRED",
@@ -279,58 +281,10 @@ async def design_chart(
                 ledger=proposal_ledger,
             )
 
-    # The dedicated model sees a bounded profile/sample, not the full result;
-    # its proposal is always rechecked against every executed row.
-    calls_before = budget.model_calls
-    recommendations, usage, latency_ms = await refine_charts_with_model(
-        completer,
-        provider=provider,
-        model=model,
-        question=objective,
-        columns=generation.columns,
-        rows=generation.rows,
-        truncated=False,
-        budget=budget,
-        required_chart_type=intent.chart_type if intent.explicit_type else None,
-        previous_chart=prior,
-        chart_changes=changes,
-        preserve_previous_encodings=preserve_encodings,
-        analytical_context={
-            "complete": True,
-            "result_id": result.result_id if result is not None else None,
-            "grain": list(previous.semantic_contract.grain)
-            if previous and previous.semantic_contract else [],
-        },
-    )
-    model_called = budget.model_calls > calls_before
-    ledger = proposal_ledger + ((
-        CallLedgerEntry(
-            component="plotting_model",
-            kind="MODEL",
-            status="SUCCEEDED" if recommendations is not None else "FAILED",
-            provider=provider,
-            requested_model=model,
-            effective_model=model,
-            input_tokens=usage.input_tokens,
-            output_tokens=usage.output_tokens,
-            latency_ms=latency_ms,
-        ),
-    ) if model_called else ())
-    if recommendations is not None:
-        try:
-            spec = materialize_recommendation(
-                recommendations.primary_chart,
-                question=objective,
-                columns=generation.columns,
-                rows=generation.rows,
-                truncated=False,
-            )
-            return PlottingOutcome(
-                "CHART_READY", "The plotting model proposed a validated chart.",
-                spec=spec, recommendations=recommendations, usage=usage, ledger=ledger,
-            )
-        except VisualizationError:
-            pass
+    # Visualization reasoning belongs to the Top-layer decision. Missing or
+    # invalid proposals use the deterministic, fully validated chart path.
+    usage = TokenUsage()
+    ledger = proposal_ledger
     # A failed model proposal cannot enter the client. A deterministic chart
     # may still be possible, and is explicitly identified as a fallback.
     try:
@@ -354,7 +308,7 @@ async def design_chart(
     except VisualizationError as exc:
         return PlottingOutcome("UNSUPPORTED", str(exc), usage=usage, ledger=ledger)
     return PlottingOutcome(
-        "CHART_READY", "Used a validated chart after the plotting model was unavailable.",
+        "CHART_READY", "Selected a validated chart from the accepted result.",
         spec=spec, recommendations=recommend_charts(
             objective, generation.columns, generation.rows, truncated=False
         ), usage=usage, ledger=ledger,

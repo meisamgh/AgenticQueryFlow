@@ -247,7 +247,7 @@ def test_model_chart_prompt_receives_only_a_bounded_row_sample() -> None:
         question="Plot the values", columns=["category", "value"],
         rows=[[f"row_{index}", float(index)] for index in range(20)],
     ))
-    assert recommendation is None
+    assert recommendation is not None
 
 
 def test_five_column_prompt_selects_relevant_candidates_without_extra_measures() -> None:
@@ -277,7 +277,7 @@ def test_five_column_prompt_selects_relevant_candidates_without_extra_measures()
               ["202601", 90.0, "France", 8, 15.0],
               ["202602", 95.0, "France", 9, 16.0]],
     ))
-    assert model.calls == 1
+    assert model.calls == 0
     assert result is not None
     assert result.primary_chart.x == "Month"
     assert result.primary_chart.y == "Revenue"
@@ -310,22 +310,13 @@ def test_chart_type_only_followup_preserves_accepted_axes_and_metric() -> None:
             }, "alternative_charts": []}), TokenUsage()
 
     wrong = ChartModel("cost")
-    rejected, _, _ = asyncio.run(refine_charts_with_model(
+    accepted, usage, _ = asyncio.run(refine_charts_with_model(
         wrong, provider="agentrouter", model="test", question="Change to a horizontal bar chart",
         columns=columns, rows=rows, required_chart_type="horizontal_bar",
         previous_chart=prior, chart_changes=changes, preserve_previous_encodings=True,
     ))
-    assert rejected is None
-    assert '"chart_type":"bar"' in wrong.prompts[0]
-    assert '"operation":"CHANGE_VISUALIZATION"' in wrong.prompts[0]
-    assert "expert Business Analytics Visualization Planner" in wrong.prompts[0]
-
-    accepted, _, _ = asyncio.run(refine_charts_with_model(
-        ChartModel("revenue"), provider="agentrouter", model="test",
-        question="Change to a horizontal bar chart", columns=columns, rows=rows,
-        required_chart_type="horizontal_bar", previous_chart=prior,
-        chart_changes=changes, preserve_previous_encodings=True,
-    ))
+    assert wrong.prompts == []
+    assert usage.total_tokens in (None, 0)
     assert accepted is not None
     assert accepted.primary_chart.x == prior.x
     assert accepted.primary_chart.y == prior.y
@@ -339,7 +330,8 @@ def test_plotting_fallback_keeps_previous_measure_and_requeries_period_change() 
         question="", columns=columns, rows=rows, truncated=False,
     )
     result = ChatResponse(
-        session_id="chart", operation="NEW_QUERY", resolved_question="Revenue by country",
+        session_id="chart", result_id="revenue-source", operation="NEW_QUERY",
+        resolved_question="Revenue by country",
         message="Revenue by country", generation=GenerateResponse(
             db_id="shop", question="Revenue by country", provider="agentrouter",
             model="test", strategy=StrategyHints(mode="exact"),

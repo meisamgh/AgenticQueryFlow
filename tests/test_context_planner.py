@@ -102,9 +102,11 @@ def test_context_selector_preserves_accepted_constraints_without_generating_sql(
     selection, _ = asyncio.run(plan_context_detailed(
         completer, "test-model", "Count customers", None, _schema(), None,
     ))
-    assert selection.selected_tables == ["customers"]
-    assert "preserve approved business definitions and unaffected requirements" in completer.prompt
-    assert "Never\ngenerate SQL" in completer.prompt
+    assert selection.selected_tables == [table.name for table in _schema().tables]
+    assert selection.selected_columns == {
+        table.name: [column.name for column in table.columns] for table in _schema().tables
+    }
+    assert completer.prompt == ""  # Legacy adapter cannot call Model 1.
 
 
 def _unit_price_contract(question: str):  # type: ignore[no-untyped-def]

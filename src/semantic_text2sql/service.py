@@ -14,9 +14,7 @@ from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.context_planner import (
     ContextPlannerCompleter,
     fallback_context_request,
-    plan_context_detailed,
     reconcile_context_contract,
-    selection_to_context_request,
     verify_context_request,
 )
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
@@ -26,7 +24,6 @@ from semantic_text2sql.graph_grounding import compact_grounding, resolve_metrics
 from semantic_text2sql.historical import HistoricalQueryStore
 from semantic_text2sql.hybrid_retrieval import HybridSchemaRetriever, metadata_requests
 from semantic_text2sql.join_resolver import resolve_joins
-from semantic_text2sql.llm import ModelError
 from semantic_text2sql.models import (
     CallLedgerEntry,
     ContextRelationship,
@@ -80,7 +77,7 @@ class TextToSQLService:
         history: HistoricalQueryStore,
         retriever: HybridSchemaRetriever,
         agent: TextToSQLAgent,
-        context_completers: Mapping[ModelProvider, ContextPlannerCompleter],
+        context_completers: Mapping[ModelProvider, ContextPlannerCompleter] | None = None,
         semantic_catalogs: SemanticCatalogStore | None = None,
         graph_store: SemanticGraphStore | None = None,
     ) -> None:
@@ -91,7 +88,6 @@ class TextToSQLService:
         self.history = history
         self.retriever = retriever
         self.agent = agent
-        self.context_completers = context_completers
         self.semantic_catalogs = semantic_catalogs
         self.graph_store = graph_store
 
@@ -262,55 +258,11 @@ class TextToSQLService:
         contract = apply_structural_formulas(
             contract, self.glossaries.structural_formulas(db_id, question)
         )
-        candidate_names = set(proposed_tables)
-        candidate_relationships = [
-            {
-                "left": f"{item.from_table}.{item.from_column}",
-                "right": f"{item.to_table}.{item.to_column}",
-                "state": "VERIFIED_FK",
-            }
-            for item in schema.relationships
-            if item.from_table in candidate_names and item.to_table in candidate_names
-        ]
-        if database_profile is not None:
-            candidate_relationships.extend(
-                {
-                    "left": f"{item.parent_table}.{item.parent_column}",
-                    "right": f"{item.child_table}.{item.child_column}",
-                    "state": "INFERRED_KEY_RELATIONSHIP" if item.inferred else "VERIFIED_FK",
-                }
-                for item in database_profile.relationships
-                if item.parent_table in candidate_names and item.child_table in candidate_names
-            )
-
         planner_usage = TokenUsage()
         planner_call_used = False
-        if context_mode == "model1" and not optimization_required:
-            configured_context_provider = os.environ.get("TEXT2SQL_CONTEXT_PROVIDER")
-            planner_provider = context_provider or (
-                cast(ModelProvider, configured_context_provider)
-                if configured_context_provider in self.context_completers
-                else provider
-            )
-            planner_model = context_model or os.environ.get("TEXT2SQL_CONTEXT_MODEL") or model
-            try:
-                selection, planner_usage = await budget.wait(
-                    plan_context_detailed(
-                        self.context_completers[planner_provider],
-                        planner_model,
-                        question,
-                        evidence,
-                        planner_schema,
-                        self.glossaries.load(db_id),
-                        previous_intent,
-                        candidate_relationships,
-                    ),
-                    kind="model",
-                )
-                context_request = selection_to_context_request(selection)
-                planner_call_used = True
-            except (KeyError, ModelError, ValueError):
-                pass
+        # Legacy model1 requests retain wire compatibility, but selection is
+        # exclusively retrieval plus deterministic verification for every turn.
+        context_mode = "retrieval"
 
         if graph_enabled and self.graph_store:
             graph_started = perf_counter()
@@ -572,27 +524,16 @@ class TextToSQLService:
             )
         call_ledger: list[CallLedgerEntry] = [
             CallLedgerEntry(
+                component="context_grounding", kind="TOOL", status="SUCCEEDED",
+                latency_ms=planning_ms,
+            ),
+            CallLedgerEntry(
                 component="schema_inspection",
                 kind="DATABASE",
                 status="SUCCEEDED",
                 latency_ms=routing_ms,
             )
         ]
-        if planner_call_used:
-            call_ledger.append(
-                CallLedgerEntry(
-                    component="context_planner",
-                    kind="MODEL",
-                    status="SUCCEEDED",
-                    provider=str(context_provider or provider),
-                    requested_model=context_model or model,
-                    effective_model=context_model or model,
-                    input_tokens=planner_usage.input_tokens,
-                    output_tokens=planner_usage.output_tokens,
-                    latency_ms=planning_ms,
-                    retry_count=planner_usage.provider_retries,
-                )
-            )
         if graph_latency_ms is not None:
             call_ledger.append(CallLedgerEntry(component="semantic_graph_lookup",
                                                 kind="TOOL", status="SUCCEEDED",
@@ -666,7 +607,8 @@ class TextToSQLService:
             update={
                 "telemetry": generated.telemetry.model_copy(
                     update={
-                        "model1_latency_ms": planning_ms,
+                        "model1_latency_ms": 0,
+                        "context_grounding_latency_ms": planning_ms,
                         "ab_context_mode": context_mode,
                         "retrieval": retrieval_trace,
                         "selected_table_count": len(context_request.tables),

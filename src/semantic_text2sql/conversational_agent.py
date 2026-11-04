@@ -688,6 +688,7 @@ class ConversationalAnalyticsAgent:
                     "top_final_answer": lambda item: item.component == "conversational_agent"
                     and item.task == "final_answer",
                     "context_planning": lambda item: item.component == "context_planner",
+                    "context_grounding": lambda item: item.component == "context_grounding",
                     "analytics_planning": lambda item: item.component == "analytics_planner",
                     "sql_generation": lambda item: item.component in {
                         "sql_generation", "sql_repair"
@@ -702,6 +703,9 @@ class ConversationalAnalyticsAgent:
                         "result_interpretation", "explanation",
                     },
                     "charting_model": lambda item: item.component == "plotting_model",
+                    "chart_validation": lambda item: item.component == (
+                        "assistant_tool:change_visualization"
+                    ),
                 }
                 for name, selected in stages.items():
                     durations = [
@@ -1259,7 +1263,13 @@ class ConversationalAnalyticsAgent:
             "execution_timestamp":generation.execution_timestamp if generation else None,
             "source_provenance":response.provenance,
             "columns": generation.columns if generation else [],
-            "rows_preview": generation.rows[:10] if generation else [],
+            "result_id": response.result_id,
+            "column_profiles": (
+                profile_chart_result(
+                    generation.columns, generation.rows, sample_rows=0, include_ranges=True
+                )[0]
+                if generation and generation.accepted else None
+            ),
             "row_count": generation.row_count if generation else 0,
             "truncated": generation.truncated if generation else False,
             "chart": (
@@ -1474,9 +1484,10 @@ class ConversationalAnalyticsAgent:
             "result_columns": (previous.last_columns if previous
                                else last.generation.columns if last and last.generation else []),
             "chart_column_profiles_advisory": (
-                profile_chart_result(last.generation.columns, last.generation.rows, sample_rows=0)[
-                    0
-                ]
+                profile_chart_result(
+                    last.generation.columns, last.generation.rows,
+                    sample_rows=0, include_ranges=True,
+                )[0]
                 if last and last.generation and last.generation.accepted
                 else None
             ),
@@ -1598,7 +1609,7 @@ class ConversationalAnalyticsAgent:
             "3. CHART CREATION OR MODIFICATION: Use change_visualization when the request "
             "concerns chart type, axes, series, or presentation and can be supported by "
             "existing data. Preserve all unaffected chart settings.\n"
-            "Chart selection requiring reasoning uses the existing visualization planner, "
+            "Chart selection requiring reasoning belongs to you: include chart_proposal, "
             "not ask_data. A type-only edit preserves accepted axes, series and result_id "
             "and needs no plotting-model call. Explicit UI color/style/zoom edits are local "
             "display actions, not new analyses.\n"
@@ -1609,10 +1620,16 @@ class ConversationalAnalyticsAgent:
             "and the chart complete the goal. The controller validates actual columns, "
             "types, units, grain and completeness after execution; a valid proposal "
             "needs no plotting-model call. Unknown aliases must not be invented as "
-            "facts: use chart_proposal=null when uncertain, and the existing planner "
-            "will inspect the executed result. For chart-only requests you may propose "
+            "facts: use chart_proposal=null when uncertain, and deterministic validation "
+            "will choose a supported fallback from the executed result. "
+            "For chart-only requests you may propose "
             "against accepted columns. Select the smallest useful X/Y/series set, "
             "exclude irrelevant identifiers, and preserve unaffected encodings. "
+            "Evaluate column profiles as X/Y/series candidates; prefer temporal axes "
+            "for trends and categorical axes for comparisons. Consider types, "
+            "cardinality, units and accepted grain. Combine separate Year and Month "
+            "using x_components only when supported by actual columns. Never invent "
+            "columns, aggregate rows, fill missing values or generate chart code. "
             "Never attach a chart merely to an SQL-only request.\n"
             "4. ANALYTICAL MODIFICATION: Use ask_data when metrics, formulas, filters, "
             "periods, dimensions, aggregations, ranking, or comparisons require changes "
@@ -2281,7 +2298,7 @@ class ConversationalAnalyticsAgent:
                     provenance=[*last.provenance, "accepted_result_reused"],
                 )
         elif tool == "change_visualization":
-            # The plotting specialist receives the exact accepted rows, including
+            # The deterministic chart tool receives exact accepted rows, including
             # a result produced earlier in this same user turn. It cannot run SQL.
             failed_current_sql = any(
                 item.get("tool") in {"ask_data", "refresh_analysis"}
@@ -2294,93 +2311,80 @@ class ConversationalAnalyticsAgent:
                 and state.base_response.generation.accepted
                 else None if failed_current_sql else last
             )
-            plot_provider = os.environ.get("TEXT2SQL_PLOTTING_PROVIDER") or self._request.provider
-            plot_model = os.environ.get("TEXT2SQL_PLOTTING_MODEL") or self._request.model
-            plot_completer = self.completers.get(plot_provider)
-            local_type_edit = bool(
-                source and source.presentation and source.presentation.chart_spec
-                and parse_intent(question, has_previous=True).explicit_type
-            )
             proposal = state.decision.chart_proposal or state.chart_proposal
-            if plot_completer is None and not local_type_edit and proposal is None:
-                facts = {"tool": tool, "error": "Plotting model provider is unavailable."}
+            plot_objective = (
+                self._request.message
+                if self._request.message.strip().casefold().rstrip(".")
+                in {"plot", "plot it", "chart", "chart it", "graph", "show the chart"}
+                else question
+            )
+            outcome = await design_chart(
+                result=source,
+                objective=plot_objective,
+                budget=self._budget,
+                previous=previous,
+                db_id=self._request.db_id,
+                fresh_result=source is state.base_response and source is not None,
+                changes=tool_input.changes,
+                provisional_proposal=proposal,
+            )
+            facts = {
+                "tool": tool,
+                "status": outcome.status,
+                "reason": outcome.reason,
+                "objective": plot_objective,
+                "requested_changes": [item.model_dump() for item in tool_input.changes],
+            }
+            downstream_usage = outcome.usage
+            downstream_ledger = list(outcome.ledger)
+            if outcome.spec is None or source is None or source.generation is None:
+                facts["error"] = outcome.reason
             else:
-                plot_objective = (
-                    self._request.message
-                    if self._request.message.strip().casefold().rstrip(".")
-                    in {"plot", "plot it", "chart", "chart it", "graph", "show the chart"}
-                    else question
+                presentation = source.presentation or ResultPresentation(summary=source.message)
+                presentation = presentation.model_copy(update={
+                    "chart_spec": outcome.spec,
+                    "chart_type": outcome.spec.chart_type,
+                    "x": outcome.spec.x,
+                    "y": outcome.spec.y,
+                    "title": outcome.spec.title,
+                    "x_label": outcome.spec.x_label,
+                    "y_label": outcome.spec.y_label,
+                    "number_format": outcome.spec.number_format,
+                    "time_format": outcome.spec.time_format,
+                })
+                base = ChatResponse(
+                    session_id=self._request.session_id,
+                    result_id=source.result_id,
+                    chart_id=uuid4().hex,
+                    state=(source.state if isinstance(source, ChatResponse) else previous),
+                    state_commit_pending=(
+                        source.state_commit_pending
+                        if isinstance(source, ChatResponse) else False
+                    ),
+                    state_expected_version=(
+                        source.state_expected_version
+                        if isinstance(source, ChatResponse) else None
+                    ),
+                    operation="VISUALIZE",
+                    resolved_question=source.generation.question,
+                    generation=source.generation,
+                    message=source.message,
+                    presentation=presentation,
+                    presentation_state=PresentationState(
+                        mode="chart", chart_type=outcome.spec.chart_type,
+                        x=outcome.spec.x, y=outcome.spec.y,
+                        title=outcome.spec.title, source_run_id=source.run_id,
+                        source_result_id=source.result_id,
+                    ),
+                    chart_recommendations=outcome.recommendations,
+                    plot_status="CHART_READY",
+                    provenance=[*source.provenance, "validated_plotting_result"],
                 )
-                outcome = await design_chart(
-                    result=source,
-                    objective=plot_objective,
-                    completer=plot_completer,
-                    provider=plot_provider,
-                    model=plot_model,
-                    budget=self._budget,
-                    previous=previous,
-                    db_id=self._request.db_id,
-                    fresh_result=source is state.base_response and source is not None,
-                    changes=tool_input.changes,
-                    provisional_proposal=proposal,
-                )
-                facts = {
-                    "tool": tool,
-                    "status": outcome.status,
-                    "reason": outcome.reason,
-                    "objective": plot_objective,
-                    "requested_changes": [item.model_dump() for item in tool_input.changes],
-                }
-                downstream_usage = outcome.usage
-                downstream_ledger = list(outcome.ledger)
-                if outcome.spec is None or source is None or source.generation is None:
-                    facts["error"] = outcome.reason
-                else:
-                    presentation = source.presentation or ResultPresentation(summary=source.message)
-                    presentation = presentation.model_copy(update={
-                        "chart_spec": outcome.spec,
-                        "chart_type": outcome.spec.chart_type,
-                        "x": outcome.spec.x,
-                        "y": outcome.spec.y,
-                        "title": outcome.spec.title,
-                        "x_label": outcome.spec.x_label,
-                        "y_label": outcome.spec.y_label,
-                        "number_format": outcome.spec.number_format,
-                        "time_format": outcome.spec.time_format,
-                    })
-                    base = ChatResponse(
-                        session_id=self._request.session_id,
-                        result_id=source.result_id,
-                        chart_id=uuid4().hex,
-                        state=(source.state if isinstance(source, ChatResponse) else previous),
-                        state_commit_pending=(
-                            source.state_commit_pending
-                            if isinstance(source, ChatResponse) else False
-                        ),
-                        state_expected_version=(
-                            source.state_expected_version
-                            if isinstance(source, ChatResponse) else None
-                        ),
-                        operation="VISUALIZE",
-                        resolved_question=source.generation.question,
-                        generation=source.generation,
-                        message=source.message,
-                        presentation=presentation,
-                        presentation_state=PresentationState(
-                            mode="chart", chart_type=outcome.spec.chart_type,
-                            x=outcome.spec.x, y=outcome.spec.y,
-                            title=outcome.spec.title, source_run_id=source.run_id,
-                            source_result_id=source.result_id,
-                        ),
-                        chart_recommendations=outcome.recommendations,
-                        plot_status="CHART_READY",
-                        provenance=[*source.provenance, "validated_plotting_result"],
-                    )
-                    facts["chart"] = outcome.spec.model_dump(exclude={"data"})
-                    facts["row_count"] = source.generation.row_count
-                    downstream_ledger.append(CallLedgerEntry(
-                        component="result_cache_reuse", kind="TOOL", status="SUCCEEDED"
-                    ))
+                facts["chart"] = outcome.spec.model_dump(exclude={"data"})
+                facts["row_count"] = source.generation.row_count
+                downstream_ledger.append(CallLedgerEntry(
+                    component="result_cache_reuse", kind="TOOL", status="SUCCEEDED"
+                ))
         else:
             facts = {"tool": tool, "error": "Unsupported tool."}
         context = state.turn_context
@@ -2471,7 +2475,13 @@ class ConversationalAnalyticsAgent:
         generation = last.generation
         facts = {
             "columns": generation.columns if generation else [],
-            "rows_preview": generation.rows[:10] if generation else [],
+            "result_id": last.result_id,
+            "column_profiles": (
+                profile_chart_result(
+                    generation.columns, generation.rows, sample_rows=0, include_ranges=True
+                )[0]
+                if generation and generation.accepted else None
+            ),
             "row_count": generation.row_count if generation else 0,
             "truncated": generation.truncated if generation else False,
             "chart": (

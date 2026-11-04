@@ -9,9 +9,7 @@ without a verified definition — those belong to the text-to-SQL pipeline.
 
 from __future__ import annotations
 
-import asyncio
-import json
-import os
+import math
 import re
 from time import perf_counter
 from typing import Any
@@ -500,16 +498,14 @@ def build_recommendation_intent(recommendation: RecommendedChart) -> Visualizati
     return VisualizationIntent(**_intent_for(recommendation))
 
 
-# --- optional LLM candidate-generation stage ---------------------------------
+# --- legacy compatibility flag; chart planning belongs to the Top layer -------
 
 VIZ_RECOMMENDER_LLM_ENABLED_ENV = "TEXT2SQL_VIZ_RECOMMENDER_LLM_ENABLED"
-VIZ_RECOMMENDER_LLM_ENABLED = (
-    os.environ.get(VIZ_RECOMMENDER_LLM_ENABLED_ENV, "true").casefold() == "true"
-)
+VIZ_RECOMMENDER_LLM_ENABLED = False
 
 
 def viz_recommender_llm_enabled() -> bool:
-    return os.environ.get(VIZ_RECOMMENDER_LLM_ENABLED_ENV, "true").casefold() == "true"
+    return False  # Compatibility flag: chart reasoning belongs to the Top layer.
 
 
 class LLMChartProposal(StrictModel):
@@ -531,74 +527,9 @@ class LLMChartProposals(StrictModel):
     alternative_charts: list[LLMChartProposal] = Field(default_factory=list, max_length=3)
 
 
-_VIZ_PROMPT = """You are an expert Business Analytics Visualization Planner.
-Given the current user request, previous validated ChartSpec, typed requested
-changes, and executed SQL result, select the most informative and accurate
-visualization.
-
-Instructions:
-1. Understand whether the user wants a new chart or a modification of the previous chart.
-2. For chart-type-only changes, preserve ALL prior chart encodings exactly:
-   X-axis, Y-axis, measures, series, and underlying data.
-3. For explicitly requested axis or series changes, use only compatible columns
-   already present in the executed result.
-4. Select charts based on analytical intent: trends, comparisons, distributions,
-   relationships, composition, or ranking.
-5. Consider column types, cardinality, temporal granularity, metric units, and
-   business interpretability.
-6. Never silently change the metric, grouping, filters, time period, or underlying analysis.
-7. Never invent values, aggregate rows, fill missing data, generate SQL, or produce JavaScript.
-8. If different analytical data is required, do not fabricate a chart. The Top-layer
-   LLM and governed SQL pipeline own analytical changes.
-9. Return only valid JSON matching the existing LLMChartProposals schema: one
-   primary chart and up to three meaningful alternatives.
-
-Column selection:
-- Evaluate every available column as a candidate for X-axis, Y-axis, series,
-  or exclusion. Choose the smallest useful combination that answers the request;
-  do not use every column merely because it exists.
-- Prefer temporal columns for trends, categorical columns for comparisons,
-  and compatible numeric measures for relationships. Use cardinality, types,
-  units and accepted grain, not column names alone.
-- Exclude identifiers and irrelevant free text unless explicitly requested.
-  Respect explicitly requested columns; do not introduce an unrequested measure.
-- Combine separate Year and Month columns into a chronological X-axis when
-  appropriate, using the existing x_components representation, without aggregation.
-- For chart-type-only changes, preserve accepted encodings rather than choosing
-  new candidates. Never change aggregation or grain to make a chart fit; use
-  the application's supported insufficiency flow when governed SQL is needed.
-
-JSON schema shape (return ONLY this object):
-{{"primary_chart": {{"chart_type": str, "x": str|null, "x_components": [str], "y": str,
-"y_measures": [str], "series": str|null, "reason": str}},
-"alternative_charts": [same shape, up to 3]}}
-Allowed chart_type values: {chart_types}.
-Use only explicitly requested plot columns when the request names two or more.
-For separate Year and Month columns, you may set x="Year-Month" and
-x_components=["Year", "Month"] for a monthly time axis. Otherwise x_components=[].
-The y and y_measures fields must reference numeric result columns. Prefer multiple
-measures only when their units are compatible. Use reason only to explain why
-the chart design is appropriate; do not explain the analytical result or infer
-business conclusions. Keep reason to one short sentence.
-
-Context:
-- Current user chart request: {question}
-- Previous validated chart: {previous_chart}
-- Top-layer requested changes: {chart_changes}
-- Preserve existing encodings: {preserve_previous_encodings}
-- Required chart type: {required_chart_type}
-- Available columns and profiles: {profile}
-- Executed row count: {rows_count}
-- Bounded sample: {sample}
-- Accepted analytical metadata (not new data): {analytical_context}
-
-Prioritize analytical correctness, stakeholder readability, and faithful
-preservation of the accepted result.
-"""
-
-
 def profile_chart_result(
-    columns: list[str], rows: list[list[Any]], *, sample_rows: int = 5
+    columns: list[str], rows: list[list[Any]], *, sample_rows: int = 5,
+    include_ranges: bool = False,
 ) -> tuple[str, str]:
     """Bounded textual profile: role + unit + distinct values per column."""
     numeric, temporal, category = _column_roles(columns, rows)
@@ -619,7 +550,19 @@ def profile_chart_result(
             role = "text"
         unit = measure_unit(name)
         distinct = _cardinality(name, columns, named_rows)
-        lines.append(f"{name}: {role}, unit={unit or 'n/a'}, distinct={distinct}")
+        values = [row[name] for row in named_rows]
+        physical_types = sorted({type(value).__name__ for value in values if value is not None})
+        finite = [float(value) for value in values
+                  if isinstance(value, (int, float)) and not isinstance(value, bool)
+                  and math.isfinite(value)]
+        bounds = (
+            f", range=[{min(finite)}, {max(finite)}]"
+            if include_ranges and role == "measure" and finite else ""
+        )
+        lines.append(
+            f"{name}: {role}, types={physical_types}, unit={unit or 'n/a'}, "
+            f"distinct={distinct}, nulls={sum(value is None for value in values)}{bounds}"
+        )
     sample = [named_rows[index] for index in range(min(sample_rows, len(named_rows)))]
     return "; ".join(lines), str(sample[:sample_rows])
 
@@ -724,122 +667,49 @@ async def refine_charts_with_model(  # noqa: ANN201 - union return
     preserve_previous_encodings: bool = False,
     analytical_context: dict[str, Any] | None = None,
 ) -> tuple[ChartRecommendations | None, TokenUsage, int]:
-    """One bounded model call proposing charts for an executed result.
-
-    Every candidate is re-validated through :func:`plan_chart` before it can
-    reach the caller; any parse/timeout/validation failure returns ``None``
-    and the deterministic ranking stays authoritative.
-    """
-    usage = TokenUsage()
+    """Deprecated deterministic adapter. No separate chart model is invoked."""
     started = perf_counter()
+    usage = TokenUsage()
     if truncated or not rows or len(columns) < 2:
         return None, usage, 0
-    profile, sample = profile_chart_result(columns, rows)
-    prior_context = (
-        json.dumps({
-            "chart_type": previous_chart.chart_type,
-            "x": previous_chart.x,
-            "x_components": previous_chart.x_components,
-            "y": previous_chart.y,
-            "y_measures": previous_chart.y_measures,
-            "series": previous_chart.series,
-        }, separators=(",", ":")) if previous_chart is not None else "None"
-    )
-    requested_changes = json.dumps(
-        [change.model_dump(mode="json", exclude_none=True) for change in (chart_changes or [])],
-        separators=(",", ":"),
-    )
-    prompt = _VIZ_PROMPT.format(
-        chart_types=", ".join(sorted(_TYPE_BASE)),
-        question=question,
-        required_chart_type=required_chart_type or "model may choose",
-        previous_chart=prior_context,
-        chart_changes=requested_changes,
-        preserve_previous_encodings=preserve_previous_encodings,
-        profile=profile,
-        rows_count=len(rows),
-        sample=sample,
-        analytical_context=json.dumps(analytical_context or {}, separators=(",", ":")),
-    )
-    try:
-        task_completion = getattr(completer, "complete_task", None)
-        complete = getattr(completer, "complete_detailed", None)
-        if callable(task_completion) or callable(complete):
-            if callable(task_completion):
-                operation = task_completion(model, prompt, "plotting", json_mode=True)
-            else:
-                operation = completer.complete_detailed(model=model, prompt=prompt)
-            raw, usage = await asyncio.wait_for(
-                budget.wait(operation, kind="model") if budget else operation,
-                timeout=timeout_seconds,
-            )
-        else:
-            operation = completer.complete(model=model, prompt=prompt)
-            raw = await asyncio.wait_for(
-                budget.wait(operation, kind="model") if budget else operation,
-                timeout=timeout_seconds,
-            )
-        text = re.sub(r"^```(?:json)?\s*|\s*```$", "", str(raw).strip(), flags=re.IGNORECASE)
-        parsed = LLMChartProposals.model_validate(json.loads(text))
-    except Exception:  # noqa: BLE001 - optional chart advice never aborts a completed query
-        return None, usage, round((perf_counter() - started) * 1000)
-
-    primary = validate_chart_proposal(
-        parsed.primary_chart,
-        columns=columns,
-        rows=rows,
-        question=question,
-        truncated=truncated,
-        score=1.0,
-        required_chart_type=required_chart_type,
-        previous_chart=previous_chart,
-        preserve_previous_encodings=preserve_previous_encodings,
-    )
-    if primary is None:
-        return None, usage, round((perf_counter() - started) * 1000)
-    alternatives: list[RecommendedChart] = []
-    seen = {
-        (
-            primary.chart_type,
-            primary.x,
-            tuple(primary.x_components),
-            primary.y,
-            primary.series,
-            tuple(primary.y_measures),
+    if preserve_previous_encodings and previous_chart is not None:
+        candidate = validate_chart_proposal(
+            LLMChartProposal(
+                chart_type=required_chart_type or previous_chart.chart_type,
+                x=previous_chart.x, x_components=previous_chart.x_components,
+                y=previous_chart.y, y_measures=previous_chart.y_measures,
+                series=previous_chart.series,
+            ),
+            columns=columns, rows=rows, question=question, truncated=truncated,
+            score=1.0, required_chart_type=required_chart_type,
+            previous_chart=previous_chart, preserve_previous_encodings=True,
         )
-    }
-    llm_score = 0.95
-    for proposal in parsed.alternative_charts:
-        validated = validate_chart_proposal(
-            proposal,
-            columns=columns,
-            rows=rows,
-            question=question,
-            truncated=truncated,
-            score=llm_score,
-            required_chart_type=required_chart_type,
-            previous_chart=previous_chart,
+        return (
+            ChartRecommendations(primary_chart=candidate, alternative_charts=[])
+            if candidate else None, usage, round((perf_counter() - started) * 1000),
+        )
+    recommendations = recommend_charts(question, columns, rows, truncated=truncated)
+    if recommendations is None:
+        return None, usage, round((perf_counter() - started) * 1000)
+    valid = []
+    for candidate in [recommendations.primary_chart, *recommendations.alternative_charts]:
+        proposal = LLMChartProposal(
+            chart_type=candidate.chart_type, x=candidate.x,
+            x_components=candidate.x_components, y=candidate.y,
+            y_measures=candidate.y_measures, series=candidate.series,
+        )
+        checked = validate_chart_proposal(
+            proposal, columns=columns, rows=rows, question=question,
+            truncated=truncated, score=candidate.score,
+            required_chart_type=required_chart_type, previous_chart=previous_chart,
             preserve_previous_encodings=preserve_previous_encodings,
         )
-        if validated is None:
-            continue
-        key = (
-            validated.chart_type,
-            validated.x,
-            tuple(validated.x_components),
-            validated.y,
-            validated.series,
-            tuple(validated.y_measures),
-        )
-        if key in seen:
-            continue
-        seen.add(key)
-        alternatives.append(validated)
-        llm_score -= 0.05
+        if checked is not None:
+            valid.append(checked)
     return (
-        ChartRecommendations(primary_chart=primary, alternative_charts=alternatives),
-        usage,
-        round((perf_counter() - started) * 1000),
+        ChartRecommendations(primary_chart=valid[0], alternative_charts=valid[1:4])
+        if valid else None,
+        usage, round((perf_counter() - started) * 1000),
     )
 
 

@@ -45,9 +45,11 @@ from semantic_text2sql.semantic_catalog import (
 )
 from semantic_text2sql.visualization import VisualizationIntent
 from semantic_text2sql.visualization_recommender import (
+    LLMChartProposal,
     merge_recommendations,
     recommend_charts,
     refine_charts_with_model,
+    validate_chart_proposal,
 )
 
 
@@ -274,11 +276,10 @@ class TestVisualizationRecommenderLLM:
 
     async def _fabricated(self) -> None:
         bad = self._proposal("multi_line", "month", ["revenue", "made_up_margin"])
-        payload = json.dumps({"primary_chart": bad, "alternative_charts": []})
-        completer = _FixedResponse(payload=payload)
-        recommendations, _, _ = await refine_charts_with_model(
-            completer, provider="agentrouter", model="m",
+        recommendations = validate_chart_proposal(
+            LLMChartProposal.model_validate(bad),
             question="Show useful charts", columns=self.COLUMNS, rows=self.ROWS,
+            truncated=False, score=1.0,
         )
         assert recommendations is None
 
@@ -292,7 +293,9 @@ class TestVisualizationRecommenderLLM:
             completer, provider="agentrouter", model="m",
             question="Financial overview", columns=self.COLUMNS, rows=self.ROWS,
         )
-        assert from_model is None
+        assert from_model is not None and baseline is not None
+        assert from_model.primary_chart.x == baseline.primary_chart.x
+        assert from_model.primary_chart.y == baseline.primary_chart.y
         assert usage.total_tokens in (None, 0)
         assert baseline is not None  # deterministic ranking stays authoritative
 
@@ -301,7 +304,9 @@ class TestVisualizationRecommenderLLM:
             question="Financial overview", columns=self.COLUMNS, rows=self.ROWS,
             timeout_seconds=0.05,
         )
-        assert recommendations is None
+        assert recommendations is not None
+        assert recommendations.primary_chart.x == baseline.primary_chart.x
+        assert recommendations.primary_chart.y == baseline.primary_chart.y
 
     def test_invalid_json_and_timeout_stay_deterministic(self) -> None:
         _run(self._degraded())

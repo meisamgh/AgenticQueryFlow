@@ -1,9 +1,28 @@
 # Queryflow V6.4 requirement matrix
 
+2026-11-04 single-planner task: context/plotting model-stage removal is locally
+implemented and regression-tested; see SINGLE_PLANNER.md and
+test_single_planner_paths.py / test_integrated_chart_planning.py. This explicit
+runtime refactor does not implement the separate pending graph amendments below,
+or promote unrelated production/semantic/authorization requirements.
+
 2026-11-04 amendment: Phase 0 evidence is in SEMANTIC_GRAPH_PHASE0.md and
-benchmarks/results/semantic_graph_phase0.json. Runtime changes are STOPPED at the
+benchmarks/results/semantic_graph_phase0.json. Graph-amendment changes are STOPPED at the
 review gate. Typed ambiguity warnings, independent persistence gating, and later
 KPI/ontology refinements remain PENDING; no older requirement is promoted.
+
+Single-planner local acceptance evidence (not production accuracy claims):
+
+| Change | Status | Passing evidence |
+| --- | --- | --- |
+| No context-model calls; mandatory dependencies retained | VERIFIED locally | test_context_planner.py, test_semantic_graph.py |
+| Top chart proposals / deterministic fallback, no plotting model | VERIFIED locally | test_integrated_chart_planning.py, test_v63_conversation.py |
+| Stable source identity, history and requery behavior | VERIFIED locally | test_sql_memory.py, test_v63_conversation.py |
+| Configuration and accurate tool timing display | VERIFIED locally | test_api.py, frontend_rendering.cjs |
+
+Full verification: 725 Python passed / 2 PostgreSQL skipped; 198 frontend passed;
+Ruff, mypy (70 source files), diff checks passed. Live provider SQL/semantic
+accuracy, subjective chart quality, real PostgreSQL and browser pixel QA: NOT RUN.
 
 Graph-enhanced grounding (2026-11-04) is tracked separately in SEMANTIC_GRAPH.md
 and test_semantic_graph.py. The optional layer does not promote any older
