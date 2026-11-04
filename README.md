@@ -180,6 +180,9 @@ The Top layer plans charts; invalid or missing proposals use deterministic
 validation and fallback. Conditional recovery and the dashboard designer remain.
 [Architecture changes and measured results](docs/SINGLE_PLANNER.md).
 
+[Current V6.4 implementation status](docs/V6_4_CURRENT_REPORT.md) covers semantic
+proofs, bounded graph ambiguity, approved KPI grounding and recovery auditability.
+
 **Databases:** SQLite, PostgreSQL, plus optional MySQL, SQL Server, Snowflake and
 BigQuery adapters. See [connection setup](docs/EXTERNAL_DATABASES.md) for driver
 extras, read-only permissions, BigQuery cost ceilings and profiling. SQL Server

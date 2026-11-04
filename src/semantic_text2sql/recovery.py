@@ -30,6 +30,7 @@ from semantic_text2sql.models import (
 from semantic_text2sql.ontology import OntologyAdapter, configured_local_ontology
 from semantic_text2sql.postgres import PostgresRegistry
 from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded
+from semantic_text2sql.semantic_catalog import schema_fingerprint
 from semantic_text2sql.validator import validate_sql, validate_sql_semantics
 
 MAX_RECOVERY_TOOL_CALLS = 3
@@ -91,7 +92,11 @@ class RecoveryTools:
             raise TimeoutError("Recovery deadline reached")
         if self._ontology is None:
             self._ontology = configured_local_ontology(self.schema, self.profile)
-        return self._ontology.lookup(query[:500], allowed_tables=set(allowed_tables))
+        allowed = set(allowed_tables) & {table.name for table in self.schema.tables}
+        result = self._ontology.lookup(query[:500], allowed_tables=allowed)
+        if self.remaining_seconds() <= 0:
+            raise TimeoutError("Recovery deadline reached")
+        return result
 
     @property
     def database_probe_count(self) -> int:
@@ -637,6 +642,8 @@ class RecoveryCoordinator:
                     claims = _validated_claims(
                         payload.get("claims"),
                         observations,
+                        expected_db_id=self.tools.db_id,
+                        expected_schema_fingerprint=schema_fingerprint(self.tools.schema),
                         require_tool_evidence=(
                             category in {"data_grounding", "correctness"}
                             and action in {"REPAIR", "INFORM"}
@@ -644,13 +651,37 @@ class RecoveryCoordinator:
                     )
                     if action in {"REPAIR", "INFORM"} and not claims:
                         return await fallback_with_agent_usage()
+                    applicability = "NOT_REQUESTED"
+                    ontology_metrics = []
+                    for claim in claims:
+                        if claim.claim_type != "METRIC_DEFINITION":
+                            continue
+                        for observation in observations:
+                            if observation["evidence_id"] not in claim.evidence_ids:
+                                continue
+                            for metric in observation.get("result", {}).get("metrics", []):
+                                if (metric.get("id") == claim.metric_id
+                                        and metric.get("formula") == claim.value
+                                        and metric.get("source_relation") == claim.table):
+                                    ontology_metrics.append(ApprovedMetricDefinition(
+                                        id=metric["id"], formula=metric["formula"],
+                                        source_relation=metric["source_relation"],
+                                        required_fields=metric.get("required_fields", []),
+                                        mandatory_filters=metric.get("mandatory_filters", []),
+                                        catalog_identity=metric.get("catalog_identity"),
+                                        catalog_version=metric.get("catalog_version"),
+                                    ))
                     if action == "REPAIR" and any(
                         claim.claim_type == "METRIC_DEFINITION" for claim in claims
-                    ) and not ontology_repair_supported(failed_sql, claims, self.tools.schema):
-                        action = "ESCALATE"
-                        diagnosis = ("The approved definition is available, but a safe correction "
-                                     "cannot be verified from the current evidence.")
-                        payload["repair_instruction"] = None
+                    ):
+                        applicability = ("SUPPORTED" if ontology_repair_supported(
+                            failed_sql, claims, self.tools.schema) else "UNSUPPORTED")
+                        if applicability == "UNSUPPORTED":
+                            action = "ESCALATE"
+                            diagnosis = ("The approved definition is available, "
+                                         "but a safe correction "
+                                         "cannot be verified from the current evidence.")
+                            payload["repair_instruction"] = None
                     base = RecoveryTrace(
                         mode=mode,  # type: ignore[arg-type]
                         failure_code=failure_code,
@@ -663,6 +694,8 @@ class RecoveryCoordinator:
                                 0.0, min(float(payload.get("confidence", 0.0)), 1.0)
                             ),
                             "agent_action": action,
+                            "repair_applicability": applicability,
+                            "ontology_metrics": ontology_metrics[:4],
                             "repair_instruction": (
                                 str(payload.get("repair_instruction") or "")[:1_000] or None
                             ),
@@ -1007,6 +1040,8 @@ def _validated_claims(
     observations: list[dict[str, Any]],
     *,
     require_tool_evidence: bool,
+    expected_db_id: str | None = None,
+    expected_schema_fingerprint: str | None = None,
 ) -> list[RecoveryClaim]:
     """Accept only typed claims whose evidence references exist in this recovery trace."""
     if not isinstance(raw_claims, list):
@@ -1027,7 +1062,10 @@ def _validated_claims(
             return []
         if require_tool_evidence and cited.isdisjoint(observation_ids):
             return []
-        if not _claim_has_compatible_evidence(claim, cited, observation_by_id):
+        if not _claim_has_compatible_evidence(
+            claim, cited, observation_by_id, expected_db_id=expected_db_id,
+            expected_schema_fingerprint=expected_schema_fingerprint,
+        ):
             return []
         validated.append(claim)
     return validated
@@ -1037,6 +1075,8 @@ def _claim_has_compatible_evidence(
     claim: RecoveryClaim,
     cited: set[str],
     observations: dict[str, dict[str, Any]],
+    *, expected_db_id: str | None = None,
+    expected_schema_fingerprint: str | None = None,
 ) -> bool:
     """Enforce deterministic claim-type to observation-type compatibility."""
     cited_observations = [observations[item] for item in cited if item in observations]
@@ -1044,10 +1084,19 @@ def _claim_has_compatible_evidence(
         return any(item.get("tool") == "query_ontology"
                    and isinstance(item.get("result"), dict)
                    and item["result"].get("evidence_type") == "APPROVED_ONTOLOGY"
+                   and item["result"].get("available") is True
+                   and (expected_db_id is None or item["result"].get("db_id") == expected_db_id)
+                   and (expected_schema_fingerprint is None
+                        or item["result"].get("schema_fingerprint") == expected_schema_fingerprint)
+                   and isinstance(item["result"].get("catalog_version"), int)
+                   and item["result"]["catalog_version"] > 0
+                   and bool(item["result"].get("schema_fingerprint"))
+                   and claim.table in item["result"].get("authorized_tables", [])
                    and any(metric.get("id") == claim.metric_id
                            and metric.get("source_relation") == claim.table
                            and metric.get("formula") == claim.value
                            and metric.get("status") == "approved"
+                           and metric.get("catalog_version") == item["result"]["catalog_version"]
                            and metric.get("provenance") == "human_approved_semantic_catalog"
                            for metric in item["result"].get("metrics", []))
                    for item in cited_observations)

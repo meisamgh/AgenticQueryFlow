@@ -6,6 +6,7 @@ import json
 import re
 import sqlite3
 import time
+from datetime import date
 from pathlib import Path
 from threading import Lock
 from typing import Any, Literal, Protocol, cast
@@ -89,7 +90,7 @@ def resolve_semantic_contract(
                 values[field] = [
                     item for item in values[field] if item.casefold() != target.casefold()
                 ]
-            values["requires_grouping"] = bool(values["grain"])
+            values["requires_grouping"] = bool(values["grain"] or values["output_grain"])
         elif change.operation == "CHANGE_METRIC" and replacement:
             values["measures"] = [replacement]
             values["approved_metrics"] = [
@@ -102,11 +103,17 @@ def resolve_semantic_contract(
             values["required_output_aliases"] = []
             values["structural_formulas"] = []
             values["required_columns"] = []
+            values["required_columns"] = list(dict.fromkeys([
+                *[item["operand"] for item in values["filters"] if "." in item["operand"]],
+                *[item for item in values["output_grain"] if "." in item],
+            ]))
             values["aggregation"] = None
             values["ranked_metric"] = None
         elif change.operation == "CHANGE_AGGREGATION" and replacement.casefold() in {
             "count", "sum", "average", "min", "max"
         }:
+            if values["approved_metrics"]:
+                raise ValueError("Change the approved metric definition before its aggregation.")
             values["aggregation"] = replacement.casefold()
         elif change.operation == "CHANGE_GRAIN" and replacement:
             values["output_grain"] = [replacement]
@@ -133,6 +140,18 @@ def resolve_semantic_contract(
             ]
             if change.previous_value is None and len(candidates) != 1:
                 raise ValueError("REMOVE_FILTER requires one unambiguous matching filter.")
+            memberships = [item for item in candidates if item["operator"] == "IN"
+                           and isinstance(item["value"], list)
+                           and change.previous_value in item["value"]]
+            if len(memberships) == 1:
+                item = memberships[0]
+                members = [value for value in item["value"] if value != change.previous_value]
+                if members:
+                    item["value"] = members[0] if len(members) == 1 else members
+                    item["operator"] = "=" if len(members) == 1 else "IN"
+                else:
+                    values["filters"].remove(item)
+                continue
             if change.previous_value is not None and not any(
                 str(item["value"]) == str(change.previous_value) for item in candidates
             ):
@@ -170,6 +189,20 @@ def resolve_semantic_contract(
             )
             if old_period:
                 old_year = re.fullmatch(r"\d{4}", old_period)
+                if old_year and re.fullmatch(r"\d{4}", replacement):
+                    for field in ("filters", "temporal_boundaries"):
+                        for predicate in values[field]:
+                            value = str(predicate["value"])
+                            if (predicate["operator"] == "="
+                                    and re.search(r"date|time|period", predicate["operand"], re.I)
+                                    and re.fullmatch(r"\d{4}[-/]\d{2}[-/]\d{2}", value)
+                                    and value.startswith(old_period)):
+                                predicate["value"] = replacement + value[4:]
+                                try:
+                                    date.fromisoformat(str(predicate["value"]).replace("/", "-"))
+                                except ValueError as exc:
+                                    raise ValueError(
+                                        "The requested year cannot preserve that day.") from exc
                 old_end = str(int(old_period) + 1) if old_year else None
                 old_end_boundaries = (
                     {old_end, f"{old_end}01", f"{old_end}-01-01", f"{old_end}/01/01"}
@@ -194,7 +227,21 @@ def resolve_semantic_contract(
                 if str(period) != replacement
             ]
         elif change.operation == "COMPARE" and replacement:
-            if replacement not in values["comparison_periods"]:
+            existing = [item for item in values["filters"]
+                        if item["operand"].casefold() == target.casefold()]
+            if existing:
+                if len(existing) != 1 or existing[0]["operator"] not in {"=", "IN"}:
+                    raise ValueError("Comparison requires one equality or membership scope.")
+                current = existing[0]
+                members = (current["value"] if isinstance(current["value"], list)
+                           else [current["value"]])
+                current["operator"] = "IN"
+                current["value"] = list(dict.fromkeys([
+                    *members, change.new_value if change.new_value is not None else replacement]))
+            elif not (re.search(r"date|year|month|time|period", target, re.I)
+                      or re.fullmatch(r"\d{4}", replacement)):
+                raise ValueError("Comparison needs an accepted category scope or explicit period.")
+            elif replacement not in values["comparison_periods"]:
                 values["comparison_periods"].append(replacement)
         elif change.operation == "CHANGE_RANKING" and replacement:
             values["requires_ordering"] = True

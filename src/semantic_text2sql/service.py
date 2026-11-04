@@ -166,18 +166,27 @@ class TextToSQLService:
             "\n".join(item for item in (evidence, value_alias_context) if item) or None
         )
         contract = semantic_contract or SemanticContract()
+        if (correctness_trace and correctness_trace.agent_action == "REPAIR"
+                and correctness_trace.ontology_metrics):
+            contract = contract.model_copy(update={"approved_metrics": list({
+                item.id: item for item in [*contract.approved_metrics,
+                                          *correctness_trace.ontology_metrics]
+            }.values())})
         graph_context = None
         graph_latency_ms: int | None = None
         catalog_relationships: list[ContextRelationship] = []
         graph_enabled = os.environ.get("TEXT2SQL_GRAPH_ENABLED", "false").lower() == "true"
+        metric_grounding = (graph_enabled or bool(contract.approved_metrics)
+                            or os.environ.get("TEXT2SQL_KPI_GROUNDING_ENABLED", "false").lower()
+                            == "true")
         try:
             catalog = (self.semantic_catalogs.load(db_id)
-                       if graph_enabled and self.semantic_catalogs else None)
+                       if metric_grounding and self.semantic_catalogs else None)
         except (OSError, ValueError):
             logger.warning("semantic_catalog_unavailable db_id=%s", db_id)
             catalog = None
         metric_facts: list[dict[str, Any]] = []
-        if graph_enabled:
+        if metric_grounding:
             try:
                 contract, metric_facts = resolve_metrics(question, schema, catalog, contract)
             except ValueError as exc:
@@ -273,11 +282,13 @@ class TextToSQLService:
             if snapshot:
                 resolution = await budget.wait(asyncio.to_thread(resolve_joins,
                     list(dict.fromkeys([*context_request.tables, *[item.source_relation
-                        for item in contract.approved_metrics]])), schema, snapshot=snapshot),
+                        for item in contract.approved_metrics]])), schema, snapshot=snapshot,
+                    compiled_network=graph_store.network(db_id, identity=snapshot.identity)),
                     kind="work")
                 graph_context = {"status": resolution.status,
                     "snapshot_id": snapshot.identity, "catalog_version": snapshot.catalog_version,
                     "explanation": resolution.explanation,
+                    "warnings": [item.model_dump(mode="json") for item in resolution.warnings],
                     "relationships": [item.model_dump(mode="json")
                                       for item in resolution.relationships]}
                 if resolution.status == "CONNECTED":
@@ -483,6 +494,13 @@ class TextToSQLService:
                     )
                 except RequestBudgetExceeded:
                     repaired = None
+                review_trace = review_trace.model_copy(update={
+                    "repair_execution_succeeded": bool(repaired and repaired.accepted),
+                    "false_repair": (True if repaired and any(
+                        finding.status == "FAIL" for attempt in repaired.attempts
+                        for finding in attempt.validation.semantic_findings) else None),
+                })
+                generated = generated.model_copy(update={"recovery": review_trace})
                 if repaired is not None and repaired.accepted:
                     offset = len(generated.attempts)
                     repaired_attempts = [
@@ -504,6 +522,16 @@ class TextToSQLService:
                     generated = generated.model_copy(
                         update={
                             "accepted": False,
+                            "attempts": [*generated.attempts, *[
+                                attempt.model_copy(update={
+                                    "number": len(generated.attempts) + index})
+                                for index, attempt in enumerate(
+                                    repaired.attempts if repaired else [], 1)
+                            ]],
+                            "token_usage": _add_token_usage(
+                                generated.token_usage,
+                                repaired.token_usage if repaired else TokenUsage(),
+                            ),
                             "execution_status": "NOT_EXECUTED",
                             "termination_reason": "attempt_limit",
                             "rows": [],

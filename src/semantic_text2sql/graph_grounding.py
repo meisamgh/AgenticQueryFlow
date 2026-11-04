@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any
@@ -84,7 +85,11 @@ def resolve_metrics(
     """Only explicit approved IDs/labels; ambiguous matches never choose a formula."""
 
     def unavailable() -> tuple[SemanticContract, list[dict[str, Any]]]:
-        if contract.approved_metrics:
+        named_approved = bool(document and any(
+            metric.status == "approved" and any(
+                re.search(r"(?<!\w)" + re.escape(label.casefold()) + r"(?!\w)", question.casefold())
+                for label in (metric.id, metric.label)) for metric in document.metrics))
+        if contract.approved_metrics or named_approved:
             raise ValueError(
                 "The accepted approved metric no longer has a current catalog definition."
             )
@@ -149,6 +154,15 @@ def resolve_metrics(
             table, _, column = predicate.operand.rpartition(".")
             if column not in columns.get(table, set()):
                 return False
+        required_relations = {metric.source_relation, *[
+            predicate.operand.rsplit(".", 1)[0] for predicate in metric.mandatory_filters]}
+        for join in document.relationships:
+            if (join.status == "approved"
+                    and {join.child_table, join.parent_table} <= required_relations
+                    and (join.forbidden
+                         or not set(join.child_columns) <= columns.get(join.child_table, set())
+                         or not set(join.parent_columns) <= columns.get(join.parent_table, set()))):
+                return False
         for dimension in metric.dimensions:
             table, _, column = (
                 dimension.rpartition(".")
@@ -169,10 +183,18 @@ def resolve_metrics(
     labels: dict[str, set[str]] = {}
     for metric in matches:
         labels.setdefault(metric.label.casefold(), set()).add(metric.formula)
+    if any(len(formulas) > 1 for formulas in labels.values()):
+        raise ValueError("The business metric has conflicting catalog definitions; "
+                         "review is required.")
+    if len(matches) > limit:
+        raise ValueError("Too many required metrics for the bounded grounding context.")
     for metric in matches[:limit]:
         before = selected.copy()
         if len(labels[metric.label.casefold()]) > 1 or not visit(metric, set()):
             selected = before
+            if metric.status == "approved":
+                raise ValueError("The requested approved metric has unsupported schema, "
+                                 "dependency or relationship requirements.")
     facts: list[dict[str, Any]] = []
     definitions = []
     required = list(contract.required_columns)
@@ -181,6 +203,15 @@ def resolve_metrics(
         entity = next(
             entity for entity in document.entities if entity.relation == metric.source_relation
         )
+        metric_identity = hashlib.sha256(json.dumps({
+            "catalog_version": document.catalog_version,
+            "metric": metric.model_dump(mode="json"),
+            "entity": entity.model_dump(mode="json"),
+            "relationships": [item.model_dump(mode="json")
+                              for item in document.relationships
+                              if metric.source_relation in
+                              {item.child_table, item.parent_table}],
+        }, sort_keys=True).encode()).hexdigest()
         required_relations = {
             metric.source_relation,
             *(predicate.operand.rsplit(".", 1)[0] for predicate in metric.mandatory_filters),
@@ -189,12 +220,13 @@ def resolve_metrics(
             {
                 **metric.model_dump(mode="json"),
                 "catalog_version": document.catalog_version,
+                "catalog_identity": metric_identity,
                 "provenance": "human_approved_semantic_catalog",
                 "grain": entity.grain.model_dump(mode="json")
                 if entity.grain and entity.grain.status == "approved"
                 else None,
                 "time": entity.time.model_dump(mode="json")
-                if entity.time
+                if entity.time and entity.status == "approved"
                 and entity.time.event_time in columns.get(metric.source_relation, set())
                 else None,
                 "required_joins": [
@@ -213,6 +245,10 @@ def resolve_metrics(
                 source_relation=metric.source_relation,
                 required_fields=metric.required_fields,
                 mandatory_filters=metric.mandatory_filters,
+                catalog_version=document.catalog_version,
+                metric_version=metric.version,
+                unit=metric.unit,
+                catalog_identity=metric_identity,
             )
         )
         required.extend(f"{metric.source_relation}.{field}" for field in metric.required_fields)
@@ -220,9 +256,17 @@ def resolve_metrics(
         filters.extend(metric.mandatory_filters)
     for approved_filter in filters:
         if any(
-            existing.operand == approved_filter.operand
-            and existing.operator == approved_filter.operator == "="
-            and existing.value != approved_filter.value
+            existing.operand.casefold() == approved_filter.operand.casefold()
+            and ((existing.operator == approved_filter.operator == "="
+                  and existing.value != approved_filter.value)
+                 or (existing.operator == "IN" and approved_filter.operator == "="
+                     and isinstance(existing.value, list)
+                     and approved_filter.value not in existing.value)
+                 or (existing.operator == "=" and approved_filter.operator == "IN"
+                     and isinstance(approved_filter.value, list)
+                     and existing.value not in approved_filter.value)
+                 or ({existing.operator, approved_filter.operator} == {"=", "!="}
+                     and existing.value == approved_filter.value))
             for existing in contract.filters
         ):
             raise ValueError("The requested filter conflicts with the approved metric definition.")
@@ -233,8 +277,12 @@ def resolve_metrics(
         )
     for previous in contract.approved_metrics:
         current = selected[previous.id]
+        resolved = next(item for item in definitions if item.id == previous.id)
         if (
             previous.formula != current.formula
+            or (previous.catalog_identity is not None
+                and previous.catalog_identity != resolved.catalog_identity)
+            or set(previous.required_fields) != set(current.required_fields)
             or previous.source_relation != current.source_relation
             or {item.model_dump_json() for item in previous.mandatory_filters}
             != {item.model_dump_json() for item in current.mandatory_filters}

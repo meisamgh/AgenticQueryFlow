@@ -93,6 +93,8 @@ class GraphSnapshot(StrictModel):
 
     def network(self) -> nx.MultiDiGraph[str, dict[str, Any], dict[str, Any]]:
         graph: nx.MultiDiGraph[str, dict[str, Any], dict[str, Any]] = nx.MultiDiGraph()
+        graph.graph.update(db_id=self.db_id, identity=self.identity,
+                           content_checksum=self.content_checksum)
         for node in self.nodes:
             graph.add_node(node.id, kind=node.kind, **node.facts)
         for edge in self.edges:
@@ -339,8 +341,11 @@ def compile_graph(
 class SemanticGraphStore:
     """Versioned JSON snapshots; atomic writes, bounded cache and fail-closed loads."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, persistence_enabled: bool = True) -> None:
         self.root = root
+        # Explicit standalone/CLI stores retain compatibility; application startup
+        # passes its independently default-OFF persistence setting.
+        self.persistence_enabled = persistence_enabled
         self._cache: dict[
             str,
             tuple[int, int, GraphSnapshot, nx.MultiDiGraph[str, dict[str, Any], dict[str, Any]]],
@@ -349,6 +354,17 @@ class SemanticGraphStore:
 
     def _path(self, db_id: str) -> Path:
         return self.root / f"{digest(db_id)}.json"
+
+    def remember(self, snapshot: GraphSnapshot) -> None:
+        """Cache verified metadata without any filesystem access unless opted in."""
+        if self.persistence_enabled:
+            self.save(snapshot)
+            return
+        snapshot = GraphSnapshot.model_validate(snapshot.model_dump())
+        with self._lock:
+            if len(self._cache) >= 32 and snapshot.db_id not in self._cache:
+                self._cache.pop(next(iter(self._cache)))
+            self._cache[snapshot.db_id] = (0, 0, snapshot, snapshot.network())
 
     def save(self, snapshot: GraphSnapshot) -> Path:
         snapshot = GraphSnapshot.model_validate(snapshot.model_dump())
@@ -370,6 +386,10 @@ class SemanticGraphStore:
 
     def load(self, db_id: str, *, identity: str) -> GraphSnapshot | None:
         with self._lock:
+            if not self.persistence_enabled:
+                cached = self._cache.get(db_id)
+                return (cached[2].model_copy(deep=True)
+                        if cached and cached[2].identity == identity else None)
             try:
                 path = self._path(db_id)
                 stat = path.stat()
@@ -398,7 +418,8 @@ class SemanticGraphStore:
     def network(
         self, db_id: str, *, identity: str
     ) -> nx.MultiDiGraph[str, dict[str, Any], dict[str, Any]] | None:
-        if self.load(db_id, identity=identity) is None:
-            return None
         with self._lock:
-            return self._cache[db_id][3]
+            if self.persistence_enabled and self.load(db_id, identity=identity) is None:
+                return None
+            cached = self._cache.get(db_id)
+            return cached[3] if cached and cached[2].identity == identity else None

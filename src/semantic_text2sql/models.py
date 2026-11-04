@@ -265,6 +265,10 @@ class ApprovedMetricDefinition(StrictModel):
     source_relation: str
     required_fields: list[str] = Field(default_factory=list)
     mandatory_filters: list[SemanticFilter] = Field(default_factory=list)
+    catalog_identity: str | None = None
+    catalog_version: int | None = None
+    metric_version: int | None = None
+    unit: str | None = None
 
 
 class PlannerMetadataRequirement(StrictModel):
@@ -660,6 +664,10 @@ class RecoveryTrace(StrictModel):
     agent_action: Literal["REPAIR", "INFORM", "ESCALATE"] | None = None
     repair_instruction: str | None = Field(default=None, max_length=1_000)
     requires_human_review: bool = False
+    repair_applicability: Literal["NOT_REQUESTED", "SUPPORTED", "UNSUPPORTED"] = "NOT_REQUESTED"
+    repair_execution_succeeded: bool | None = None
+    false_repair: bool | None = None
+    ontology_metrics: list[ApprovedMetricDefinition] = Field(default_factory=list, max_length=4)
 
 
 class HumanReviewRequest(StrictModel):
