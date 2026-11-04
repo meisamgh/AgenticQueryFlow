@@ -360,7 +360,11 @@ def create_app(
         retriever=hybrid_retriever,
         agent=active_agent,
         semantic_catalogs=semantic_catalogs,
-        graph_store=SemanticGraphStore(Path(os.environ.get("TEXT2SQL_GRAPH_ROOT", "graphs"))),
+        graph_store=SemanticGraphStore(
+            Path(os.environ.get("TEXT2SQL_GRAPH_ROOT", "graphs")),
+            persistence_enabled=os.environ.get(
+                "TEXT2SQL_GRAPH_PERSISTENCE_ENABLED", "false").casefold() == "true",
+        ),
     )
     async def prepare_semantic_graphs() -> None:
         if os.environ.get("TEXT2SQL_GRAPH_ENABLED", "false").lower() != "true":
@@ -379,7 +383,7 @@ def create_app(
                         snapshot = compile_graph(schema, semantic_catalogs.load(identity),
                                                  profile, glossaries.load(identity))
                         if question_service.graph_store:
-                            question_service.graph_store.save(snapshot)
+                            question_service.graph_store.remember(snapshot)
                     except (ValueError, OSError, DatabaseError) as exc:
                         logger.warning("semantic_graph_unavailable type=%s", type(exc).__name__)
         await asyncio.to_thread(build)

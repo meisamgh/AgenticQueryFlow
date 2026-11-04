@@ -1,5 +1,61 @@
 # V6.4 progress checkpoint
 
+## 2026-11-04 — Remaining-work implementation (current)
+
+The new request authorized continuation beyond Phase 0. Its findings/leakage
+limits remain unchanged; no fresh gold-based catalog authoring or Phase 0 rerun.
+Current source/evidence/status: V6_4_CURRENT_REPORT.md. The historical stop-gate
+notes below are not an instruction to pause this implementation.
+
+Implemented scope-aware bounded expression lineage; stronger grouping,
+aggregate/derived-formula and predicate/temporal proofs; composite key / declared
+PK / preaggregation multiplicity checks; and explicit UNRESOLVED states where
+equivalence is not established. Fixed category comparisons being treated as time
+periods, membership removal, daily date preservation and approved aggregation
+changes. Real SQLite monthly→yearly and comparison→percentage tests assert SQL,
+accepted SQL/state, data, source identity, version, tool order/status and calls.
+
+Graph-on now uses bounded best-first/dominance search and typed ambiguity options,
+without increasing the six-edge/64-state/50ms bounds. Default graph-off traversal
+is unchanged. Runtime graph caching is in memory; JSON persistence is independent
+and default-OFF. Cached network identity/checksum/permissions are verified and
+returned edge facts copied. The largest local schema now reports AMBIGUOUS after
+14 examined states with two candidate paths, not BUDGET_EXHAUSTED. This is not
+proof of a uniquely correct join or an end-to-end performance gain.
+
+KPI grounding is independently configurable. Accepted approved definitions are
+always checked against the current catalog; opaque identities include unit,
+version, entity and relationship meaning. Discovery shares the same resolver.
+Ontology claims bind datasource/schema/version/allowed scope; unsupported repairs
+escalate. Approved recovery definitions enter the governed contract before context
+construction and are rejected on mid-turn definition drift. Backend identities
+are omitted from routine model prompts. No new agent or provider path.
+
+Failed post-result repairs retain all attempts and token usage; execution success
+is separate from correctness. Proven semantic false repairs are instrumented;
+unknown business correctness remains null. Full per-transport recovery call-ledger
+audit is still open, not hidden by aggregate usage.
+
+Verification: 765 Python tests passed, 2 PostgreSQL tests skipped (19.72s);
+198 frontend/voice tests passed (629ms); Ruff src/tests/new benchmark, mypy
+(71 source files), and git diff --check passed. Forty added acceptance cases;
+no safety tests removed or validators weakened. Real SQLite and scripted provider
+fixtures are not evidence of live-provider or general business accuracy.
+
+Paired before/after scripted API timings/counters and 101-run metadata-only graph
+measurements are in the current report. Normal call counts unchanged: SQL 2,
+SQL+chart 2, cached plot/type change 1; chart-only DB calls 0. No latency speedup
+is established, and SQL-only p95 regressed in the small measured sample. Live
+provider tokens/quality, independent semantic accuracy and production recovery
+rates: NOT RUN. PostgreSQL DSN-dependent and real-identity deployment verification
+remain BLOCKED; no placeholder infrastructure or successful live tests invented.
+
+Matrix totals: 8 VERIFIED locally, 12 IN_PROGRESS, 2 BLOCKED. The whole task is
+not declared complete. Next: V64-01 general final-grain/functional-dependency
+proof, then remaining multi-stage/Boolean/temporal/unit semantics and the listed
+provider/ledger/frontend/32-scenario acceptance gaps. Preserve the working tree;
+no commit, push, restart, actual .env, business DB or screenshot changes.
+
 ## 2026-11-04 — Amendment Phase 0 stop gate
 
 Only evaluation/docs/tests changed; no new runtime work or debit-card catalog

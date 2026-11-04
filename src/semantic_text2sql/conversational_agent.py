@@ -1496,6 +1496,7 @@ class ConversationalAnalyticsAgent:
                     mode="json",
                     exclude_none=True,
                     exclude_defaults=True,
+                    exclude={"approved_metrics": {"__all__": {"catalog_identity"}}},
                     include={
                         "approved_metrics",
                         "mandatory_metric_filters",
@@ -2161,14 +2162,21 @@ class ConversationalAnalyticsAgent:
                         "token_usage":TokenUsage(), "call_ledger":[],
                     })
         elif tool in {"get_business_context", "get_available_metrics"}:
-            output = self.bridge.get_business_context(
+            catalog_schema_check = bool(
+                self.bridge.semantic_catalogs
+                and self.bridge.semantic_catalogs.load(self._request.db_id) is not None)
+            metadata_started = perf_counter()
+            output = await self._budget.wait(asyncio.to_thread(self.bridge.get_business_context,
                 MetadataToolInput(
                     db_id=self._request.db_id,
                     question=question
                     if tool == "get_business_context"
                     else "What metrics are available?",
-                )
-            )
+                )), kind="database" if catalog_schema_check else "work")
+            if catalog_schema_check:
+                downstream_ledger.append(CallLedgerEntry(
+                    component="catalog_schema_inspection", kind="DATABASE", status="SUCCEEDED",
+                    latency_ms=round((perf_counter() - metadata_started) * 1000)))
             facts = ToolObservation(
                 tool=tool, facts={"definitions": output.facts, "found": output.found},
                 evidence_id=output.evidence_id,

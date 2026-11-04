@@ -11,3 +11,7 @@ verification, not Model 1. Chart proposals belong to the existing Top layer;
 the plotting tool is deterministic with validated local fallback. See
 [implementation and measurements](SINGLE_PLANNER.md). Conditional recovery and
 the separate dashboard designer are unchanged.
+
+Current remaining-work implementation, per-requirement evidence and continuation
+checkpoint: [V6_4_CURRENT_REPORT.md](V6_4_CURRENT_REPORT.md). Unsupported semantics
+remain UNRESOLVED and production ownership remains externally blocked.

@@ -19,11 +19,18 @@ from pydantic import Field
 
 from semantic_text2sql.database import DatabaseError, DatabaseRegistry
 from semantic_text2sql.glossary import GlossaryStore
+from semantic_text2sql.graph_grounding import resolve_metrics
 from semantic_text2sql.hybrid_retrieval import HybridSchemaRetriever
-from semantic_text2sql.models import ChatRequest, ChatResponse, StrictModel
+from semantic_text2sql.models import (
+    CallLedgerEntry,
+    ChatRequest,
+    ChatResponse,
+    SemanticContract,
+    StrictModel,
+)
 from semantic_text2sql.postgres import PostgresRegistry
 from semantic_text2sql.profiling import ProfileStore
-from semantic_text2sql.runtime import RequestBudget
+from semantic_text2sql.runtime import RequestBudget, active_request_budget
 from semantic_text2sql.semantic_catalog import SemanticCatalogStore
 
 Route = Literal["schema", "business", "sql"]
@@ -150,10 +157,17 @@ class ConversationalAnalyticsBridge:
 
     async def _business_node(self, state: _GraphState) -> _GraphState:
         request = state["request"]
-        result = self.get_business_context(
+        budget = active_request_budget() or RequestBudget(
+            timeout_seconds=10, max_model_calls=0, max_database_calls=1)
+        catalog_check = bool(self.semantic_catalogs and self.semantic_catalogs.load(request.db_id))
+        result = await budget.wait(asyncio.to_thread(self.get_business_context,
             MetadataToolInput(db_id=request.db_id, question=request.message)
-        )
-        return {"response": self._tool_response(request, result)}
+        ), kind="database" if catalog_check else "work")
+        response = self._tool_response(request, result)
+        if catalog_check:
+            response = response.model_copy(update={"call_ledger": [CallLedgerEntry(
+                component="catalog_schema_inspection", kind="DATABASE", status="SUCCEEDED")]})
+        return {"response": response}
 
     async def _sql_node(self, state: _GraphState) -> _GraphState:
         return {"response": await self.sql_handler(state["request"])}
@@ -303,11 +317,19 @@ class ConversationalAnalyticsBridge:
                 if len(facts) == 8:
                     break
         catalog = self.semantic_catalogs.load(tool_input.db_id) if self.semantic_catalogs else None
-        if catalog is not None and len(facts) < 8:
+        if catalog is not None:
+            facts = facts[:4]  # Reserve bounded space for current approved definitions.
+            schema = self._registry(tool_input.db_id).inspect(tool_input.db_id)
             question = tool_input.question.casefold()
             listing_metrics = bool(_METRICS_QUESTION.search(tool_input.question))
             for metric in catalog.metrics:
                 if metric.status != "approved":
+                    continue
+                try:
+                    _, verified = resolve_metrics(metric.id, schema, catalog, SemanticContract())
+                except ValueError:
+                    continue
+                if not any(item["id"] == metric.id for item in verified):
                     continue
                 if listing_metrics or any(
                     re.search(rf"(?<!\w){re.escape(name.casefold())}(?!\w)", question)
@@ -316,6 +338,7 @@ class ConversationalAnalyticsBridge:
                     fact = (
                         f"{metric.label} ({metric.id}): {metric.description} "
                         f"Formula: {metric.formula}. Source: {metric.source_relation}."
+                        f" Approved catalog version: {catalog.catalog_version}."
                     )
                     if fact not in facts:
                         facts.append(fact)

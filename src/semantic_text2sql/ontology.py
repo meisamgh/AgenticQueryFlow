@@ -9,7 +9,7 @@ from typing import Any, Protocol
 from semantic_text2sql.glossary import GlossaryStore
 from semantic_text2sql.graph_grounding import resolve_metrics
 from semantic_text2sql.models import DatabaseProfile, SchemaInfo, SemanticContract
-from semantic_text2sql.semantic_catalog import SemanticCatalogStore
+from semantic_text2sql.semantic_catalog import SemanticCatalogStore, schema_fingerprint
 from semantic_text2sql.semantic_graph import SemanticGraphStore, graph_identity
 
 
@@ -89,6 +89,9 @@ class LocalOntologyAdapter:
             "available": True,
             "evidence_type": "APPROVED_ONTOLOGY",
             "db_id": self.schema.db_id,
+            "schema_fingerprint": schema_fingerprint(self.schema),
+            "catalog_version": catalog.catalog_version if catalog else None,
+            "authorized_tables": sorted(allowed_tables),
             "snapshot_id": snapshot.identity,
             "metrics": metrics[:4],
             "relationship_definitions": relationships[:8],
@@ -105,6 +108,10 @@ def configured_local_ontology(
         SemanticCatalogStore(
             Path(os.environ.get("TEXT2SQL_SEMANTIC_CATALOG_ROOT", "data/semantic_catalogs"))
         ),
-        SemanticGraphStore(Path(os.environ.get("TEXT2SQL_GRAPH_ROOT", "graphs"))),
+        SemanticGraphStore(
+            Path(os.environ.get("TEXT2SQL_GRAPH_ROOT", "graphs")),
+            persistence_enabled=os.environ.get(
+                "TEXT2SQL_GRAPH_PERSISTENCE_ENABLED", "false").casefold() == "true",
+        ),
         GlossaryStore(Path(os.environ.get("TEXT2SQL_GLOSSARY_ROOT", "data/business_glossaries"))),
     )

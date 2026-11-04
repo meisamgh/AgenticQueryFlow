@@ -1,5 +1,9 @@
 # Graph amendment — Phase 0 gate (2026-11-04)
 
+Historical checkpoint: the subsequent implementation request explicitly authorized
+continuation. The measurements and leakage findings below remain unchanged;
+current runtime implementation/evidence is in V6_4_CURRENT_REPORT.md.
+
 **STOPPED after Phase 0.** This amendment changes the implementation order.
 Only evaluation scripts, annotations, a prospective split, tests and these notes
 were added. Production orchestration, flags, catalogs and recovery are unchanged.
