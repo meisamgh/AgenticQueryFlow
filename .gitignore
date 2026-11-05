@@ -25,3 +25,6 @@ htmlcov/
 dist/
 build/
 *.egg-info/
+
+# Design and specification documents are kept locally, outside version control
+docs/
