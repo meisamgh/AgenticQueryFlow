@@ -99,6 +99,19 @@ class TextToSQLAgent:
             sql, schema, dialect=request.dialect,
             allowed_tables=allowed_tables, allowed_columns=allowed_columns,
         )
+        if validation.valid and allowed_columns is not None:
+            root = parse_one(sql, read=request.dialect)
+            wildcard = any(isinstance(item, exp.Star) for select in root.find_all(exp.Select)
+                           for item in select.expressions)
+            if wildcard and any(
+                not {c.name.casefold() for c in table.columns}.issubset(
+                    {c.casefold() for c in allowed_columns.get(table.name, set())}
+                ) for table in schema.tables if table.name in validation.tables
+            ):
+                validation = validation.model_copy(update={
+                    "valid":False, "code":"SQL_COLUMN_NOT_AUTHORIZED",
+                    "message":"Wildcard output exceeds the saved authorized column scope.",
+                })
         if not validation.valid or not request.execute:
             return CheckResponse(
                 db_id=request.db_id,
