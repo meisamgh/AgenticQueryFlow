@@ -23,6 +23,18 @@ function record(body){
   payload.presentation.chart_spec.data=payload.presentation.chart_spec.data.slice(0,20);
   return {db_id:'shop',run_id:body.run_id,row_count:body.generation.row_count,response_payload:payload};
 }
+for (const count of [19,20,21,100]) test(`history map completeness is correct for ${count} rows without RAM`,()=>{
+  const ctx=setup(), body=response(count), saved=record(body), original=JSON.stringify(saved);
+  vm.runInContext(app.slice(app.indexOf('function mapCoordinates('),
+    app.indexOf('function wireChartSection(')),ctx);
+  const restored=ctx.restoredRunToResponse(saved);
+  const rows=restored.generation.rows.map(()=>[52.5,13.4]);
+  const coordinates=ctx.mapCoordinates(['latitude','longitude'],rows,true,
+    restored.generation.truncated,restored.generation.row_count);
+  assert.equal(coordinates !== null,count<=20);
+  assert.equal(restored.generation.truncated,count>20);
+  assert.equal(JSON.stringify(saved),original,'restoring does not mutate saved provenance');
+});
 for(const count of [19,20,21,100]) test(`reopening ${count}-row chart restores exact RAM data, not preview`,()=>{
   const ctx=setup(),body=response(count),saved=record(body),before=JSON.stringify(saved);
   ctx.rememberChartSnapshot(body);

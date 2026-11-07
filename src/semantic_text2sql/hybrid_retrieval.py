@@ -111,20 +111,28 @@ class FastEmbedEncoder:
         self._disabled_reason = reason
 
     def encode(self, texts: Sequence[str]) -> list[list[float]]:
+        # Startup may disable dense retrieval while initialization still owns
+        # the lock. Do not make BM25 fallback wait for the abandoned initializer.
+        if self._disabled_reason is not None:
+            raise RuntimeError(self._disabled_reason)
         with self._lock:
             self.initialize()
             if self._disabled_reason is not None:
                 raise RuntimeError(self._disabled_reason)
             missing = list(dict.fromkeys(text for text in texts if text not in self._cache))
+            batch = {text: self._cache[text] for text in texts if text in self._cache}
             if missing:
                 model = self._model
                 assert model is not None
                 vectors = [list(map(float, vector)) for vector in model.embed(missing)]
                 for text, vector in zip(missing, vectors, strict=True):
                     self._cache[text] = vector
+                    batch[text] = vector
                 while len(self._cache) > self.cache_size:
                     self._cache.pop(next(iter(self._cache)))
-            return [self._cache[text] for text in texts]
+            # The active request can be larger than the bounded reusable cache.
+            # Return copies so callers cannot corrupt future retrieval rankings.
+            return [list(batch[text]) for text in texts]
 
 
 class HybridSchemaRetriever:

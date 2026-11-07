@@ -591,12 +591,14 @@ class TextToSQLService:
             for attempt in generated.attempts
             if attempt.validation_latency_ms is not None
         )
-        if generated.recovery and generated.recovery.usage.llm_calls:
+        if generated.recovery and generated.recovery.call_ledger:
+            call_ledger.extend(generated.recovery.call_ledger)
+        elif generated.recovery and generated.recovery.usage.llm_calls:
             call_ledger.extend(
                 CallLedgerEntry(
                     component=f"recovery_reasoning_{index + 1}",
                     kind="MODEL",
-                    status="SUCCEEDED",
+                    status="UNKNOWN",
                     provider=str(provider),
                     requested_model=model,
                     effective_model=generation_request.model,

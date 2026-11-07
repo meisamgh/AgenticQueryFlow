@@ -179,7 +179,7 @@ test('pending dashboard designs are discussion, not chart failures or executed d
   vm.runInContext(source.slice(source.indexOf('function responseStatus('),
     source.indexOf('function renderCallout(')), context);
   vm.runInContext(source.slice(source.indexOf('function presentationMode('),
-    source.indexOf('function isChartMode(')), context);
+    source.indexOf('async function sendFromAnswer(')), context);
   for (const status of ['AWAITING_APPROVAL', 'REJECTED', 'FAILED', 'EXPIRED']) {
     const body = {operation:'VISUALIZE', dashboard_design_proposal:{status},
       presentation_state:{mode:'chart'}};
@@ -866,7 +866,7 @@ test('chart UI stays within the response; visual controls do not call query APIs
   assert.ok(!markup.includes('class="chart-suggestions"'));
   assert.ok(!markup.includes('class="backend-suggestions"'));
   assert.ok(!markup.includes('class="chart-filter-panel"'));
-  assert.ok(markup.includes('class="chart-reset-zoom"'));
+  assert.ok(!markup.includes('class="chart-reset-zoom"'));
   const chartWiring = source.slice(source.indexOf('function wireChartSection('), source.indexOf('function toast('));
   assert.ok(!chartWiring.includes('await api('));
   assert.ok(!chartWiring.includes('send('));
@@ -890,8 +890,11 @@ test('chart filter and parameter controls are removed while zoom remains', () =>
   assert.ok(source.includes('item.db_id === uiConfig.default_db_id'));
   assert.ok(!markup.includes('chart-query-parameters'));
   assert.ok(!markup.includes('chart-parameter-chip'));
-  assert.ok(markup.includes('chart-reset-zoom'));
-  assert.ok(source.includes('article._echart?.resetZoom?.()'));
+  assert.ok(!markup.includes('chart-reset-zoom'));
+  for (const file of ['plotly_view.js', 'echarts_view.js']) {
+    const adapter = fs.readFileSync(`${__dirname}/../web/${file}`, 'utf8');
+    assert.ok(adapter.includes('resetZoom()'), `${file} retains renderer-level reset`);
+  }
 });
 
 const formatContext = vm.createContext({window: {}});
@@ -973,6 +976,38 @@ test('result table stays at 5 rows per page with footer page controls', async ()
   assert.equal(body.children.length, 5);
   assert.equal(body.children[0].children[0].textContent, '10');
   assert.equal(rows[119][0], 119, 'source rows are never mutated');
+});
+
+test('failed remote table page re-enables navigation for an explicit retry', async () => {
+  const container = new Element(), controls = new Element();
+  container.parentElement = {querySelector: () => controls};
+  let failures = 0;
+  const table = context.renderTable(container, ['ID'], [[1], [2], [3], [4], [5]], {
+    truncated: true, loadPage: async () => {throw new Error('Temporary failure');},
+    onPageError: () => {failures++;},
+  });
+  await table.goToPage(1);
+  const next = controls.children.find(child => child.className === 'table-pages')
+    .children.find(button => button.textContent === 'Next');
+  assert.equal(failures, 1);
+  assert.equal(next.disabled, false);
+});
+
+test('late table page cannot update a replaced result or fire its callbacks', async () => {
+  const container = new Element(), controls = new Element();
+  container.parentElement = {querySelector: () => controls};
+  let resolvePage, callbacks = 0;
+  const first = context.renderTable(container, ['ID'], [[1], [2], [3], [4], [5]], {
+    truncated: true,
+    loadPage: () => new Promise(resolve => {resolvePage = resolve;}),
+    onPageRendered: () => {callbacks++;},
+  });
+  const pending = first.goToPage(1);
+  context.renderTable(container, ['ID'], [[99]]);
+  resolvePage({rows: [[6]], has_more: false});
+  await pending;
+  assert.equal(callbacks, 1, 'only the initial retained page was rendered');
+  assert.equal(container.children[0].children[2].children[0].children[0].textContent, '99');
 });
 
 test('table width follows measured content and the card stays full-width', () => {
@@ -1111,6 +1146,7 @@ test('Map tab requires a map request and complete valid coordinates', () => {
   const coordinates = mapContext.mapCoordinates;
   assert.equal(coordinates(['Latitude', 'Longitude'], [[52.5, 13.4]], false, false), null);
   assert.equal(coordinates(['Latitude', 'Longitude'], [[52.5, 13.4]], true, true), null);
+  assert.equal(coordinates(['Latitude', 'Longitude'], [[52.5, 13.4]], true, false, 21), null);
   assert.equal(coordinates(['Latitude', 'Longitude'], [[152.5, 13.4]], true, false), null);
   assert.equal(JSON.stringify(coordinates(['Latitude', 'Longitude'], [[52.5, 13.4]], true, false)),
     JSON.stringify({lat: [52.5], lon: [13.4]}));
@@ -1177,7 +1213,7 @@ test('approval pause is amber and does not claim a ready dashboard', () => {
   assert.equal(classes.get('completed:complete'), false);
   assert.equal(classes.get('build:complete'), false);
 });
-vm.runInContext(source.slice(source.indexOf('function usageTotal('), source.indexOf('function renderAttempts(')), context);
+vm.runInContext(source.slice(source.indexOf('function usageTotal('), source.indexOf('function renderPipelineDetails(')), context);
 for (const [name, body, generation, expected] of [
   ['successful result', { token_usage: { input_tokens: 10, output_tokens: 5 } }, { accepted: true, attempts: [] }, '15'],
   ['failure without usage', {}, { accepted: false, attempts: [] }, 'Unavailable'],

@@ -27,6 +27,7 @@ from semantic_text2sql.models import (
     ValueFrequency,
 )
 from semantic_text2sql.postgres import PostgresRegistry
+from semantic_text2sql.sidecar_store import contained_sidecar_path, load_sidecar
 
 Database = DatabaseRegistry | PostgresRegistry
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -47,15 +48,20 @@ class ProfileStore:
         return self.root / f"{dialect}__{db_id}.json"
 
     def load(self, dialect: str, db_id: str) -> DatabaseProfile | None:
-        path = self.path(dialect, db_id)
-        if not path.is_file():
+        path = contained_sidecar_path(self.root, f"{dialect}__{db_id}.json")
+        if path is None:
             return None
         key = (dialect, db_id)
-        modified_ns = path.stat().st_mtime_ns
+        try:
+            modified_ns = path.stat().st_mtime_ns
+        except OSError:
+            return None
         cached = self._cache.get(key)
         if cached is not None and cached[0] == modified_ns:
             return cached[1]
-        profile = DatabaseProfile.model_validate_json(path.read_text())
+        profile = load_sidecar(path, DatabaseProfile, "db_id", db_id)
+        if profile is None:
+            return None
         self._cache[key] = (modified_ns, profile)
         return profile
 

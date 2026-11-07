@@ -576,12 +576,13 @@ def test_web_chat_application_is_served() -> None:
     assert page.text.index('id="databaseSelect"') < page.text.index('id="chatForm"')
     assert page.text.index('id="connectionCard"') < page.text.index('id="chatForm"')
     assert "`${item.provider} · ${item.model}`" not in script.text
-    assert '"OPTIMIZATION_NOT_FASTER"' in script.text
+    # Removed attempts-panel strings are not evidence of a reachable UI.
+    assert "function renderAttempts(" not in script.text
     assert 'class="semantic-status"' not in page.text
     assert "renderHighlightedSql" in script.text
     assert "renderSqlTokens" in script.text
     assert "sql-line-number" in script.text
-    assert '"NOT SELECTED"' in script.text
+    assert "renderPipelineDetails" in script.text
     assert 'class="human-review-panel"' not in page.text
     assert 'class="human-review-editor"' not in page.text
     assert '"Enter another ID"' in script.text

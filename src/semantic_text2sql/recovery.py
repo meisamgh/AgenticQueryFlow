@@ -4,20 +4,23 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import inspect
 import json
 import os
 import re
 from collections.abc import Callable
 from time import monotonic, perf_counter
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from sqlglot import exp, parse_one
 from sqlglot.errors import SqlglotError
 
 from semantic_text2sql.database import DatabaseRegistry
+from semantic_text2sql.llm import ModelError
 from semantic_text2sql.models import (
     ApprovedMetricDefinition,
+    CallLedgerEntry,
     DatabaseProfile,
     RecoveryClaim,
     RecoveryToolCall,
@@ -383,19 +386,19 @@ class RecoveryTools:
 
     def probe_filter_counts(self, sql: str, *, allowed_tables: list[str]) -> list[dict[str, Any]]:
         """Run one bounded count probe per top-level AND filter."""
+        validation = validate_sql(
+            sql, self.schema, dialect=self.schema.dialect, allowed_tables=set(allowed_tables),
+        )
+        if not validation.valid:
+            return []
         try:
             tree = parse_one(sql, dialect=self.schema.dialect)
         except Exception:
             return []
-        select = tree if isinstance(tree, exp.Select) else tree.find(exp.Select)
+        select = tree if isinstance(tree, exp.Select) else None
         if select is None or select.args.get("where") is None:
             return []
-        cte_names = {cte.alias_or_name for cte in tree.find_all(exp.CTE)}
-        physical_tables = {
-            table.name for table in tree.find_all(exp.Table) if table.name not in cte_names
-        }
-        if not physical_tables.issubset(set(allowed_tables)):
-            return []
+        context_limited = any(tree.find(kind) for kind in (exp.Join, exp.CTE, exp.Subquery))
         all_predicates = _split_and(select.args["where"].this)
         predicates = all_predicates[: self.max_database_probes]
         if len(all_predicates) > self.max_database_probes:
@@ -422,14 +425,12 @@ class RecoveryTools:
             probe_select.set("distinct", None)
             probe_sql = probe_tree.sql(dialect=self.schema.dialect)
             try:
-                self._claim_database_probe()
-                _, rows, _ = self.database.execute(
-                    self.db_id,
-                    probe_sql,
-                    max_rows=1,
-                    timeout_seconds=min(2.0, remaining),
-                )
-                count = int(rows[0][0]) if rows else 0
+                result = self.query_database(probe_sql, allowed_tables=allowed_tables)
+                rows = result["rows"]
+                if (result["truncated"] or len(rows) != 1 or len(rows[0]) != 1
+                        or type(rows[0][0]) is not int or rows[0][0] < 0):
+                    raise ValueError("Filter probe did not return one verified nonnegative count.")
+                count = rows[0][0]
                 subject_kind = _filter_subject_kind(predicate)
                 checks.append(
                     {
@@ -437,6 +438,9 @@ class RecoveryTools:
                         "plain_language": _plain_filter(predicate),
                         "subject_kind": subject_kind,
                         "no_match_explanation": (
+                            "No rows match this filter within the query's joined or derived data. "
+                            "This does not establish that the record is absent from the database."
+                            if count == 0 and context_limited else
                             _no_match_explanation(predicate, subject_kind) if count == 0 else None
                         ),
                         "match_count": count,
@@ -560,6 +564,7 @@ class RecoveryCoordinator:
         observations: list[dict[str, Any]] = []
         calls: list[RecoveryToolCall] = []
         total_usage = TokenUsage(input_tokens=0, output_tokens=0)
+        model_ledger: list[CallLedgerEntry] = []
         attempted_model_calls = 0
         started = perf_counter()
 
@@ -577,9 +582,11 @@ class RecoveryCoordinator:
                             "token_usage": total_usage,
                             "estimated_llm_cost_usd": (None if attempted_model_calls else 0.0),
                             "database_probe_count": self.tools.database_probe_count,
+                            "latency_ms": round((perf_counter() - started) * 1_000),
                         }
                     ),
                     "tool_calls": [*calls, *trace.tool_calls],
+                    "call_ledger": model_ledger,
                     "evidence": [*agent_evidence, *trace.evidence],
                 }
             )
@@ -591,7 +598,6 @@ class RecoveryCoordinator:
             for model_call in range(MAX_RECOVERY_MODEL_CALLS):
                 if progress:
                     progress("recovery_reasoning")
-                attempted_model_calls = model_call + 1
                 prompt = _agent_recovery_prompt(
                     question,
                     failed_sql,
@@ -600,36 +606,57 @@ class RecoveryCoordinator:
                     allowed_tables,
                     observations,
                 )
+                # Select the compatibility signature before calling. An internal
+                # provider TypeError is a failed call, never permission to retry
+                # with different arguments (or consume an unreported second call).
+                arguments_for_call: tuple[object, ...] = (provider, model, prompt)
+                call_signature = inspect.signature(detailed)
                 try:
-                    operation = detailed(provider, model, prompt)
-                    raw, usage = (
-                        await asyncio.wait_for(
-                            budget.wait(operation, kind="model"),
-                            timeout=max(0.01, self.tools.remaining_seconds()),
-                        )
-                        if budget is not None
-                        else await asyncio.wait_for(
-                            operation,
-                            timeout=max(0.01, self.tools.remaining_seconds()),
-                        )
-                    )
+                    call_signature.bind(*arguments_for_call)
                 except TypeError:
-                    operation = detailed(model, prompt)
-                    raw, usage = (
-                        await asyncio.wait_for(
-                            budget.wait(operation, kind="model"),
-                            timeout=max(0.01, self.tools.remaining_seconds()),
-                        )
-                        if budget is not None
-                        else await asyncio.wait_for(
-                            operation,
-                            timeout=max(0.01, self.tools.remaining_seconds()),
-                        )
+                    arguments_for_call = (model, prompt)
+                    call_signature.bind(*arguments_for_call)
+                if budget is not None:
+                    budget.claim("model")
+                attempted_model_calls += 1
+                call_started = perf_counter()
+                call_status: Literal["FAILED", "SUCCEEDED", "CANCELLED"] = "FAILED"
+                call_usage = TokenUsage()
+                try:
+                    raw, usage = await asyncio.wait_for(
+                        detailed(*arguments_for_call),
+                        timeout=max(0.001, min(
+                            self.tools.remaining_seconds(),
+                            budget.remaining() if budget else self.tools.remaining_seconds(),
+                        )),
                     )
+                    call_usage = usage if isinstance(usage, TokenUsage) else TokenUsage()
+                    call_status = "SUCCEEDED"
+                except ModelError as exc:
+                    call_usage = exc.usage
+                    raise
+                except asyncio.CancelledError:
+                    call_status = "CANCELLED"
+                    raise
+                finally:
+                    model_ledger.append(CallLedgerEntry(
+                        component=f"recovery_reasoning_{attempted_model_calls}",
+                        kind="MODEL", status=call_status, task="recovery",
+                        provider=provider, requested_model=model,
+                        input_tokens=call_usage.input_tokens,
+                        output_tokens=call_usage.output_tokens,
+                        retry_count=call_usage.provider_retries,
+                        latency_ms=round((perf_counter() - call_started) * 1_000),
+                    ))
                 if isinstance(usage, TokenUsage):
                     total_usage = TokenUsage(
                         input_tokens=(total_usage.input_tokens or 0) + (usage.input_tokens or 0),
                         output_tokens=(total_usage.output_tokens or 0) + (usage.output_tokens or 0),
+                        cache_read_tokens=(total_usage.cache_read_tokens or 0)
+                        + (usage.cache_read_tokens or 0),
+                        cache_creation_tokens=(total_usage.cache_creation_tokens or 0)
+                        + (usage.cache_creation_tokens or 0),
+                        provider_retries=total_usage.provider_retries + usage.provider_retries,
                     )
                 payload = json.loads(_strip_json_fence(raw))
                 action = str(payload.get("action") or "").upper()
@@ -708,6 +735,7 @@ class RecoveryCoordinator:
                                 ],
                             ],
                             "claims": claims,
+                            "call_ledger": model_ledger,
                             "tool_calls": calls,
                             "requires_human_review": action == "ESCALATE",
                             "usage": RecoveryUsage(
@@ -803,6 +831,7 @@ class RecoveryCoordinator:
                             evidence_ids=[evidence_id], table=table,
                             column=column, value=value,
                         )],
+                        call_ledger=model_ledger,
                         tool_calls=calls,
                         evidence=[
                             f"failure-1 {failure_code}: {failure_message}",
@@ -820,6 +849,23 @@ class RecoveryCoordinator:
                             estimated_llm_cost_usd=None,
                         ),
                     )
+        except json.JSONDecodeError:
+            if model_ledger:
+                model_ledger[-1] = model_ledger[-1].model_copy(update={
+                    "status": "FAILED", "validation_issues": ["RECOVERY_RESPONSE_INVALID_JSON"],
+                })
+            return await fallback_with_agent_usage()
+        except ModelError as exc:
+            total_usage = TokenUsage(
+                input_tokens=(total_usage.input_tokens or 0) + (exc.usage.input_tokens or 0),
+                output_tokens=(total_usage.output_tokens or 0) + (exc.usage.output_tokens or 0),
+                cache_read_tokens=(total_usage.cache_read_tokens or 0)
+                + (exc.usage.cache_read_tokens or 0),
+                cache_creation_tokens=(total_usage.cache_creation_tokens or 0)
+                + (exc.usage.cache_creation_tokens or 0),
+                provider_retries=total_usage.provider_retries + exc.usage.provider_retries,
+            )
+            return await fallback_with_agent_usage()
         except Exception:
             return await fallback_with_agent_usage()
         return await fallback_with_agent_usage()

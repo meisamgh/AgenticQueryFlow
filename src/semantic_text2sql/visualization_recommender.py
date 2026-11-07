@@ -83,7 +83,11 @@ def _cardinality(column: str, columns: list[str], rows: list[dict[str, Any]]) ->
 def _identifier_like(name: str, values: list[Any]) -> bool:
     if _IDENTIFIER_NAME.search(name):
         return True
-    numeric_values = [int(value) for value in values if isinstance(value, (int, float))]
+    numeric_values = [
+        int(value) for value in values
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+        and math.isfinite(value) and (isinstance(value, int) or value.is_integer())
+    ]
     if len(numeric_values) == len(values) and len(numeric_values) > 2:
         distinct = sorted(set(numeric_values))
         return (

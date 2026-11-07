@@ -9,7 +9,9 @@ import sqlglot
 from sqlglot import exp
 from sqlglot.errors import OptimizeError, ParseError, TokenError
 from sqlglot.optimizer.normalize_identifiers import normalize_identifiers
+from sqlglot.optimizer.qualify import qualify
 from sqlglot.optimizer.scope import Scope, traverse_scope
+from sqlglot.schema import MappingSchema
 
 from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.models import (
@@ -109,31 +111,39 @@ def validate_sql(
             table.casefold(): {column.casefold() for column in names}
             for table, names in allowed_columns.items()
         }
-        aliases = {
-            (table.alias_or_name or table.name).casefold(): table.name.casefold()
-            for table in physical_refs if table.name
-        }
-        derived_columns = {
-            id(column) for scope in traverse_scope(root) for column in scope.columns
-            if column.table and not column.db and not column.catalog
-            and isinstance(scope.sources.get(column.table), Scope)
-        }
-        select_aliases = {
-            alias.alias.casefold() for alias in root.find_all(exp.Alias) if alias.alias
-        }
-        unauthorized_columns: list[str] = []
-        for column in root.find_all(exp.Column):
-            if not column.name or id(column) in derived_columns:
-                continue
-            if column.table:
-                owner = aliases.get(column.table.casefold(), column.table.casefold())
-                allowed = normalized_columns.get(owner)
-                if allowed is not None and column.name.casefold() not in allowed:
-                    unauthorized_columns.append(column.sql(dialect=dialect))
-            elif column.name.casefold() not in select_aliases and not any(
-                column.name.casefold() in names for names in normalized_columns.values()
-            ):
-                unauthorized_columns.append(column.sql(dialect=dialect))
+        # Projection wildcards do not necessarily produce exp.Column nodes.
+        # Fail closed unless every referenced physical relation has an explicit
+        # full-column grant verified against the current schema. COUNT(*) is
+        # row counting, not disclosure of every source column.
+        projection_wildcard = any(
+            not isinstance(star.parent, exp.Count) for star in root.find_all(exp.Star)
+        )
+        if projection_wildcard:
+            live_columns = {
+                table.casefold(): {name.casefold() for name in names}
+                for table, names in available.items()
+            }
+            for table in physical_refs:
+                identity = ".".join(part.name for part in table.parts).casefold()
+                names = live_columns.get(identity, live_columns.get(table.name.casefold()))
+                permitted = normalized_columns.get(
+                    identity, normalized_columns.get(table.name.casefold(), set())
+                )
+                if not names or not names.issubset(permitted):
+                    return _failure(
+                        "SQL_COLUMN_NOT_AUTHORIZED",
+                        "Wildcard output exceeds the authorized column scope; "
+                        "select authorized columns explicitly.",
+                        available, tables=physical_tables,
+                    )
+        try:
+            unauthorized_columns = _unauthorized_columns(root, schema, normalized_columns, dialect)
+        except (OptimizeError, ValueError) as exc:
+            return _failure(
+                "SQL_COLUMN_NOT_AUTHORIZED",
+                f"SQL column authorization could not be resolved: {exc}",
+                available, tables=physical_tables,
+            )
         if unauthorized_columns:
             return _failure(
                 "SQL_COLUMN_NOT_AUTHORIZED",
@@ -150,6 +160,55 @@ def validate_sql(
         columns=columns,
         available_columns=available,
     )
+
+
+def _unauthorized_columns(
+    root: exp.Expression, schema: SchemaInfo, grants: dict[str, set[str]],
+    dialect: DatabaseDialect,
+) -> list[str]:
+    """Resolve references against live metadata, never a global alias/name union.
+
+    Qualification is on a copy for authorization only; executed SQL is unchanged.
+    All CTE inputs are checked independently, and correlated aliases resolve in
+    the nearest lexical scope. Unknown or ambiguous columns fail closed.
+    """
+    mapping = MappingSchema(dialect=dialect)
+    for table in schema.tables:
+        metadata_columns = {column.name: column.data_type for column in table.columns}
+        # Introspection returns physical spelling; remote adapters quote that
+        # spelling (Snowflake folds *unquoted* names to uppercase).
+        metadata_columns.update({
+            exp.to_identifier(column.name, quoted=True).sql(dialect=dialect): column.data_type
+            for column in table.columns
+        })
+        mapping.add_table(table.name, metadata_columns)
+        physical_name = exp.to_table(table.name)
+        for identifier in physical_name.find_all(exp.Identifier):
+            identifier.set("quoted", True)
+        mapping.add_table(physical_name, metadata_columns)
+    qualified = qualify(
+        root.copy(), dialect=dialect, schema=mapping, quote_identifiers=False, identify=False,
+    )
+    denied: list[str] = []
+    for scope in traverse_scope(qualified):
+        for column in scope.columns:
+            owner_scope: Scope | None = scope
+            source = None
+            while owner_scope is not None:
+                source = owner_scope.sources.get(column.table)
+                if source is not None:
+                    break
+                owner_scope = owner_scope.parent
+            if isinstance(source, Scope):
+                continue  # Its physical inputs are verified in that scope.
+            if not isinstance(source, exp.Table):
+                denied.append(column.sql(dialect=dialect))
+                continue
+            identity = ".".join(part.name for part in source.parts).casefold()
+            permitted = grants.get(identity, grants.get(source.name.casefold(), set()))
+            if column.name.casefold() not in permitted:
+                denied.append(column.sql(dialect=dialect))
+    return denied
 
 
 def physical_table_references(

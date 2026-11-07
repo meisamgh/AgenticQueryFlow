@@ -75,6 +75,7 @@ class RunHistoryStore:
         self._sessions: list[RunRecord] = []
         self._by_id: dict[str, RunRecord] = {}
         self._reset_after: dict[str, float] = {}
+        self._dropped_before: dict[str, float] = {}
         if path is None:
             return
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -82,6 +83,10 @@ class RunHistoryStore:
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS history_reset_boundaries "
                 "(session_id TEXT PRIMARY KEY, reset_at REAL NOT NULL)"
+            )
+            connection.execute(
+                "CREATE TABLE IF NOT EXISTS history_drop_boundaries "
+                "(session_id TEXT PRIMARY KEY, dropped_at REAL NOT NULL)"
             )
             connection.execute(
                 "CREATE TABLE IF NOT EXISTS query_runs ("
@@ -123,6 +128,14 @@ class RunHistoryStore:
             if self.path is not None:
                 with sqlite3.connect(cast_path(self.path), isolation_level=None) as connection:
                     connection.execute("BEGIN IMMEDIATE")
+                    dropped = connection.execute(
+                        "SELECT dropped_at FROM history_drop_boundaries WHERE session_id=?",
+                        (entry.session_id,),
+                    ).fetchone()
+                    if dropped and entry.created_at <= float(dropped[0]):
+                        raise ValueError(
+                            "Session history was cleared before this result was saved.",
+                        )
                     # Decoration needs only the latest version and one parent,
                     # not hundreds of complete response payloads.
                     latest = connection.execute(
@@ -170,6 +183,9 @@ class RunHistoryStore:
                     )
                     connection.commit()
                 return entry
+            boundary = self._dropped_before.get(entry.session_id)
+            if boundary is not None and entry.created_at <= boundary:
+                raise ValueError("Session history was cleared before this result was saved.")
             entry = self._decorate(entry, self._list_unlocked(entry.session_id))
             self._by_id[entry.run_id] = entry
             self._sessions.append(entry)
@@ -526,8 +542,14 @@ class RunHistoryStore:
 
     def drop_session(self, session_id: str) -> None:
         with self._lock:
+            boundary = time.time()
+            self._dropped_before[session_id] = boundary
             if self.path is not None:
                 with self._connect() as connection:
+                    connection.execute(
+                        "INSERT OR REPLACE INTO history_drop_boundaries VALUES (?, ?)",
+                        (session_id, boundary),
+                    )
                     connection.execute("DELETE FROM query_runs WHERE session_id = ?", (session_id,))
             self._sessions = [item for item in self._sessions if item.session_id != session_id]
             self._by_id = {

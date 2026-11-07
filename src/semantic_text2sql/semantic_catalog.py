@@ -19,6 +19,7 @@ from typing import Literal
 from pydantic import Field, model_validator
 
 from semantic_text2sql.models import DatabaseProfile, SchemaInfo, SemanticFilter, StrictModel
+from semantic_text2sql.sidecar_store import contained_sidecar_path, load_sidecar
 
 MetadataStatus = Literal[
     "observed", "inferred", "reviewed", "approved", "stale", "conflicting"
@@ -187,14 +188,19 @@ class SemanticCatalogStore:
     def load(self, db_id: str) -> CatalogDocument | None:
         if self.root is None:
             return None
-        path = self.root / f"{db_id}.json"
-        if not path.is_file():
+        path = contained_sidecar_path(self.root, f"{db_id}.json")
+        if path is None:
             return None
-        modified_ns = path.stat().st_mtime_ns
+        try:
+            modified_ns = path.stat().st_mtime_ns
+        except OSError:
+            return None
         cached = self._cache.get(db_id)
         if cached is not None and cached[0] == modified_ns:
             return cached[1]
-        document = CatalogDocument.model_validate_json(path.read_text(encoding="utf-8"))
+        document = load_sidecar(path, CatalogDocument, "source_db_id", db_id)
+        if document is None:
+            return None
         self._cache[db_id] = (modified_ns, document)
         return document
 

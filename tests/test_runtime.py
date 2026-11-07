@@ -25,3 +25,11 @@ def test_request_budget_enforces_shared_deadline() -> None:
             await budget.wait(asyncio.sleep(0.02), kind="work")
 
     asyncio.run(exercise())
+
+
+def test_expired_budget_does_not_count_an_operation_that_never_started() -> None:
+    budget = RequestBudget(1, started_at=0)
+    for kind in ("model", "database"):
+        with pytest.raises(RequestBudgetExceeded, match="deadline"):
+            budget.claim(kind)
+    assert budget.model_calls == budget.database_calls == 0

@@ -357,6 +357,7 @@ class ConversationStore:
 
     def __init__(self, path: Path | None = None, *, ttl_seconds: int = 86_400) -> None:
         self._states: dict[str, ConversationState] = {}
+        self._reset_epochs: dict[str, int] = {}
         self._lock = Lock()
         self.path = path
         self.ttl_seconds = max(60, ttl_seconds)
@@ -368,6 +369,22 @@ class ConversationStore:
                     "session_id TEXT PRIMARY KEY, version INTEGER NOT NULL, "
                     "state_json TEXT NOT NULL, updated_at REAL NOT NULL)"
                 )
+                connection.execute(
+                    "CREATE TABLE IF NOT EXISTS conversation_reset_epochs ("
+                    "session_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL)"
+                )
+
+    def reset_epoch(self, session_id: str) -> int:
+        """A reset witness that survives absent/cleared accepted state."""
+        with self._lock:
+            if self.path is not None:
+                with sqlite3.connect(self.path) as connection:
+                    row = connection.execute(
+                        "SELECT epoch FROM conversation_reset_epochs WHERE session_id=?",
+                        (session_id,),
+                    ).fetchone()
+                return int(row[0]) if row else 0
+            return self._reset_epochs.get(session_id, 0)
 
     def get(self, session_id: str) -> ConversationState | None:
         with self._lock:
@@ -385,12 +402,21 @@ class ConversationStore:
             return self._states.get(session_id)
 
     def put(
-        self, state: ConversationState, *, expected_version: int | None = None
+        self, state: ConversationState, *, expected_version: int | None = None,
+        expected_epoch: int | None = None,
     ) -> ConversationState:
         with self._lock:
             if self.path is not None:
                 with sqlite3.connect(self.path, isolation_level=None) as connection:
                     connection.execute("BEGIN IMMEDIATE")
+                    epoch = connection.execute(
+                        "SELECT epoch FROM conversation_reset_epochs WHERE session_id=?",
+                        (state.session_id,),
+                    ).fetchone()
+                    current_epoch = int(epoch[0]) if epoch else 0
+                    if expected_epoch is not None and expected_epoch != current_epoch:
+                        connection.rollback()
+                        raise ConversationConflict("Conversation was reset while this request ran.")
                     row = connection.execute(
                         "SELECT version FROM conversations WHERE session_id = ?",
                         (state.session_id,),
@@ -417,6 +443,9 @@ class ConversationStore:
                     )
                     connection.commit()
                 return saved
+            if (expected_epoch is not None
+                    and expected_epoch != self._reset_epochs.get(state.session_id, 0)):
+                raise ConversationConflict("Conversation was reset while this request ran.")
             current = self._read_unlocked(state.session_id)
             current_version = current.version if current else None
             if expected_version != current_version:
@@ -430,12 +459,19 @@ class ConversationStore:
     def reset(self, session_id: str) -> None:
         with self._lock:
             if self.path is None:
+                self._reset_epochs[session_id] = self._reset_epochs.get(session_id, 0) + 1
                 self._states.pop(session_id, None)
             else:
-                with sqlite3.connect(self.path) as connection:
+                with sqlite3.connect(self.path, isolation_level=None) as connection:
+                    connection.execute("BEGIN IMMEDIATE")
+                    connection.execute(
+                        "INSERT INTO conversation_reset_epochs VALUES (?, 1) "
+                        "ON CONFLICT(session_id) DO UPDATE SET epoch=epoch+1", (session_id,),
+                    )
                     connection.execute(
                         "DELETE FROM conversations WHERE session_id = ?", (session_id,)
                     )
+                    connection.commit()
 
     def _read_unlocked(self, session_id: str) -> ConversationState | None:
         if self.path is None:

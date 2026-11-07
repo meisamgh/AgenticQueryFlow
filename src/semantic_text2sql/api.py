@@ -177,6 +177,28 @@ def _planner_now() -> str:
     return datetime.now(UTC).isoformat(timespec="milliseconds")
 
 
+def clear_reset_caches(
+    session_id: str,
+    *,
+    design_proposals: ProposalStore | None,
+    dashboard_revisions: DashboardRevisions,
+    dashboard_bundles: dict[tuple[str, str, str], dict[str, RecentResult]],
+    recent_results: dict[tuple[str, str], RecentResult],
+) -> None:
+    """Clear the caches shared by every reset entry point.
+
+    Chart snapshots are intentionally retained across reset so previously
+    displayed charts can still be reopened; history deletion owns that cache.
+    """
+    if design_proposals:
+        design_proposals.clear(session_id)
+    dashboard_revisions.clear(session_id)
+    for key in [key for key in dashboard_bundles if key[0] == session_id]:
+        dashboard_bundles.pop(key, None)
+    for key in [key for key in recent_results if key[0] == session_id]:
+        recent_results.pop(key, None)
+
+
 def create_app(
     agent: TextToSQLAgent | None = None,
     conversation_completers: dict[str, Any] | None = None,
@@ -280,6 +302,13 @@ def create_app(
         "openrouter": openrouter,
         "ollama": ollama,
     }
+
+    def configured_database(db_id: str) -> DatabaseRegistry | PostgresRegistry:
+        if db_id in sqlite.list_ids():
+            return sqlite
+        if postgres is not None and db_id in postgres.configured_ids():
+            return postgres
+        raise HTTPException(status_code=404, detail="Database was not found or configured.")
 
     def conversational_agent_enabled() -> bool:
         return (
@@ -407,9 +436,17 @@ def create_app(
         "queryflow_provisional_context", default=None
     )
     history_anchor: ContextVar[str | None] = ContextVar("queryflow_history_anchor", default=None)
+    current_job: ContextVar[str | None] = ContextVar("queryflow_current_job", default=None)
+    turn_epochs: ContextVar[dict[str, int] | None] = ContextVar(
+        "queryflow_turn_epochs", default=None,
+    )
     studio_context: ContextVar[SavedDashboard | None] = ContextVar(
         "queryflow_dashboard_studio", default=None
     )
+
+    def expected_reset_epoch(request: ChatRequest) -> int | None:
+        witness = turn_epochs.get()
+        return witness.get(request.session_id) if witness is not None else request._reset_epoch
 
     def accepted_state(session_id: str) -> ConversationState | None:
         provisional = provisional_context.get()
@@ -449,6 +486,15 @@ def create_app(
 
     dashboard_revisions = DashboardRevisions()
     dashboard_bundles: dict[tuple[str, str, str], dict[str, RecentResult]] = {}
+
+    def clear_session_reset_caches(session_id: str) -> None:
+        clear_reset_caches(
+            session_id,
+            design_proposals=design_proposals,
+            dashboard_revisions=dashboard_revisions,
+            dashboard_bundles=dashboard_bundles,
+            recent_results=recent_results,
+        )
 
     def dashboard_source(session: str, db: str, identity: str) -> RecentResult | None:
         current = recent_results.get((session, db))
@@ -547,12 +593,32 @@ def create_app(
                 )
                 if database is None:
                     raise HTTPException(404, "The selected database is unavailable.")
+                tables = source.verified_context.get("tables") or {}
+                if not tables:
+                    raise HTTPException(409, "Saved result has no verified scope for more rows.")
+                budget = RequestBudget(10, max_model_calls=0, max_database_calls=2)
                 try:
-                    columns, fetched, has_more = await asyncio.to_thread(
-                        database.execute, request.db_id, source.sql,
-                        max_rows=end, timeout_seconds=5.0,
+                    checked = await budget.wait(
+                        asyncio.to_thread(
+                            active_agent.check,
+                            CheckRequest(db_id=request.db_id, sql=source.sql,
+                                         dialect=source.dialect, execute=False),
+                            budget=budget, allowed_tables=set(tables),
+                            allowed_columns={table: set(info.get("columns") or [])
+                                             for table, info in tables.items()},
+                        ), kind="work",
                     )
-                except DatabaseError as exc:
+                    if not checked.validation.valid:
+                        raise HTTPException(
+                            409, "Saved SQL no longer matches its authorized scope.",
+                        )
+                    columns, fetched, has_more = await budget.wait(
+                        asyncio.to_thread(
+                            database.execute, request.db_id, source.sql,
+                            max_rows=end, timeout_seconds=min(5.0, budget.remaining()),
+                        ), kind="database",
+                    )
+                except (DatabaseError, RequestBudgetExceeded) as exc:
                     raise HTTPException(409, "The saved result could not be paged.") from exc
                 if columns != source.columns or fetched[:len(source.rows)] != source.rows:
                     raise HTTPException(
@@ -605,6 +671,15 @@ def create_app(
     chat_jobs: dict[str, dict[str, Any]] = {}
     job_ttl_seconds = max(60, int(os.environ.get("TEXT2SQL_JOB_TTL_SECONDS", "3600")))
     max_jobs = max(10, int(os.environ.get("TEXT2SQL_MAX_JOBS", "500")))
+    history_write_timeout_seconds = max(.1, min(15.0, float(
+        os.environ.get("TEXT2SQL_HISTORY_WRITE_TIMEOUT_SECONDS", "5")
+    )))
+    history_writes: set[asyncio.Task[RunRecord]] = set()
+
+    def history_write_done(task: asyncio.Task[RunRecord]) -> None:
+        history_writes.discard(task)
+        if not task.cancelled():
+            task.exception()  # Consume failures even if the caller timed out.
 
     def cleanup_jobs() -> None:
         now = perf_counter()
@@ -631,16 +706,16 @@ def create_app(
                 chat_tasks.pop(job_id, None)
 
     def set_session_stage(session_id: str, stage: str) -> None:
-        for job in chat_jobs.values():
-            if job.get("session_id") == session_id and job.get("status") == "running":
-                if job.get("stage") != stage:
-                    job.setdefault("events", []).append(
-                        {
-                            "stage": stage,
-                            "elapsed_ms": round((perf_counter() - float(job["started_at"])) * 1000),
-                        }
-                    )
-                job["stage"] = stage
+        job = chat_jobs.get(current_job.get() or "")
+        if job and job.get("session_id") == session_id and job.get("status") == "running":
+            if job.get("stage") != stage:
+                job.setdefault("events", []).append(
+                    {
+                        "stage": stage,
+                        "elapsed_ms": round((perf_counter() - float(job["started_at"])) * 1000),
+                    }
+                )
+            job["stage"] = stage
 
     chat_tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -777,6 +852,7 @@ def create_app(
 
     @app.post("/api/history/{run_id}/continue", response_model=ConversationState)
     async def continue_history(run_id: str, session_id: str) -> ConversationState:
+        epoch = conversations.reset_epoch(session_id)
         record = runs.get(run_id, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Conversation turn not found.")
@@ -787,6 +863,7 @@ def create_app(
             restored = conversations.put(
                 record.state_snapshot,
                 expected_version=current.version if current else None,
+                expected_epoch=epoch,
             )
             for key in [key for key in recent_results if key[0] == session_id]:
                 recent_results.pop(key, None)
@@ -819,20 +896,15 @@ def create_app(
         """Start a fresh conversation without invoking any model or deleting audit history."""
         response.headers["Cache-Control"] = "no-store"
         conversations.reset(session_id)
-        if design_proposals:
-            design_proposals.clear(session_id)
-        dashboard_revisions.clear(session_id)
-        for bundle_key in [key for key in dashboard_bundles if key[0] == session_id]:
-            dashboard_bundles.pop(bundle_key, None)
+        clear_session_reset_caches(session_id)
         await asyncio.to_thread(runs.mark_memory_reset, session_id)
-        for key in [key for key in recent_results if key[0] == session_id]:
-            recent_results.pop(key, None)
         return Response(status_code=204, headers={"Cache-Control": "no-store"})
 
     @app.get("/api/databases/{db_id}/glossary")
     async def database_glossary(response: Response, db_id: str) -> list[GlossaryTerm]:
         """Approved business definitions, for the contextual schema inspector."""
         response.headers["Cache-Control"] = "no-store"
+        configured_database(db_id)
         glossary = glossaries.load(db_id)
         return glossary.terms if glossary else []
 
@@ -856,12 +928,8 @@ def create_app(
     @app.get("/api/databases/{db_id}/schema")
     async def database_schema(db_id: str) -> dict[str, Any]:
         """Browse live schema and labeled profile relationships without exposing rows."""
-        if db_id in sqlite.list_ids():
-            schema = await asyncio.to_thread(sqlite.inspect, db_id)
-        elif postgres is not None and db_id in postgres.configured_ids():
-            schema = await asyncio.to_thread(postgres.inspect, db_id)
-        else:
-            raise HTTPException(status_code=404, detail="Database was not found or configured.")
+        database = configured_database(db_id)
+        schema = await asyncio.to_thread(database.inspect, db_id)
         live_columns = {
             (table.name, column.name) for table in schema.tables for column in table.columns
         }
@@ -945,10 +1013,7 @@ def create_app(
         """
         import re as _re
 
-        if db_id not in sqlite.list_ids() and (
-            postgres is None or db_id not in postgres.configured_ids()
-        ):
-            raise HTTPException(status_code=404, detail="Database was not found or configured.")
+        database = configured_database(db_id)
         if not _re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", table) or not _re.fullmatch(
             r"[A-Za-z_][A-Za-z0-9_]*", column
         ):
@@ -956,11 +1021,6 @@ def create_app(
         search_term = (search or "").strip()
         if len(search_term) > 64:
             raise HTTPException(status_code=400, detail="Search term is too long.")
-        database = (
-            sqlite if db_id in sqlite.list_ids() else (postgres if postgres is not None else None)
-        )
-        if database is None:
-            raise HTTPException(status_code=404, detail="Database was not found or configured.")
         try:
             schema = await asyncio.to_thread(database.inspect, db_id)
         except DatabaseError as exc:
@@ -1075,14 +1135,13 @@ def create_app(
     @app.get("/api/databases/{db_id}/analytics-capabilities")
     async def analytics_capabilities(db_id: str) -> dict[str, Any]:
         """Expose a compact, read-only analytical capability summary."""
-        if db_id in sqlite.list_ids():
+        database = configured_database(db_id)
+        if database is sqlite:
             dialect = "sqlite"
-            schema = sqlite.inspect(db_id)
-        elif postgres is not None and db_id in postgres.configured_ids():
-            dialect = postgres.dialect_for(db_id)
-            schema = postgres.inspect(db_id)
         else:
-            raise HTTPException(status_code=404, detail="Database was not found or configured.")
+            assert postgres is not None
+            dialect = postgres.dialect_for(db_id)
+        schema = database.inspect(db_id)
 
         profile = profiles.load(dialect, db_id)
         profile_by_column = (
@@ -1148,12 +1207,8 @@ def create_app(
     @app.get("/api/databases/{db_id}/semantic-catalog")
     async def semantic_catalog(db_id: str) -> dict[str, Any]:
         """Governed semantic catalog composed with live schema and profile status."""
-        if db_id in sqlite.list_ids():
-            schema = await asyncio.to_thread(sqlite.inspect, db_id)
-        elif postgres is not None and db_id in postgres.configured_ids():
-            schema = await asyncio.to_thread(postgres.inspect, db_id)
-        else:
-            raise HTTPException(status_code=404, detail="Database was not found or configured.")
+        database = configured_database(db_id)
+        schema = await asyncio.to_thread(database.inspect, db_id)
         try:
             profile = profiles.load(schema.dialect, db_id)
         except (OSError, ValueError):
@@ -1170,14 +1225,13 @@ def create_app(
     @app.get("/api/databases/{db_id}/semantic-catalog/verification")
     async def semantic_catalog_verification(db_id: str) -> dict[str, Any]:
         """Deterministic evidence probes for the registered catalog document."""
-        if db_id in sqlite.list_ids():
-            schema = await asyncio.to_thread(sqlite.inspect, db_id)
+        database = configured_database(db_id)
+        schema = await asyncio.to_thread(database.inspect, db_id)
+        if database is sqlite:
             runner = sqlite_runner(sqlite, db_id)
-        elif postgres is not None and db_id in postgres.configured_ids():
-            schema = await asyncio.to_thread(postgres.inspect, db_id)
-            runner = postgres_runner(postgres, db_id)
         else:
-            raise HTTPException(status_code=404, detail="Database was not found or configured.")
+            assert postgres is not None
+            runner = postgres_runner(postgres, db_id)
         document = semantic_catalogs.load(db_id)
         if document is None:
             raise HTTPException(
@@ -1707,9 +1761,8 @@ def create_app(
                 )
             pending = pending.model_copy(update={"semantic_contract": updated_contract})
         if operation == "RESET_CONTEXT":
-            if design_proposals:
-                design_proposals.clear(request.session_id)
             conversations.reset(request.session_id)
+            clear_session_reset_caches(request.session_id)
             await asyncio.to_thread(runs.mark_memory_reset, request.session_id)
             return ChatResponse(
                 session_id=request.session_id,
@@ -1752,15 +1805,15 @@ def create_app(
                     ),
                 }
             )
-        for job in chat_jobs.values():
-            if job.get("session_id") == request.session_id and job.get("status") == "running":
-                job["understanding"] = {
-                    "operation": interpretation.operation,
-                    "resolved_instruction": pending.resolved_question,
-                    "source": interpretation.source,
-                    "confidence": interpretation.confidence,
-                    "changes": [item.model_dump() for item in interpretation.changes],
-                }
+        job = chat_jobs.get(current_job.get() or "")
+        if job and job.get("session_id") == request.session_id and job.get("status") == "running":
+            job["understanding"] = {
+                "operation": interpretation.operation,
+                "resolved_instruction": pending.resolved_question,
+                "source": interpretation.source,
+                "confidence": interpretation.confidence,
+                "changes": [item.model_dump() for item in interpretation.changes],
+            }
         if operation in EXPLANATION_OPERATIONS:
             explanation_started = perf_counter()
             explanation_usage = TokenUsage()
@@ -1892,6 +1945,7 @@ def create_app(
                         response_state = conversations.put(
                             pending,
                             expected_version=previous.version if previous is not None else None,
+                            expected_epoch=expected_reset_epoch(request),
                         )
                     except ConversationConflict as exc:
                         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -2165,6 +2219,13 @@ def create_app(
         """Retain bounded executed rows for chart follow-ups, independent of history."""
         if not response.generation or not response.generation.accepted:
             return
+        if response.state is not None:
+            current = conversations.get(request.session_id)
+            if (current is None or current.version != response.state.version
+                    or current.db_id != response.state.db_id):
+                # Reset or a newer accepted turn won while history I/O awaited.
+                # Never let the older completion repopulate the active cache.
+                return
         key = (request.session_id, request.db_id)
         recent_results.pop(key, None)
         snapshot = RecentResult.from_response(response)
@@ -2191,11 +2252,19 @@ def create_app(
                 "state_commit_pending": True,
                 "state_expected_version": branch[3],
             })
+        # No await separates this boundary from the version-checked state put.
+        # Cancellation is accepted before it, but must not claim rollback once
+        # accepted state is committed and the history writer is finalizing.
+        job = chat_jobs.get(current_job.get() or "")
+        if job is not None:
+            job["cancellable"] = False
+            set_session_stage(request.session_id, "saving_result")
         if response.state_commit_pending and response.state is not None:
             try:
                 committed = conversations.put(
                     response.state,
                     expected_version=response.state_expected_version,
+                    expected_epoch=expected_reset_epoch(request),
                 )
             except ConversationConflict as exc:
                 raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -2227,7 +2296,9 @@ def create_app(
             }
         )
         try:
-            record = await asyncio.to_thread(
+            if len(history_writes) >= max_jobs:
+                raise TimeoutError("History writers are at capacity.")
+            write = asyncio.create_task(asyncio.to_thread(
                 runs.record,
                 build_run_record(
                     {
@@ -2237,6 +2308,11 @@ def create_app(
                         "latency_ms": response.timings_ms.get("total", 0),
                     }
                 ),
+            ))
+            history_writes.add(write)
+            write.add_done_callback(history_write_done)
+            record = await asyncio.wait_for(
+                asyncio.shield(write), timeout=history_write_timeout_seconds,
             )
             saved_response = response.model_copy(
                 update={
@@ -2327,12 +2403,14 @@ def create_app(
     )
 
     def reset_assistant_context(session_id: str) -> None:
-        if design_proposals:
-            design_proposals.clear(session_id)
         conversations.reset(session_id)
+        clear_session_reset_caches(session_id)
+        witness = turn_epochs.get()
+        if witness is not None:
+            # A deliberate reset tool can continue within its own turn. A reset
+            # from a different request cannot update this request-local witness.
+            witness[session_id] = conversations.reset_epoch(session_id)
         runs.mark_memory_reset(session_id)
-        for key in [key for key in recent_results if key[0] == session_id]:
-            recent_results.pop(key, None)
 
     def inspect_assistant_history(session: str, db: str, reference: str) -> dict[str, Any] | None:
         if db not in sqlite.list_ids() and (
@@ -2637,6 +2715,17 @@ def create_app(
 
     @app.post("/api/chat", response_model=ChatResponse)
     async def chat(request: ChatRequest) -> ChatResponse:
+        epoch = conversations.reset_epoch(request.session_id)
+        if request._reset_epoch is not None and request._reset_epoch != epoch:
+            raise HTTPException(409, "Conversation was reset before this request started.")
+        request._reset_epoch = epoch
+        epoch_token = turn_epochs.set({request.session_id: epoch})
+        try:
+            return await dispatch_chat(request)
+        finally:
+            turn_epochs.reset(epoch_token)
+
+    async def dispatch_chat(request: ChatRequest) -> ChatResponse:
         if conversational_agent_enabled():
             token = None
             if request.parent_run_id:
@@ -2689,6 +2778,7 @@ def create_app(
         run_id: str, session_id: str, *, persist: bool = True,
         budget: RequestBudget | None = None, expected_version: int | None = None,
     ) -> ChatResponse:
+        refresh_epoch = conversations.reset_epoch(session_id)
         record = runs.get(run_id, session_id)
         if record is None:
             raise HTTPException(status_code=404, detail="Conversation turn not found.")
@@ -2787,6 +2877,7 @@ def create_app(
                 provider=cast(ModelProvider, record.provider),
                 model=record.model,
             )
+        refresh_request._reset_epoch = refresh_epoch
         response = ChatResponse(
                 session_id=session_id,
                 operation="REFINE",
@@ -2818,6 +2909,7 @@ def create_app(
         job["status"] = "running"
         job["stage"] = "conversation"
         job["events"].append({"stage": "conversation", "elapsed_ms": 0})
+        job_token = current_job.set(job_id)
         try:
             response = await chat(request)
             job.update(
@@ -2827,19 +2919,27 @@ def create_app(
                 finished_at=perf_counter(),
             )
         except asyncio.CancelledError:
-            job.update(status="cancelled", stage="cancelled", finished_at=perf_counter())
+            job.update(status="cancelled", stage="cancelled")
+            job.setdefault("finished_at", perf_counter())
             raise
         except Exception as exc:  # pragma: no cover - defensive job boundary
             job.update(status="failed", stage="failed", error=str(exc), finished_at=perf_counter())
+        finally:
+            current_job.reset(job_token)
 
     @app.post("/api/chat/jobs", status_code=202)
     async def start_chat_job(request: ChatRequest) -> dict[str, str]:
         cleanup_jobs()
+        if sum(job.get("status") in {"queued", "running"}
+               for job in chat_jobs.values()) >= max_jobs:
+            raise HTTPException(429, "Queryflow is at capacity. Wait for a request to finish.")
+        request._reset_epoch = conversations.reset_epoch(request.session_id)
         job_id = uuid4().hex
         chat_jobs[job_id] = {
             "job_id": job_id,
             "session_id": request.session_id,
             "status": "queued",
+            "cancellable": True,
             "stage": "queued",
             "started_at": perf_counter(),
             "response": None,
@@ -2870,7 +2970,9 @@ def create_app(
             raise HTTPException(status_code=404, detail="Chat job was not found.")
         if job["status"] in {"completed", "failed", "cancelled"}:
             return {"job_id": job_id, "status": str(job["status"])}
-        job.update(status="cancelled", stage="cancelled")
+        if not job.get("cancellable", True):
+            return {"job_id": job_id, "status": "finalizing"}
+        job.update(status="cancelled", stage="cancelled", finished_at=perf_counter())
         task = chat_tasks.get(job_id)
         if task is not None:
             task.cancel()

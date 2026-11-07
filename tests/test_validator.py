@@ -5,6 +5,34 @@ from semantic_text2sql.validator import clean_model_sql, validate_sql
 
 
 @pytest.mark.parametrize("sql", [
+    "SELECT * FROM ORDERS", "SELECT o.* FROM orders o",
+    "WITH o AS (SELECT * FROM orders) SELECT order_id FROM o",
+    "SELECT * FROM (SELECT order_id FROM orders) o",
+])
+def test_projection_wildcards_cannot_bypass_restricted_columns(registry, sql) -> None:  # type: ignore[no-untyped-def]
+    result = validate_sql(sql, registry.inspect("shop"),
+                          allowed_tables={"orders"}, allowed_columns={"Orders": {"order_id"}})
+    assert not result.valid
+    assert result.code == "SQL_COLUMN_NOT_AUTHORIZED"
+
+
+@pytest.mark.parametrize("sql", ["SELECT * FROM ORDERS", "SELECT o.* FROM orders o"])
+def test_projection_wildcards_with_verified_full_grants(registry, sql) -> None:  # type: ignore[no-untyped-def]
+    schema = registry.inspect("shop")
+    grants = {table.name.upper(): {col.name for col in table.columns} for table in schema.tables}
+    assert validate_sql(sql, schema, allowed_columns=grants).valid
+
+
+def test_row_count_star_is_not_projection_disclosure(registry) -> None:  # type: ignore[no-untyped-def]
+    schema = registry.inspect("shop")
+    assert validate_sql("SELECT COUNT(*) FROM orders", schema,
+                        allowed_columns={"orders": {"order_id"}}).valid
+    assert not validate_sql("SELECT * FROM orders", schema, allowed_columns={}).valid
+    assert not validate_sql("SELECT secret FROM orders", schema,
+                            allowed_columns={"orders": {"order_id"}}).valid
+
+
+@pytest.mark.parametrize("sql", [
     "WITH secret AS (SELECT customer_id FROM customers) SELECT * FROM analytics.secret",
     "WITH secret AS (SELECT * FROM secret) SELECT * FROM secret",
     "SELECT * FROM secret WHERE EXISTS "

@@ -30,6 +30,28 @@ test('polling completion returns the real response without an animation delay', 
   assert.equal((await h.context.waitForJob('job',h.progress)).result_id,'r1');
   assert.equal(h.polls(),2);
 });
+
+test('finalizing progress does not promise that accepted state can still be cancelled', () => {
+  const h = harness();
+  h.context.updateThinking(h.progress, {stage:'saving_result', status:'running',
+    cancellable:false, events:[]});
+  assert.equal(h.nodes.get('.progress-stage').textContent, 'Saving your result…');
+  assert.equal(h.nodes.get('.progress-detail').textContent,
+    'Your result is ready and is being saved.');
+});
+
+test('declined late cancellation keeps polling and does not mark the request cancelled', async () => {
+  let handler;
+  const button = {disabled:false, addEventListener(_event, callback) {handler = callback;}};
+  const state = {cancelled:false, jobId:'one'};
+  const context = vm.createContext({state, $:() => button,
+    api:async() => ({status:'finalizing'}), toast() {}, showError() {throw new Error('Unexpected');}});
+  vm.runInContext(source.slice(source.indexOf('$("#cancelButton").addEventListener'),
+    source.indexOf('$("#chatForm").addEventListener')), context);
+  await handler();
+  assert.equal(state.cancelled, false);
+  assert.equal(button.disabled, false);
+});
 for (const status of ['failed','cancelled']) test(`polling preserves ${status} handling`,async()=>{
   const h=harness([{stage:'execution',status,error:'Safe failure',events:[]}]);
   await assert.rejects(h.context.waitForJob('job',h.progress),status==='cancelled'?/cancelled/:/Safe failure/);

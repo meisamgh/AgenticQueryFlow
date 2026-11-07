@@ -656,6 +656,7 @@ class RecoveryTrace(StrictModel):
     diagnosis_summary: str | None = None
     filter_checks: list[dict[str, Any]] = Field(default_factory=list, max_length=20)
     usage: RecoveryUsage = Field(default_factory=RecoveryUsage)
+    call_ledger: list[CallLedgerEntry] = Field(default_factory=list, max_length=16)
     tool_calls: list[RecoveryToolCall] = Field(default_factory=list, max_length=6)
     evidence: list[str] = Field(default_factory=list, max_length=20)
     claims: list[RecoveryClaim] = Field(default_factory=list, max_length=10)
@@ -743,6 +744,7 @@ class DashboardTarget(StrictModel):
 
 
 class ChatRequest(StrictModel):
+    _reset_epoch: int | None = PrivateAttr(default=None)
     _dashboard_snapshot_only: bool = PrivateAttr(default=False)
     _dashboard_sources: dict[str, Any] = PrivateAttr(default_factory=dict)
     _dashboard_design_action: str = PrivateAttr(default="PROPOSE")

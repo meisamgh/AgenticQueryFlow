@@ -1,4 +1,6 @@
-/* Query-backed filter changes are instructions to the governed conversation
+/* Compatibility helper, not loaded by index.html: the filter UI was removed.
+   Isolated tests verify this helper, not browser reachability.
+   Query-backed filter changes are instructions to the governed conversation
    service, never browser-built SQL or display-only row slicing. */
 (function (root) {
   function selectedTables(context) {

@@ -60,6 +60,8 @@ class RequestBudget:
     def claim(self, kind: str) -> None:
         """Atomically reserve one real provider or database operation."""
         with self._lock:
+            if self.remaining() <= 0:
+                raise RequestBudgetExceeded("The request deadline was exhausted.")
             if kind == "model":
                 cap = _MODEL_CALL_CAP.get()
                 if cap is not None and cap[0] == id(self) and self.model_calls >= cap[1]:
@@ -71,8 +73,6 @@ class RequestBudget:
                 if self.database_calls >= self.max_database_calls:
                     raise RequestBudgetExceeded("The request database-call budget was exhausted.")
                 self.database_calls += 1
-            if self.remaining() <= 0:
-                raise RequestBudgetExceeded("The request deadline was exhausted.")
 
 
 def _close_unstarted(operation: Awaitable[object]) -> None:

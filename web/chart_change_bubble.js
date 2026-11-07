@@ -1,4 +1,6 @@
-/* Chart-title comparison view. Consumes existing verified KPI evidence only. */
+/* Retained comparison component, not shipped by index.html: chart-title change
+   percentages were removed from the UI. Unit tests are not integration evidence.
+   Consumes existing verified KPI evidence only. */
 window.ChartChangeBubble = (() => {
   function build(response, chart, kpis) {
     const result=response.generation;

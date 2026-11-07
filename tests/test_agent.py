@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 from typing import Literal
 
+import pytest
+
 from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.models import (
     CheckRequest,
@@ -39,6 +41,22 @@ class FakeModel:
     ) -> tuple[str, int]:
         self.feedback.append(feedback)
         return self.responses.pop(0), 1
+
+
+@pytest.mark.parametrize("projection", ["*", "o.*"])
+def test_check_blocks_case_variant_wildcards_before_execution(  # type: ignore[no-untyped-def]
+    registry, monkeypatch, projection,
+) -> None:
+    def must_not_execute(*args, **kwargs):  # type: ignore[no-untyped-def]
+        raise AssertionError("Restricted wildcard reached execution")
+
+    monkeypatch.setattr(registry, "execute", must_not_execute)
+    response = TextToSQLAgent(registry, FakeModel([])).check(
+        CheckRequest(db_id="shop", sql=f"SELECT {projection} FROM ORDERS o", execute=True),
+        allowed_tables={"orders"}, allowed_columns={"Orders": {"order_id"}},
+    )
+    assert not response.validation.valid
+    assert response.validation.code == "SQL_COLUMN_NOT_AUTHORIZED"
 
 
 def test_sql_only_generation_executes_read_only_query(registry) -> None:  # type: ignore[no-untyped-def]

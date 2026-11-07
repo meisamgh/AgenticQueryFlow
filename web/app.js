@@ -4,7 +4,7 @@ localStorage.setItem("queryRoomSession", sessionId);
 
 const state = {
   busy: false, jobId: null, cancelled: false, currentQuestion: "", ready: false,
-  lastBody: null, history: [], saved: [], glossaryByDb: {}, schemaRequest: 0,
+  lastBody: null, history: [], glossaryByDb: {},
   activeRunId: null, branchFromRunId: null, diffCache: new Map(), modelConfig: null,
   restorePending: false,
 };
@@ -19,11 +19,6 @@ import("/static/voice.js?v=voice-1").then(async ({VoiceInput}) => {
 }).catch(() => { $("#voiceStatus").textContent = "Voice input could not load. You can still type a question."; });
 
 const recentStorageKey = "queryRoomRecentQueries";
-const postSafetyOptimizationCodes = new Set([
-  "OPTIMIZATION_NOT_FASTER",
-  "OPTIMIZATION_CHANGED_RESULT",
-  "OPTIMIZATION_EQUIVALENCE_UNPROVEN",
-]);
 const EXPLANATION_OPERATIONS_UI = new Set(["EXPLAIN", "EXPLAIN_SQL", "EXPLAIN_RESULT", "EXPLAIN_INTERPRETATION", "EXPLAIN_CONTEXT", "EXPLAIN_FAILURE"]);
 
 function hydrateIcons(root = document) {
@@ -31,13 +26,6 @@ function hydrateIcons(root = document) {
     const name = slot.dataset.icon;
     if (!slot.innerHTML.trim()) slot.innerHTML = icon(name);
   });
-}
-
-function attemptOutcome(attempt) {
-  const validation = attempt.validation || {};
-  if (validation.valid === true) return "passed";
-  if (postSafetyOptimizationCodes.has(validation.code)) return "not_selected";
-  return "failed";
 }
 
 async function api(path, options = {}) {
@@ -320,6 +308,7 @@ const pipelineStages = [
 const progressLabels = {
   queued: "Waiting to start…",
   presentation: "Preparing your answer…",
+  saving_result: "Saving your result…",
   conversation: "Understanding your question…",
   retrieval: "Finding relevant data…",
   context_selection: "Finding relevant data…",
@@ -347,7 +336,7 @@ function appendProgress() {
   $("#emptyState").hidden = true;
   const fragment = $("#progressTemplate").content.cloneNode(true);
   const article = fragment.querySelector("article");
-  article.querySelector(".progress-detail").textContent = "You can cancel at any time.";
+  article.querySelector(".progress-detail").textContent = "You can cancel while this request is running.";
   hydrateIcons(article);
   $("#messages").append(article);
   return article;
@@ -364,7 +353,7 @@ function updateThinking(progress, job) {
     context_selection: "search", grounding: "database", generation: "code",
     validation: "check", optimization: "code", execution: "database",
     result_review: "table", visualization: "chart-line", plotting: "chart-line",
-    build: "columns", investigation: "binoculars", presentation: "sparkles",
+    build: "columns", investigation: "binoculars", presentation: "sparkles", saving_result: "database",
     completed: "check",
   };
   const avatarName = stage.startsWith("recovery") ? "binoculars" : avatars[stage] || "sparkles";
@@ -378,6 +367,9 @@ function updateThinking(progress, job) {
   const title = progress.querySelector(".progress-stage");
   if (title.textContent !== label) title.textContent = label;
   progress.dataset.status = job.status;
+  progress.querySelector(".progress-detail").textContent = job.cancellable === false
+    ? "Your result is ready and is being saved."
+    : "You can cancel while this request is running.";
   progress.querySelector(".progress-elapsed").textContent = `${Math.floor(Math.max(0, Number(job.elapsed_ms) || 0) / 1000)}s`;
   const events = job.events || [];
   const signature = JSON.stringify(events);
@@ -480,7 +472,10 @@ async function send(message, feedbackCategory = null, dashboardTarget = null) {
       }),
     });
     state.jobId = created.job_id;
-    if (state.cancelled) await api(`/api/chat/jobs/${created.job_id}`, { method: "DELETE" });
+    if (state.cancelled) {
+      const outcome = await api(`/api/chat/jobs/${created.job_id}`, { method: "DELETE" });
+      state.cancelled = outcome.status === "cancelled";
+    }
     const body = await waitForJob(created.job_id, progress);
     progress.remove();
     state.activeRunId = body.history_saved ? body.run_id : null;
@@ -606,10 +601,6 @@ function presentationMode(body, opts = {}) {
     return fallback === "explanation" ? "explanation" : "sql";
   }
   return responseMode(body, opts);
-}
-
-function isChartMode(screen) {
-  return screen === "chart";
 }
 
 /* Queryflow v4: contextual investigations are explicit user actions, never SQL executed
@@ -759,6 +750,8 @@ function semanticFilterText(item, includeColumn = true) {
     : [label, operator, value].filter(Boolean).join(" ");
 }
 
+// Retained compatibility helper; the current response template has no chip strip.
+// Do not re-enable without an explicit product request and entry-path tests.
 function renderSemanticChips(fragment, body) {
   const strip = fragment.querySelector(".query-semantic-strip");
   if (!strip) return;
@@ -1068,8 +1061,8 @@ function wireDataScope(article, generation, response) {
   }
 }
 
-function mapCoordinates(columns, rows, requested, truncated) {
-  if (!requested || truncated) return null;
+function mapCoordinates(columns, rows, requested, truncated, rowCount = rows.length) {
+  if (!requested || truncated || rowCount !== rows.length) return null;
   const latitude = columns.findIndex(name => /^(?:lat|latitude)$/i.test(name));
   const longitude = columns.findIndex(name => /^(?:lon|lng|long|longitude)$/i.test(name));
   if (latitude < 0 || longitude < 0) return null;
@@ -1152,10 +1145,6 @@ function wireChartSection(article, presentation, generation, runId, recommendati
       saveSettings();
     });
     attachChartInvestigations(article, chartPres, runId);
-    const zoomActions = section.querySelector(".chart-zoom-actions");
-    zoomActions.hidden = true;
-    const zoomGuide = section.querySelector(".chart-zoom-guide");
-    zoomGuide.hidden = true;
     kinds.replaceChildren();
     if (explorer) {
       const recommended = [recommendations?.primary_chart, ...(recommendations?.alternative_charts || [])]
@@ -1251,11 +1240,6 @@ function wireChartSection(article, presentation, generation, runId, recommendati
     },
   };
   article._setChartViewRowFilters = filters => article._chartViewState.setRowFilters(filters);
-  section.querySelector(".chart-reset-zoom").addEventListener("click", () => {
-    delete settings.zoom;
-    saveSettings();
-    article._echart?.resetZoom?.();
-  });
   renderCurrent();
   /* Theme switches recolor the shared token palette, so live charts repaint. */
   article._chartRerender = renderCurrent;
@@ -1570,7 +1554,6 @@ async function appendAssistant(body, elapsed, options = {}) {
     chartSection.remove();
     renderCallout(fragment, "warn", "alert",
       "The stored chart snapshot is incomplete. Rerun the query to restore this visualization from a fresh, complete result.");
-    state.lastPresentationMode = "chart_incomplete";
   } else if (mode === "chart_unavailable") {
     chartSection.remove();
     const reason = presentation?.chart_reason || body.message
@@ -1694,8 +1677,6 @@ async function appendAssistant(body, elapsed, options = {}) {
       .filter(spec => spec.calculation !== "PERIOD_CHANGE"
         || generation.semantic_contract?.comparison_periods?.length === 2);
     article._kpiSpecs = kpis;
-    const titleBadge=article.querySelector(".chart-change-badge");
-    titleBadge?.remove();
     window.QueryflowKpis.render(kpiContainer, kpis, spec => {
       if (spec.point && article._echart?.highlightPoint) article._echart.highlightPoint(spec.point);
       else article._echart?.highlightSeries?.(spec.series_name);
@@ -1707,7 +1688,7 @@ async function appendAssistant(body, elapsed, options = {}) {
       body.state?.semantic_contract?.original_question,
     ].filter(Boolean).join(" "));
     const coordinates = mapCoordinates(generation.columns || [], generation.rows || [],
-      mapRequested, generation.truncated);
+      mapRequested, generation.truncated, generation.row_count);
     if (coordinates && window.Plotly) {
       article._renderMap = () => {
         if (article._mapRendered) return;
@@ -1739,7 +1720,10 @@ function actionButton(label, iconName, onClick) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "ghost-button";
-  button.innerHTML = `${icon(iconName)}<span>${label}</span>`;
+  button.innerHTML = icon(iconName);
+  const text = document.createElement("span");
+  text.textContent = label;
+  button.append(text);
   button.addEventListener("click", onClick);
   return button;
 }
@@ -2380,6 +2364,11 @@ function filterAndSortResultRows(rows, query, sortColumn = -1, direction = 1) {
 
 function renderTable(container, columns, rows, options = {}) {
   container._tableResizeObserver?.disconnect();
+  if (container._tableScrollHandler)
+    container.removeEventListener?.("scroll", container._tableScrollHandler);
+  const renderIdentity = {};
+  container._tableRenderIdentity = renderIdentity;
+  const isCurrentRender = () => container._tableRenderIdentity === renderIdentity;
   container.replaceChildren();
   if (!columns.length) {
     const empty = document.createElement("div");
@@ -2486,6 +2475,7 @@ function renderTable(container, columns, rows, options = {}) {
   let hasMore = Boolean(options.truncated && options.loadPage) || rows.length > pageSize;
   let limitReached = false;
   let loading = false;
+  let viewRevision = 0;
   const pages = new Map();
   let viewRows = rows;
   let localView = false;
@@ -2500,6 +2490,7 @@ function renderTable(container, columns, rows, options = {}) {
   const tools = headerEl && typeof headerEl.querySelector === "function"
     ? headerEl.querySelector(".data-header-tools") : null;
   const applyView = () => {
+    viewRevision++;
     localView = Boolean(tools?.querySelector?.(".data-search")?.value?.trim()) || sortColumn >= 0;
     viewRows = filterAndSortResultRows(rows, tools?.querySelector?.(".data-search")?.value ?? "", sortColumn, sortDirection);
     pages.clear(); page = 0; currentRows = viewRows.slice(0, pageSize);
@@ -2662,7 +2653,8 @@ function renderTable(container, columns, rows, options = {}) {
     controls.append(pagesHost);
   };
   async function goToPage(target) {
-    if (target < 0 || loading) return;
+    if (target < 0 || loading || !isCurrentRender()) return;
+    const requestedView = viewRevision;
     const offset = target * pageSize;
     const key = `${offset}:${pageSize}`;
     let next = pages.get(key);
@@ -2677,8 +2669,15 @@ function renderTable(container, columns, rows, options = {}) {
         loading = true;
         updateControls();
         try { next = await options.loadPage(offset, pageSize); }
-        catch (error) { options.onPageError?.(error); return; }
-        finally { loading = false; }
+        catch (error) {
+          if (isCurrentRender() && requestedView === viewRevision) options.onPageError?.(error);
+          return;
+        }
+        finally {
+          loading = false;
+          if (isCurrentRender()) updateControls();
+        }
+        if (!isCurrentRender() || requestedView !== viewRevision) return;
       } else return;
       pages.set(key, next);
     }
@@ -2691,20 +2690,25 @@ function renderTable(container, columns, rows, options = {}) {
     renderRows();
     updateControls();
   }
-  container.addEventListener("scroll", () => {
+  container._tableScrollHandler = () => {
+    if (!isCurrentRender()) return;
     if (currentRows.length >= 80) renderRows();
-  });
+  };
+  container.addEventListener("scroll", container._tableScrollHandler);
   container.classList.toggle("table-compact", rows.length <= 8 && columns.length <= 5);
   if (typeof ResizeObserver !== "undefined") {
     let previousWidth = container.clientWidth;
     container._tableResizeObserver = new ResizeObserver(() => {
+      if (!isCurrentRender()) return;
       if (container.clientWidth === previousWidth) return;
       previousWidth = container.clientWidth;
       recalculateWidths([...sampled(rows, 80), ...sampled(currentRows, 40)]);
     });
     container._tableResizeObserver.observe(container);
   }
-  document.fonts?.ready?.then(() => recalculateWidths([...sampled(rows, 80), ...sampled(currentRows, 40)]));
+  document.fonts?.ready?.then(() => {
+    if (isCurrentRender()) recalculateWidths([...sampled(rows, 80), ...sampled(currentRows, 40)]);
+  });
   renderRows();
   updateControls();
   return {goToPage, get pageSize() { return pageSize; }};
@@ -2734,11 +2738,16 @@ function downloadCsv(columns, rows) {
   if (!columns.length) return;
   const escape = (value) => {
     if (value === null || value === undefined) return "";
-    const text = String(value);
-    return /[",\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
+    // Quoting does not stop spreadsheet formulas. Neutralize text, including
+    // headers, without changing numeric cells or the accepted in-memory result.
+    const raw = String(value);
+    const unsafe = typeof value === "string" && (/^[\t\r\n]/.test(raw)
+      || /^[\s\uFEFF]*[=+\-@]/.test(raw));
+    const text = unsafe ? `'${raw}` : raw;
+    return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text;
   };
   const csv = [columns, ...rows].map((row) => row.map(escape).join(",")).join("\n");
-  const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+  const blob = new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
   link.download = `query-result-${new Date().toISOString().slice(0, 10)}.csv`;
@@ -2831,64 +2840,6 @@ function renderTokenAccounting(fragment, body, generation) {
     ? "This provider did not return token usage; unavailable values are not treated as zero."
     : "Discarded-attempt tokens are the measurable retry waste. Context and conversation tokens are shown separately because they may be necessary rather than wasted.";
   panel.open = (wasted || 0) > 0;
-}
-
-function renderAttempts(fragment, attempts) {
-  const panel = fragment.querySelector(".attempts-panel");
-  const list = fragment.querySelector(".attempts-list");
-  const summary = fragment.querySelector(".attempt-summary");
-  const count = fragment.querySelector(".attempts-count");
-  if (!panel || !list || !summary) return;
-  const visibleAttempts = attempts.filter((attempt) => attemptOutcome(attempt) !== "passed");
-  if (count) count.textContent = attempts.length ? `· ${attempts.length}` : "";
-  if (!visibleAttempts.length) {
-    summary.textContent = attempts.length
-      ? `${attempts.length} attempt${attempts.length === 1 ? "" : "s"} passed validation.`
-      : "No SQL validation attempt was required for this response.";
-    panel.open = false;
-    return;
-  }
-
-  const failed = visibleAttempts.filter((attempt) => attemptOutcome(attempt) === "failed").length;
-  const notSelected = visibleAttempts.filter((attempt) => attemptOutcome(attempt) === "not_selected").length;
-  const summaryParts = [`${visibleAttempts.length} rejected candidate${visibleAttempts.length === 1 ? "" : "s"}`];
-  if (failed) summaryParts.push(`${failed} failed`);
-  if (notSelected) summaryParts.push(`${notSelected} not selected`);
-  summary.textContent = summaryParts.join(" · ");
-  panel.open = true;
-  visibleAttempts.forEach((attempt, index) => {
-    const validation = attempt.validation || {};
-    const outcome = attemptOutcome(attempt);
-    const passed = outcome === "passed";
-    const notSelected = outcome === "not_selected";
-    const item = document.createElement("section");
-    item.className = `attempt-item ${passed ? "attempt-pass" : notSelected ? "attempt-warn" : "attempt-fail"}`;
-
-    const header = document.createElement("div");
-    header.className = "attempt-header";
-    const title = document.createElement("strong");
-    const outcomeLabel = passed ? "PASSED" : notSelected ? "NOT SELECTED" : "FAILED";
-    title.textContent = `Attempt ${attempt.number || index + 1} · ${outcomeLabel}`;
-    header.append(title);
-    const code = document.createElement("code");
-    code.textContent = validation.code || "UNKNOWN_VALIDATION_RESULT";
-    header.append(code);
-
-    const reason = document.createElement("p");
-    reason.className = "attempt-reason";
-    reason.textContent = validation.message || "No validator explanation was returned.";
-    item.append(header, reason);
-
-    if (!passed && attempt.sql) {
-      const sqlPre = document.createElement("pre");
-      const sqlCode = document.createElement("code");
-      sqlCode.className = "language-sql";
-      renderHighlightedSql(sqlCode, formatSqlForDisplay(attempt.sql));
-      sqlPre.append(sqlCode);
-      item.append(sqlPre);
-    }
-    list.append(item);
-  });
 }
 
 function renderPipelineDetails(fragment, timings, body, generation) {
@@ -3045,17 +2996,9 @@ $("#sidebarToggle")?.addEventListener("click", () => {
   $(".sidebar").inert = collapsed;
   window.dispatchEvent(new Event("resize"));
 });
-$("#dataNavigation")?.addEventListener("click", event => {
-  event.preventDefault();
-  $("#databaseSelect").focus();
-});
 $("#settingsNavigation")?.addEventListener("click", event => {
   event.preventDefault();
   $("#themeToggle").click();
-});
-$("#homeNavigation")?.addEventListener("click", event => {
-  event.preventDefault();
-  $("#messageInput").focus();
 });
 
 function renderHistory() {
@@ -3193,6 +3136,12 @@ function restoredRunToResponse(record) {
       payload.generation={...payload.generation,rows:snapshot.rows,truncated:false};
       payload.presentation={...payload.presentation,chart_spec:snapshot.chart_spec};
     }
+    // Persisted payloads may retain only a preview even when the original query
+    // was complete. Never offer that preview as complete map/chart evidence.
+    if (payload.generation && payload.generation.row_count !== payload.generation.rows?.length) {
+      payload.generation = {...payload.generation, truncated: true};
+      payload.presentation_state = {...payload.presentation_state, data_complete: false};
+    }
     if (payload.presentation_state == null) {
       // History saved before the typed presentation state existed: synthesize
       // it from the validated chart spec so restored threads stay chart-first.
@@ -3312,7 +3261,13 @@ $("#cancelButton").addEventListener("click", async () => {
   state.cancelled = true;
   $("#cancelButton").disabled = true;
   try {
-    if (state.jobId) await api(`/api/chat/jobs/${state.jobId}`, { method: "DELETE" });
+    if (state.jobId) {
+      const outcome = await api(`/api/chat/jobs/${state.jobId}`, { method: "DELETE" });
+      if (outcome.status !== "cancelled") {
+        state.cancelled = false;
+        if (outcome.status === "finalizing") toast("Your result is ready and is being saved.");
+      }
+    }
   } catch (error) {
     state.cancelled = false;
     showError(`Could not cancel: ${error.message}`);

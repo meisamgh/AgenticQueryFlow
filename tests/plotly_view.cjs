@@ -98,5 +98,5 @@ test('app loads Plotly first and keeps ECharts as an offline fallback', () => {
   assert.ok(html.indexOf('/static/plotly_view.js') < html.indexOf('/static/app.js'));
   assert.ok(app.includes('window.QueryflowPlotly?.render'));
   assert.ok(app.includes('window.QueryflowECharts?.render'));
-  assert.ok(html.includes('class="chart-zoom-guide"'));
+  assert.ok(!html.includes('class="chart-zoom-guide"'));
 });

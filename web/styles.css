@@ -350,9 +350,6 @@ svg.lucide { stroke-width: 1.7; }
 .data-view-tabs button[aria-selected="true"] { background: var(--accent-soft); color: var(--accent-strong); border-color: var(--accent); }
 .data-view-tabs button:disabled { opacity: .5; cursor: default; }
 .data-scope-note { margin: 0; padding: 7px 12px; color: var(--text-faint); font-size: 11px; }
-.chart-zoom-actions { display: flex; justify-content: flex-end; padding: 0 4px 8px; }
-.chart-zoom-actions[hidden] { display: none; }
-.chart-zoom-actions button { min-height: 31px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text-muted); padding: 5px 9px; cursor: pointer; }
 .chart-overflow { display: flex; position: relative; }
 .iconbtn {
   border: 1px solid #e9e9ed; background: var(--surface); color: #86899a;
@@ -378,8 +375,6 @@ svg.lucide { stroke-width: 1.7; }
 .chart-slot { position: relative; padding: 20px 0 4px; min-height: 280px; overflow: hidden; }
 .chart-slot-ec, .chart-slot-plotly { height: clamp(300px, 34vw, 430px); width: 100%; }
 .chart-slot-pinch { touch-action: pan-y; }
-.chart-zoom-guide { margin: 0 4px 6px; color: var(--text-faint); font-size: 11px; }
-.chart-zoom-guide[hidden] { display: none; }
 @media (max-width: 700px) {
   .chart-slot-ec, .chart-slot-plotly { height: 320px; min-height: 300px; }
   .chart-head { align-items: flex-start; }
@@ -695,17 +690,6 @@ svg.lucide { stroke-width: 1.7; }
 .progress-history { padding: 0 12px 10px; }
 .progress-history summary { cursor: pointer; color: var(--text-faint); font-size: 11.5px; font-weight: 500; }
 .progress-history ul { margin: 6px 0 0; padding-left: 18px; font-size: 11.5px; color: var(--text-muted); }
-.attempts-list { padding: 10px 12px; display: flex; flex-direction: column; gap: 8px; }
-.attempt-item { border: 1px solid var(--border); border-left-width: 3px; border-radius: 8px; padding: 8px 10px; background: var(--surface); }
-.attempt-item.attempt-pass { border-left-color: var(--success); }
-.attempt-item.attempt-warn { border-left-color: var(--warning); }
-.attempt-item.attempt-fail { border-left-color: var(--danger); }
-.attempt-summary { font-size: 12px; padding: 8px 12px 2px; color: var(--text-muted); }
-.attempt-header { display: flex; align-items: center; gap: 8px; font-size: 12.5px; flex-wrap: wrap; color: var(--text); }
-.attempt-header code { font-size: 11px; background: var(--surface-muted); border-radius: 5px; padding: 0 5px; }
-.attempt-reason { font-size: 12px; color: var(--text-muted); margin-top: 3px; }
-.attempt-item pre { margin: 6px 0 0; background: var(--sql-bg); border-radius: 8px; padding: 8px 10px; overflow-x: auto; }
-.attempt-item pre code { font-size: 11.5px; color: var(--sql-text); }
 
 /* ---------- Waiting (progress) ---------- */
 .thinking-stage-avatar { display:flex; flex:none; align-items:center; justify-content:center; width:42px; height:42px; border-radius:13px; background:var(--accent-soft); color:var(--accent); border:1px solid var(--border); animation:leaf-breathe 2.4s ease-in-out infinite; }
@@ -1147,7 +1131,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .brand-mark { background:transparent; box-shadow:none; color:#bbf7d0; }
 .brand-mark svg { width:30px; height:30px; }
 .brand-mark svg { width:36px; height:36px; fill:#fff; stroke:var(--nav); stroke-width:1; }
-.chart-zoom-guide, .chart-zoom-actions { display:none!important; }
 .chart-kpi-row { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin:16px 0 4px; }
 .chart-kpi-card { display:flex; flex-direction:column; gap:6px; min-width:0;
   padding:14px 16px; text-align:left; background:var(--surface); border:1px solid var(--border);
