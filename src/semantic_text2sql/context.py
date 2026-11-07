@@ -194,7 +194,7 @@ def model_context_payload(
     if formulas:
         payload["approved_formulas"] = formulas
     hard_fields = (
-        "approved_metrics", "mandatory_metric_filters", "required_output_aliases",
+        "approved_metrics", "kpi_grounding", "mandatory_metric_filters", "required_output_aliases",
         "required_literals", "outputs", "filters", "measures", "aggregation_stages",
         "selectors", "output_operations", "named_outputs", "structural_formulas",
         "grain", "input_grain", "output_grain", "temporal_boundaries",

@@ -312,6 +312,7 @@ def validate_sql_semantics(
                                            strict_output_grain=bool(contract.output_grain)))
     findings.extend(_measure_findings(root, contract, verified_context))
     findings.extend(_approved_metric_findings(root, contract, dialect))
+    findings.extend(_kpi_grounding_findings(root, contract, verified_context))
     findings.extend(_filter_findings(root, contract, verified_context))
     findings.extend(_fanout_findings(root, verified_context, dialect=dialect))
     findings.extend(_ranking_findings(root, contract))
@@ -348,6 +349,9 @@ def _approved_metric_findings(
     findings: list[SemanticFinding] = []
     complex_lineage = bool(list(root.find_all(exp.CTE)) or list(root.find_all(exp.Subquery)))
     for metric in contract.approved_metrics:
+        grounding = contract.kpi_grounding
+        if grounding and metric.id not in grounding.resolution.selected_ids:
+            continue  # Dependency KPIs need inputs, not separate projected outputs.
         try:
             formula = sqlglot.parse_one(metric.formula, read=dialect)
         except (ParseError, TokenError):
@@ -364,6 +368,21 @@ def _approved_metric_findings(
                 findings.append(SemanticFinding(
                     status="PASS", code="APPROVED_METRIC_FORMULA_MATCH",
                     evidence=f"The output implements the approved {metric.id} expression.",
+                ))
+                continue
+            measures = [item for item in outputs if item is not None and item.find(exp.AggFunc)]
+            direct_ratio = (
+                isinstance(expected_expression, exp.Div) and len(measures) == 1
+                and isinstance(measures[0], exp.Div)
+                and all(isinstance(part, exp.AggFunc)
+                        and isinstance(part.this, exp.Column | exp.Star)
+                        for ratio in (expected_expression, measures[0])
+                        for part in (ratio.this, ratio.expression))
+            )
+            if grounding and not complex_lineage and direct_ratio:
+                findings.append(SemanticFinding(
+                    status="FAIL", code="APPROVED_METRIC_FORMULA_MISMATCH",
+                    evidence=f"The direct {metric.id} output differs from its approved formula.",
                 ))
                 continue
         if not isinstance(formula, exp.AggFunc) or not isinstance(formula.this, exp.Column):
@@ -415,6 +434,102 @@ def _approved_metric_findings(
                 code="APPROVED_METRIC_INPUT_MISMATCH",
                 evidence=f"No direct {type(formula).__name__.upper()} on "
                          f"{metric.source_relation}.{required_column} implements {metric.id}.",
+            ))
+    return findings
+
+
+def _kpi_grounding_findings(
+    root: exp.Expression, contract: SemanticContract, context: dict[str, object] | None,
+) -> list[SemanticFinding]:
+    grounding = contract.kpi_grounding
+    if grounding is None or not grounding.resolution.selected_ids:
+        return []
+    findings: list[SemanticFinding] = []
+    lineage = ExpressionLineage(root, context)
+    complex_sql = bool(root.find(exp.CTE, exp.Subquery, exp.Union))
+    columns = {f"{resolved.table}.{resolved.name}".casefold()
+               for column in root.find_all(exp.Column)
+               if isinstance(resolved := lineage.resolve(column), exp.Column)}
+    unresolved_columns = {column.name.casefold() for column in root.find_all(exp.Column)
+                          if lineage.resolve(column) is None}
+    # Keys may be metadata-only; metric inputs, predicates and requested
+    # dimensions must actually participate in the executable analysis.
+    required = {f"{m.source_relation}.{col}" for m in contract.approved_metrics
+                for col in m.required_fields} | set(grounding.requested_dimensions)
+    for column in sorted(required):
+        if column.casefold() not in columns:
+            findings.append(SemanticFinding(
+                status="UNRESOLVED" if complex_sql or column.rsplit(".", 1)[-1].casefold()
+                in unresolved_columns else "FAIL",
+                code="KPI_REQUIRED_COLUMN_MISSING",
+                evidence=f"The required KPI dependency {column} is not proven in SQL.",
+            ))
+    if grounding.requested_dimensions:
+        findings.extend(_grouping_findings(
+            root, grounding.requested_dimensions, list(root.find_all(exp.Group)), context))
+    grain_names = {"day": "daily", "week": "weekly", "month": "monthly", "year": "yearly"}
+    for grain in contract.output_grain or contract.grain:
+        requested = grain_names.get(grain.casefold(), grain.casefold())
+        if (requested in {*grain_names.values(), "trading_day"}
+                and any(requested not in grounding.valid_time_grains.get(key, [])
+                        for key in grounding.resolution.selected_ids)):
+            findings.append(SemanticFinding(
+                status="UNRESOLVED", code="KPI_TIME_GRAIN_UNSUPPORTED",
+                evidence="The requested time grain has no approved metric rollup proof.",
+            ))
+    pairs = set()
+    predicates = []
+    unproven_join = False
+    for join in root.find_all(exp.Join):
+        on = join.args.get("on")
+        if join.args.get("using") or join.args.get("method") == "NATURAL":
+            unproven_join = True
+        if on is None:
+            continue
+        predicates.append(on)
+    where = root.args.get("where")
+    if where is not None:
+        predicates.append(where.this)
+    for on in predicates:
+        # Equality inside OR is not proof of a required key conjunction.
+        if on.find(exp.Or):
+            unproven_join = True
+            continue
+        conjuncts = [on]
+        while conjuncts:
+            predicate = conjuncts.pop()
+            while isinstance(predicate, exp.Paren):
+                predicate = predicate.this
+            if isinstance(predicate, exp.And):
+                conjuncts.extend([predicate.expression, predicate.this])
+                continue
+            if not isinstance(predicate, exp.EQ):
+                if predicate.find(exp.Column):
+                    unproven_join = True
+                continue
+            eq = predicate
+            left, right = lineage.resolve(eq.this), lineage.resolve(eq.expression)
+            if isinstance(left, exp.Column) and isinstance(right, exp.Column):
+                pairs.add(frozenset([f"{left.table}.{left.name}".casefold(),
+                                     f"{right.table}.{right.name}".casefold()]))
+            elif all(isinstance(side, exp.Column) or side.find(exp.Column)
+                     for side in (eq.this, eq.expression)):
+                unproven_join = True
+    for relationship in grounding.required_relationships:
+        child, parent = relationship["child_table"], relationship["parent_table"]
+        expected = {frozenset([f"{child}.{a}".casefold(), f"{parent}.{b}".casefold()])
+                    for a, b in zip(relationship["child_columns"],
+                                    relationship["parent_columns"], strict=True)}
+        if not expected <= pairs:
+            findings.append(SemanticFinding(
+                status="UNRESOLVED" if complex_sql or unproven_join else "FAIL",
+                code="KPI_JOIN_KEYS_INCOMPLETE",
+                evidence=f"The complete approved key mapping for {child} / {parent} is not proven.",
+            ))
+        if relationship["cardinality"] in {"many_to_many", "unknown"}:
+            findings.append(SemanticFinding(
+                status="UNRESOLVED", code="KPI_JOIN_GRAIN_UNPROVEN",
+                evidence="KPI join multiplicity requires an independently verified grain proof.",
             ))
     return findings
 

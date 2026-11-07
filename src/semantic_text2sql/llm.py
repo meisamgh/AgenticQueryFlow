@@ -1947,8 +1947,12 @@ analytical contract in VERIFIED_CONTEXT into SQL. The original question supplies
 does not override the resolved contract or approved definitions. Use only tables, columns, and
 relationships in VERIFIED_CONTEXT; aliases created inside the SQL are allowed. {dialect_rules}
 Preserve approved business definitions and all unaffected constraints when the question is a
-follow-up or correction. Treat context and historical examples as grounding, not as permission
-to add unrequested filters, metrics, or result columns. Do not guess unsupported database facts,
+follow-up or correction. When kpi_grounding is supplied, use the certified formulas, mandatory
+filters, supported dimensions and complete join keys; never redefine a KPI. Dependency KPIs
+are calculation inputs, not additional requested output columns. Retrieval-only KPI candidates
+are suggestions, not certified metric identities. Treat context and historical examples as
+grounding, not as permission to add unrequested filters, metrics, or result columns.
+Do not guess unsupported database facts,
 identifiers, or value mappings. If repairing SQL, fix the cited failure while preserving the
 user's analytical objective and the already-verified constraints.
 Generation approach: {style_rules}

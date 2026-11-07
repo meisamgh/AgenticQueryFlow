@@ -157,3 +157,115 @@ Three-table offline fixture, 101 repetitions per operation, milliseconds:
 Each operation makes zero model and business-database calls. Added governance
 costs more CPU than the original BFS; no speedup is claimed. The raw reproducible
 report is `benchmarks/results/semantic_graph_offline.json`.
+
+## KPI-first grounding (opt-in)
+
+Set `TEXT2SQL_GRAPH_ENABLED=true` and `TEXT2SQL_KPI_FIRST_ENABLED=true`.
+The new flag defaults to false. Existing exact-name grounding, graph-off behavior,
+catalog-free databases and v1 LightGBM feature vectors remain compatible.
+`TEXT2SQL_KPI_GROUNDING_ENABLED` and the independent local recovery flag retain
+their existing roles. The actual local .env is not changed by implementation.
+
+The existing approved metric entry accepts optional `aliases`, for example:
+
+```json
+{
+  "id": "net_revenue",
+  "label": "Net revenue",
+  "aliases": ["sales after refunds"],
+  "formula": "SUM(amount) - SUM(refund_amount)",
+  "required_fields": ["amount", "refund_amount"],
+  "dependencies": ["gross_sales", "refunds"],
+  "dimensions": ["departments.name"]
+}
+```
+
+This is a fragment, not a complete catalog: source relation, units, time grains,
+human approval and quality assertions must already be supplied and validated.
+Aliases inherit the approved definition; no machine creates an approval record.
+Glossary synonyms are used only when their term anchors to that approved identity
+and the glossary belongs to the current datasource. Alias collisions stop before
+SQL. Unresolved expressions use existing BM25/local embeddings and RRF to return
+bounded, explicitly nonauthoritative candidates; similarity never certifies a KPI.
+
+`resolve_metrics` remains the single dependency-expansion owner. It reports cycles,
+missing/unapproved inputs, drift and unsupported formulas; the 16-metric closure
+bound is unchanged. KPI-first mode rejects cross-relation composite metric
+dependencies: the current executable formula contract cannot establish their
+calculation grain. It does support a single-source metric grouped through
+multiple authorized relations and bridge tables. Textual KPI names inside formulas
+are never treated as physical columns.
+
+Before hybrid ranking, mandatory metric/filter/dimension columns and source tables
+are pinned. Unrelated optional tables no longer force joins; optional ranking
+evidence remains available. The existing NetworkX snapshot/compiled network and
+join resolver preserve full composite keys and approved versus declared provenance.
+Missing snapshots are compiled from the same verified metadata and remembered in
+the existing store; its persistence policy is unchanged. AMBIGUOUS, DISCONNECTED
+and BUDGET_EXHAUSTED mandatory plans stop before generation, not partial success.
+
+The typed `SemanticContract.kpi_grounding` carries identity/provenance, dependency
+chains/distances, mandatory columns/tables, requested/supported dimensions, source
+grain, aggregation/rollup rules, allowed time grains and selected relationships.
+Approved formulas/versions remain in `approved_metrics` and compact semantic
+facts. The generator receives both through existing verified context; formulas and
+required facts are rejected if over budget, never silently sliced. Dependency KPIs
+do not require separate output columns.
+
+Existing SQLGlot validation is extended for missing metric inputs, required grouping
+and complete key mappings. Direct simple aggregate-ratio mismatches fail; complex
+formula rewrites, unsupported time grains and unproven multiplicity remain
+UNRESOLVED. SQL execution is not proof of semantic correctness. Algebraic/CTE
+equivalence, general fanout proof and cross-fact aggregation are not implemented.
+
+### Optional ML compatibility
+
+The original 11-feature v1 model is unchanged. `kpi_candidate_features` supplies
+five pre-join features in `KPI_RERANKER_FEATURES_V2`; post-join count/risk diagnostics
+are separate and never fed backwards into candidate ranking. Loading v2 explicitly
+requires a `.features.json` companion with `schema: "kpi_v2"`, the exact ordered
+feature list, and matching model feature names/count. No v2 artifact or labeled
+training set is supplied, and v2 is not activated in environment configuration.
+Mandatory dependencies are pinned regardless of ML scores.
+
+### Reproduce and measured results
+
+```bash
+uv run pytest -q tests/test_kpi_first.py
+uv run python benchmarks/benchmark_kpi_first.py
+```
+
+The real SQLite service test resolves “sales after refunds by department”, retains
+the complete-status filter and gross/refund dependencies, discovers the customer
+bridge, and returns synthetic department A / 135.0. Exactly one scripted SQL-model
+call and no resolution/planner call occur. No real business rows or external model
+are involved.
+
+Paired **synthetic pre-final retrieval/grounding** benchmark: five identical
+questions, one excluded warmup pass, 250 observations per mode, deliberately tight
+one-table/one-column optional retrieval, and a scripted dense encoder:
+
+| Measurement | Baseline | KPI-first |
+|---|---:|---:|
+| Grounding p50 / p95, ms | 0.207 / 0.431 | 0.423 / 0.539 |
+| Synthetic root identity accuracy | 60% | 100% |
+| Required-column recall at retrieval | 20% | 100% |
+| Complete dependency recall | 60% | 100% |
+| Required join-plan table coverage | 20% | 100% |
+| Timed SQL / LLM calls / LLM tokens | 0 / 0 / 0 | 0 / 0 / 0 |
+
+This measures additional deterministic work, not a speedup or final-system SQL
+accuracy. Baseline later context verification may recover exact-match columns;
+these figures refer to retrieval before that stage. Join coverage is not an
+independent semantic adjudication. Full model-generated SQL accuracy, live encoder
+latency, independent business correctness, production data and PostgreSQL/provider
+integration are NOT RUN. Raw results: `benchmarks/results/kpi_first_offline.json`.
+
+Changed runtime: semantic_catalog.py, models.py, kpi_resolution.py,
+graph_grounding.py, hybrid_retrieval.py, service.py, context.py, llm.py, validator.py.
+Tests: test_kpi_first.py; existing graph/catalog/semantic/reranker suites retained.
+No new graph engine, metric registry, autonomous agent, dependency or external API.
+
+Final local checks: 892 Python passed, 2 dedicated PostgreSQL tests skipped;
+211 frontend/voice passed; Ruff, mypy src / configured mypy (73 source files)
+and git diff --check passed. The KPI-first acceptance file contains 36 cases.

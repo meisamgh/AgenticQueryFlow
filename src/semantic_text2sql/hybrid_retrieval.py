@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import os
 import re
@@ -9,7 +10,7 @@ from collections import Counter, OrderedDict
 from collections.abc import Iterable, Sequence
 from pathlib import Path
 from threading import RLock
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from semantic_text2sql.glossary import BusinessGlossary, GlossaryTerm
 from semantic_text2sql.join_resolver import resolve_joins
@@ -17,6 +18,7 @@ from semantic_text2sql.models import (
     ColumnInfo,
     ColumnProfile,
     DatabaseProfile,
+    KPIGrounding,
     RetrievalTrace,
     SchemaInfo,
     SchemaSelection,
@@ -54,11 +56,45 @@ RERANKER_FEATURES = (
     "historical_operation_match",
 )
 
+# Explicitly versioned; never feed these to an existing v1 artifact.
+KPI_RERANKER_FEATURES_V2 = (*RERANKER_FEATURES, "kpi_required_column", "kpi_source_table",
+                           "kpi_dependency_distance", "dimension_compatibility",
+                           "relevant_column_ratio")
+
+
+def kpi_candidate_features(
+    identifier: str, schema: SchemaInfo, grounding: KPIGrounding,
+) -> list[float]:
+    is_column = identifier.startswith("column:")
+    qualified = identifier.removeprefix("column:")
+    table = qualified.rsplit(".", 1)[0] if is_column else identifier.removeprefix("table:")
+    distances = [grounding.dependency_distances[key] for key, source in
+                 grounding.source_relations.items() if source == table
+                 and key in grounding.dependency_distances]
+    fields = next((item.columns for item in schema.tables if item.name == table), [])
+    relevant = sum(f"{table}.{field.name}" in grounding.mandatory_columns for field in fields)
+    dimensions = {col for cols in grounding.supported_dimensions.values() for col in cols}
+    return [float(is_column and qualified in grounding.mandatory_columns),
+            float(table in grounding.source_relations.values()),
+            float(min(distances)) if distances else -1.0,
+            float(qualified in dimensions) if is_column else float(any(
+                col.rsplit(".", 1)[0] == table for col in dimensions)),
+            relevant / len(fields) if fields else 0.0]
+
+
+def kpi_join_plan_features(relationships: Sequence[Any]) -> dict[str, float]:
+    """Post-join diagnostics, deliberately excluded from pre-join candidate vectors."""
+    return {"estimated_join_count": float(len(relationships)),
+            "join_path_risk": float(any(
+                edge.facts.get("cardinality", "unknown") not in {"one_to_one", "many_to_one"}
+                for edge in relationships))}
+
 
 class LightGBMSchemaReranker:
     """Load a versioned LightGBM text model only when production enables it."""
 
-    def __init__(self, model_path: Path) -> None:
+    def __init__(self, model_path: Path, *,
+                 feature_schema: Literal["v1", "kpi_v2"] = "v1") -> None:
         if not model_path.is_file():
             raise FileNotFoundError(f"Schema reranker model not found: {model_path}")
         try:
@@ -66,11 +102,19 @@ class LightGBMSchemaReranker:
         except ImportError as exc:  # pragma: no cover - depends on optional production extra
             raise RuntimeError("Install the 'ml' extra to enable the schema reranker.") from exc
         self.model_path = model_path
+        self.feature_schema = feature_schema
+        expected = RERANKER_FEATURES if feature_schema == "v1" else KPI_RERANKER_FEATURES_V2
+        if feature_schema == "kpi_v2":
+            manifest = json.loads(model_path.with_suffix(".features.json").read_text())
+            if manifest != {"schema": "kpi_v2", "features": list(expected)}:
+                raise ValueError("KPI reranker requires a matching trained feature manifest.")
         self._model = lgb.Booster(model_file=str(model_path))
-        if self._model.num_feature() != len(RERANKER_FEATURES):
+        if feature_schema == "kpi_v2" and self._model.feature_name() != list(expected):
+            raise ValueError("KPI artifact feature names do not match its declared version.")
+        if self._model.num_feature() != len(expected):
             raise ValueError(
                 f"Reranker expects {self._model.num_feature()} features, "
-                f"but runtime supplies {len(RERANKER_FEATURES)}."
+                f"but runtime supplies {len(expected)}."
             )
 
     def score(self, features: list[list[float]]) -> list[float]:
@@ -206,6 +250,11 @@ class HybridSchemaRetriever:
         profile: DatabaseProfile | None,
         glossary: BusinessGlossary | None,
         historical_evidence: dict[str, dict[str, float]] | None = None,
+        *,
+        mandatory_columns: Sequence[str] = (),
+        mandatory_tables: Sequence[str] = (),
+        defer_join_expansion: bool = False,
+        kpi_grounding: KPIGrounding | None = None,
     ) -> tuple[SchemaInfo, SchemaSelection, RetrievalTrace]:
         query = " ".join(value for value in (question, evidence or "") if value)
         profiles = {(item.table, item.column): item for item in profile.columns} if profile else {}
@@ -275,6 +324,11 @@ class HybridSchemaRetriever:
                 for identifier in candidate_pool
             ]
             try:
+                if getattr(self.reranker, "feature_schema", "v1") == "kpi_v2":
+                    if kpi_grounding is None:
+                        raise ValueError("KPI v2 reranking requires resolved KPI context.")
+                    features = [base + kpi_candidate_features(identifier, schema, kpi_grounding)
+                                for identifier, base in zip(candidate_pool, features, strict=True)]
                 predicted = self.reranker.score(features)
                 if len(predicted) != len(candidate_pool):
                     raise ValueError("Schema reranker returned the wrong number of scores.")
@@ -301,13 +355,25 @@ class HybridSchemaRetriever:
         if not selected_tables and schema.tables:
             selected_tables = [schema.tables[0].name]
 
-        required_columns = _glossary_columns(relevant_terms, schema)
+        required_columns = _glossary_columns(relevant_terms, schema) | set(mandatory_columns)
+        live_columns = {f"{t.name}.{c.name}" for t in schema.tables for c in t.columns}
+        if not set(mandatory_columns) <= live_columns or not set(mandatory_tables) <= {
+            t.name for t in schema.tables
+        }:
+            raise ValueError("KPI_DEPENDENCY_NOT_IN_SCHEMA")
+        if mandatory_tables:
+            # Optional low-score tables must not force irrelevant joins. Retain
+            # explicit physical-table mentions; all ranking evidence stays in telemetry.
+            selected_tables = list(dict.fromkeys([*mandatory_tables, *[
+                table for table in selected_tables if re.search(
+                    r"(?<!\w)" + re.escape(table.casefold()) + r"(?!\w)", question.casefold())]]))
         for qualified in sorted(required_columns):
-            table_name = qualified.split(".", 1)[0]
+            table_name = qualified.rsplit(".", 1)[0]
             if table_name not in selected_tables:
                 selected_tables.append(table_name)
         before_bridges = set(selected_tables)
-        selected_tables = _expand_bridges(selected_tables, schema)
+        if not defer_join_expansion:
+            selected_tables = _expand_bridges(selected_tables, schema)
         bridge_tables = sorted(set(selected_tables) - before_bridges)
         selected_table_set = set(selected_tables)
         selected_columns: dict[str, list[str]] = {}

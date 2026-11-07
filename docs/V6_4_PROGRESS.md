@@ -1,5 +1,49 @@
 # V6.4 progress checkpoint
 
+## 2026-11-07 — KPI-first semantic grounding task
+
+Pre-implementation checkpoint: 2a9740a. User requested commit-before and
+push-after implementation. Actual .env, business databases and screenshots are
+excluded. New TEXT2SQL_KPI_FIRST_ENABLED defaults false; graph-off behavior,
+exact-match grounding and the 11-feature v1 reranker stay compatible.
+
+| Phase | Local implementation | Acceptance evidence |
+| --- | --- | --- |
+| 1 Matching | Optional bounded catalog aliases, anchored glossary synonyms, shared BM25/dense/RRF candidates, evidence/provenance and ambiguity. Similarity cannot certify identity. | Exact IDs/labels, aliases, collisions, inferred/datasource isolation, stale metadata, deterministic hit/catalog bounds. |
+| 2 Dependencies | Extend resolve_metrics, pin mandatory inputs before ranking, cycle/missing/unapproved/limit reasons, filter conflicts, source/grain/rollup facts. | Deep/wide closure bounds, dependency follow-ups, adverse ranking, stale versions, unsupported cross-relation formulas. |
+| 3 Graph | Existing snapshots/network/resolver, full keys, bridge discovery, mandatory status gates, unrelated optional table pruning. | Real SQLite orders → customers → departments; unresolved status gates; existing composite/ambiguity graph suite retained. |
+| 4 Semantics | Required input/dimension and join-key checks; simple ratio mismatches; dependency inputs not extra outputs. | Wrong inputs, filters, grain, numerator/denominator and composite keys; WHERE join equivalence; cast/CTE/grain/fanout uncertainty remains UNRESOLVED. |
+| 5 ML | Versioned optional feature extraction and explicit artifact manifest/name/count checks, separate post-join diagnostics. No training/activation. | Existing v1 remains 11 features; scripted loader rejects absent/mismatched v2 artifact contract. |
+| 6 Evaluation/docs | Paired reproducible synthetic benchmark, configuration/example and limits in SEMANTIC_GRAPH.md; README short pointer. | benchmark_kpi_first.py, results/kpi_first_offline.json; final checks below. |
+
+New acceptance suite: test_kpi_first.py (36 cases). Real SQLite service example
+returns department A / 135.0 with one scripted SQL-model call and zero additional
+KPI/planning calls. Benchmark: five identical questions / 250 observations per
+mode after warmup, scripted embeddings, no timed DB/model calls. Baseline vs
+KPI-first p50/p95: 0.207/0.431 vs 0.423/0.539ms. Synthetic identity: 60% → 100%;
+pre-final retrieval required-column recall: 20% → 100%; dependency recall:
+60% → 100%; required join-table coverage: 20% → 100%. Deliberately tight retrieval
+bounds stress pinning; these are NOT final-system SQL/business accuracy or a
+speedup. Baseline later verification can recover exact-match columns.
+
+Runtime changed: semantic_catalog, models, kpi_resolution, graph_grounding,
+hybrid_retrieval, service, context, llm, validator. Reused catalog/glossary storage,
+encoder/rank fusion, metric closure, graph store/resolver, verified context,
+SQLGlot, safety and bounded execution. No new registry, graph engine or agent.
+
+Limitations by design: cross-relation composite formulas explicitly unsupported;
+general formula/CTE algebra and rollup/multiplicity proofs remain UNRESOLVED;
+semantic-only matches remain candidates; no compatible trained v2 artifact or
+labeled dataset supplied. Live model SQL accuracy, independent business accuracy,
+real PostgreSQL/remote engines and browser QA NOT RUN. Existing production
+identity and broader V6.4 requirements are not promoted. Final verification:
+892 Python passed / 2 PostgreSQL skipped (40.56s); frontend/voice 211 passed
+(934ms); Ruff, mypy src and configured bare mypy (73 files), and whitespace
+checks passed. The two PostgreSQL tests lack a configured dedicated DSN.
+Additional regressions ensure a dimension mention cannot create GROUP BY or
+override an explicitly resolved contract, negated/transformed join predicates
+cannot certify complete keys, and comma/WHERE joins are not rejected by strategy.
+
 ## 2026-11-07 — SQLite connection/inspection failure boundaries
 
 Five tests failed before fixes: a malformed SQLite file escaped as sqlite3.Error,

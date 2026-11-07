@@ -14,7 +14,7 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import Field, model_validator
 
@@ -136,6 +136,8 @@ class MetricCatalogEntry(ApprovableFact):
     missing_data_policy: str | None = None
     version: int = Field(default=1, ge=1)
     dependencies: list[str] = Field(default_factory=list)
+    aliases: list[Annotated[str, Field(min_length=1, max_length=160)]] = Field(
+        default_factory=list, max_length=32)
 
 
 class CatalogDocument(StrictModel):

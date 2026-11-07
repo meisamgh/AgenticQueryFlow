@@ -271,6 +271,46 @@ class ApprovedMetricDefinition(StrictModel):
     unit: str | None = None
 
 
+type KPIMatchMethod = Literal[
+    "exact_id", "exact_label", "approved_alias", "glossary_alias", "retrieval"
+]
+
+
+class KPICandidate(StrictModel):
+    metric_id: str
+    method: KPIMatchMethod
+    source: str
+    evidence: list[str] = Field(default_factory=list)
+    score: float = 0
+    authoritative_identity: bool = False
+
+
+class KPIResolution(StrictModel):
+    status: Literal["NONE", "RESOLVED", "AMBIGUOUS", "CANDIDATES", "UNAVAILABLE"] = "NONE"
+    selected_ids: list[str] = Field(default_factory=list)
+    candidates: list[KPICandidate] = Field(default_factory=list)
+    reasons: list[str] = Field(default_factory=list)
+    catalog_version: int | None = None
+
+
+class KPIGrounding(StrictModel):
+    resolution: KPIResolution
+    dependency_chain: dict[str, list[str]] = Field(default_factory=dict)
+    dependency_distances: dict[str, int] = Field(default_factory=dict)
+    source_relations: dict[str, str] = Field(default_factory=dict)
+    source_grains: dict[str, list[str]] = Field(default_factory=dict)
+    aggregation_rules: dict[str, str] = Field(default_factory=dict)
+    rollup_rules: dict[str, str | None] = Field(default_factory=dict)
+    mandatory_columns: list[str] = Field(default_factory=list)
+    mandatory_tables: list[str] = Field(default_factory=list)
+    requested_dimensions: list[str] = Field(default_factory=list)
+    supported_dimensions: dict[str, list[str]] = Field(default_factory=dict)
+    valid_time_grains: dict[str, list[str]] = Field(default_factory=dict)
+    required_relationships: list[dict[str, Any]] = Field(default_factory=list)
+    join_status: str | None = None
+    catalog_version: int
+
+
 class PlannerMetadataRequirement(StrictModel):
     kind: Literal[
         "RELATIONSHIP",
@@ -409,6 +449,7 @@ class SemanticContract(StrictModel):
     original_question: str | None = Field(default=None, max_length=4_000)
     resolved_question: str | None = Field(default=None, max_length=4_000)
     approved_metrics: list[ApprovedMetricDefinition] = Field(default_factory=list)
+    kpi_grounding: KPIGrounding | None = None
     required_output_aliases: list[str] = Field(default_factory=list)
     mandatory_metric_filters: list[SemanticFilter] = Field(default_factory=list)
     input_grain: list[str] = Field(default_factory=list)

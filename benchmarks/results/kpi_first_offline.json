@@ -1,0 +1,37 @@
+{
+  "scope": "offline synthetic paired pre-final grounding; scripted dense encoder",
+  "results": {
+    "baseline": {
+      "observations": 250,
+      "cases": 5,
+      "warmup_passes": 1,
+      "p50_ms": 0.207,
+      "p95_ms": 0.431,
+      "synthetic_root_identity_accuracy": 0.6,
+      "required_column_recall": 0.2,
+      "complete_dependency_recall": 0.6,
+      "required_join_plan_coverage": 0.2,
+      "llm_calls": 0,
+      "llm_tokens": 0,
+      "timed_database_calls": 0,
+      "sql_generation_execution_accuracy": null,
+      "independently_adjudicated_business_accuracy": null
+    },
+    "kpi_first": {
+      "observations": 250,
+      "cases": 5,
+      "warmup_passes": 1,
+      "p50_ms": 0.423,
+      "p95_ms": 0.539,
+      "synthetic_root_identity_accuracy": 1,
+      "required_column_recall": 1,
+      "complete_dependency_recall": 1,
+      "required_join_plan_coverage": 1,
+      "llm_calls": 0,
+      "llm_tokens": 0,
+      "timed_database_calls": 0,
+      "sql_generation_execution_accuracy": null,
+      "independently_adjudicated_business_accuracy": null
+    }
+  }
+}

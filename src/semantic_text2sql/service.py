@@ -24,6 +24,7 @@ from semantic_text2sql.graph_grounding import compact_grounding, resolve_metrics
 from semantic_text2sql.historical import HistoricalQueryStore
 from semantic_text2sql.hybrid_retrieval import HybridSchemaRetriever, metadata_requests
 from semantic_text2sql.join_resolver import resolve_joins
+from semantic_text2sql.kpi_resolution import build_kpi_grounding, resolve_kpi_candidates
 from semantic_text2sql.models import (
     CallLedgerEntry,
     ContextRelationship,
@@ -45,7 +46,7 @@ from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.recovery import RecoveryCoordinator, RecoveryTools, recovery_feedback
 from semantic_text2sql.runtime import RequestBudget, RequestBudgetExceeded
 from semantic_text2sql.semantic_catalog import SemanticCatalogStore
-from semantic_text2sql.semantic_graph import SemanticGraphStore, graph_identity
+from semantic_text2sql.semantic_graph import SemanticGraphStore, compile_graph, graph_identity
 from semantic_text2sql.strategy import route_question
 from semantic_text2sql.validator import validate_sql
 
@@ -186,9 +187,33 @@ class TextToSQLService:
             logger.warning("semantic_catalog_unavailable db_id=%s", db_id)
             catalog = None
         metric_facts: list[dict[str, Any]] = []
+        kpi_first = (graph_enabled and os.environ.get(
+            "TEXT2SQL_KPI_FIRST_ENABLED", "false").casefold() == "true")
+        glossary = self.glossaries.load(db_id)
         if metric_grounding:
             try:
-                contract, metric_facts = resolve_metrics(question, schema, catalog, contract)
+                kpi_resolution = (resolve_kpi_candidates(
+                    question, schema, catalog, glossary=glossary, encoder=self.retriever.encoder,
+                ) if kpi_first else None)
+                if kpi_resolution and kpi_resolution.status in {"AMBIGUOUS", "UNAVAILABLE"}:
+                    raise ValueError("KPI_" + kpi_resolution.status + ": "
+                                     + ", ".join(kpi_resolution.reasons))
+                contract, metric_facts = resolve_metrics(
+                    question, schema, catalog, contract,
+                    metric_ids=kpi_resolution.selected_ids if kpi_resolution else None,
+                    strict_dependencies=kpi_first,
+                )
+                if kpi_resolution and catalog:
+                    if not kpi_resolution.selected_ids and contract.approved_metrics:
+                        kpi_resolution.selected_ids = [m.id for m in contract.approved_metrics]
+                    grounding = build_kpi_grounding(kpi_resolution, contract, catalog, question)
+                    contract = contract.model_copy(update={
+                        "kpi_grounding": grounding,
+                        "required_columns": grounding.mandatory_columns,
+                        "grain": (grounding.requested_dimensions or contract.grain),
+                        "requires_grouping": bool(grounding.requested_dimensions)
+                                             or contract.requires_grouping,
+                    })
             except ValueError as exc:
                 return QuestionExecution(generated=GenerateResponse(
                     db_id=db_id, question=question, provider=provider, model=model, dialect=dialect,
@@ -223,7 +248,13 @@ class TextToSQLService:
                 top_k=3,
                 min_score=float(os.environ.get("TEXT2SQL_HISTORY_ML_MIN_SCORE", "0.65")),
             )
-            glossary = self.glossaries.load(db_id)
+            pin = contract.kpi_grounding if kpi_first and metric_facts else None
+            kpi_arguments: dict[str, Any] = ({
+                "mandatory_columns": pin.mandatory_columns,
+                "mandatory_tables": pin.mandatory_tables,
+                "defer_join_expansion": True,
+                "kpi_grounding": pin,
+            } if pin else {})
             planner_schema, retrieval_selection, retrieval_trace = await budget.wait(
                 asyncio.to_thread(
                     self.retriever.retrieve,
@@ -233,6 +264,7 @@ class TextToSQLService:
                     database_profile,
                     glossary,
                     historical_schema_evidence,
+                    **kpi_arguments,
                 ),
                 kind="work",
             )
@@ -273,17 +305,24 @@ class TextToSQLService:
         # exclusively retrieval plus deterministic verification for every turn.
         context_mode = "retrieval"
 
-        if graph_enabled and self.graph_store:
+        if graph_enabled and (self.graph_store or (kpi_first and metric_facts)):
             graph_started = perf_counter()
             graph_store = self.graph_store
             snapshot = await budget.wait(asyncio.to_thread(lambda: graph_store.load(
                 db_id, identity=graph_identity(schema, catalog, database_profile,
-                                               self.glossaries.load(db_id)))), kind="work")
+                                               glossary))), kind="work") if graph_store else None
+            if snapshot is None and kpi_first and metric_facts:
+                snapshot = await budget.wait(asyncio.to_thread(
+                    compile_graph, schema, catalog, database_profile, glossary), kind="work")
+                if graph_store:
+                    await budget.wait(asyncio.to_thread(graph_store.remember, snapshot),
+                                      kind="work")
             if snapshot:
                 resolution = await budget.wait(asyncio.to_thread(resolve_joins,
                     list(dict.fromkeys([*context_request.tables, *[item.source_relation
                         for item in contract.approved_metrics]])), schema, snapshot=snapshot,
-                    compiled_network=graph_store.network(db_id, identity=snapshot.identity)),
+                    compiled_network=(graph_store.network(db_id, identity=snapshot.identity)
+                                      if graph_store else None)),
                     kind="work")
                 graph_context = {"status": resolution.status,
                     "snapshot_id": snapshot.identity, "catalog_version": snapshot.catalog_version,
@@ -291,6 +330,27 @@ class TextToSQLService:
                     "warnings": [item.model_dump(mode="json") for item in resolution.warnings],
                     "relationships": [item.model_dump(mode="json")
                                       for item in resolution.relationships]}
+                if kpi_first and metric_facts and contract.kpi_grounding:
+                    contract.kpi_grounding.join_status = resolution.status
+                    contract.kpi_grounding.required_relationships = [{
+                        "child_table": edge.source.removeprefix("table:"),
+                        "parent_table": edge.target.removeprefix("table:"),
+                        "child_columns": edge.facts["child_columns"],
+                        "parent_columns": edge.facts["parent_columns"],
+                        "cardinality": edge.facts.get("cardinality", "unknown"),
+                        "provenance": edge.provenance,
+                    } for edge in resolution.relationships]
+                    if resolution.status != "CONNECTED":
+                        return QuestionExecution(generated=GenerateResponse(
+                            db_id=db_id, question=question, provider=provider, model=model,
+                            dialect=dialect, strategy=route_question(question), sql=None,
+                            accepted=False, termination_reason="context_error",
+                            semantic_contract=contract,
+                            model_error=f"KPI_JOIN_{resolution.status}: {resolution.explanation}"),
+                            approved_tables=[], semantic_contract=contract,
+                            planner_usage=TokenUsage(), routing_ms=routing_ms,
+                            planning_ms=round((perf_counter() - planning_started) * 1000),
+                            generation_ms=0)
                 if resolution.status == "CONNECTED":
                     context_request.tables = resolution.tables
                     for rel in resolution.relationships:

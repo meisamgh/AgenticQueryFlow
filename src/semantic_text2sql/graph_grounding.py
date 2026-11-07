@@ -81,6 +81,8 @@ def resolve_metrics(
     contract: SemanticContract,
     *,
     limit: int = 4,
+    metric_ids: list[str] | None = None,
+    strict_dependencies: bool = False,
 ) -> tuple[SemanticContract, list[dict[str, Any]]]:
     """Only explicit approved IDs/labels; ambiguous matches never choose a formula."""
 
@@ -103,36 +105,48 @@ def resolve_metrics(
         return unavailable()
     columns = {table.name: {col.name for col in table.columns} for table in schema.tables}
     metrics = {metric.id: metric for metric in document.metrics}
-    requested = {metric.id for metric in contract.approved_metrics}
+    requested = {metric.id for metric in contract.approved_metrics} | set(metric_ids or [])
+    roots = (set(metric_ids or []) | set(
+        contract.kpi_grounding.resolution.selected_ids if contract.kpi_grounding
+        else [metric.id for metric in contract.approved_metrics]))
     text = " ".join(re.findall(r"\w+", question.casefold()))
     matches = [
         metric
         for metric in document.metrics
-        if metric.id in requested
-        or any(
+        if (metric.id in roots if metric_ids is not None else metric.id in requested)
+        or (metric_ids is None and any(
             re.search(
                 r"(?<!\w)" + re.escape(" ".join(re.findall(r"\w+", label.casefold()))) + r"(?!\w)",
                 text,
             )
             for label in (metric.label, metric.id)
-        )
+        ))
     ]
     selected: dict[str, MetricCatalogEntry] = {}
+    failures: list[str] = []
+
+    def reject(reason: str, metric: MetricCatalogEntry) -> bool:
+        failures.append(f"{reason}:{metric.id}")
+        return False
 
     def visit(metric: MetricCatalogEntry, pending: set[str]) -> bool:
-        if metric.id in pending or len(pending) >= 16 or metric.status != "approved":
-            return False
+        if metric.id in pending:
+            return reject("KPI_DEPENDENCY_CYCLE", metric)
+        if len(pending) >= 16:
+            return reject("KPI_DEPENDENCY_LIMIT", metric)
+        if metric.status != "approved":
+            return reject("KPI_DEPENDENCY_UNAPPROVED", metric)
         if metric.id in selected:
             return True
         if len(selected) >= 16:
-            return False
+            return reject("KPI_DEPENDENCY_LIMIT", metric)
         fields = columns.get(metric.source_relation, set())
         if not set(metric.required_fields) <= fields:
-            return False
+            return reject("KPI_SCHEMA_DRIFT", metric)
         try:
             expression = parse_one(metric.formula, read=schema.dialect)
         except ParseError:
-            return False
+            return reject("KPI_FORMULA_PARSE_ERROR", metric)
         if (
             not expression
             or expression.find(exp.Query)
@@ -147,7 +161,7 @@ def resolve_metrics(
                 for col in expression.find_all(exp.Column)
             )
         ):
-            return False
+            return reject("KPI_FORMULA_UNSUPPORTED", metric)
         if not {col.name for col in expression.find_all(exp.Column)} <= set(metric.required_fields):
             return False
         for predicate in metric.mandatory_filters:
@@ -171,11 +185,15 @@ def resolve_metrics(
             )
             if column not in columns.get(table, set()):
                 return False
-        if any(
-            dep not in metrics or not visit(metrics[dep], pending | {metric.id})
-            for dep in metric.dependencies
-        ):
-            return False
+        for dep in sorted(metric.dependencies):
+            if dep not in metrics:
+                return reject(f"KPI_DEPENDENCY_MISSING:{dep}", metric)
+            if strict_dependencies and metrics[dep].source_relation != metric.source_relation:
+                return reject("KPI_CROSS_RELATION_COMPOSITE_UNSUPPORTED", metric)
+            if not visit(metrics[dep], pending | {metric.id}):
+                return False
+        if len(selected) >= 16:
+            return reject("KPI_DEPENDENCY_LIMIT", metric)
         selected[metric.id] = metric
         return True
 
@@ -194,7 +212,7 @@ def resolve_metrics(
             selected = before
             if metric.status == "approved":
                 raise ValueError("The requested approved metric has unsupported schema, "
-                                 "dependency or relationship requirements.")
+                                 "dependency or relationship requirements. " + ", ".join(failures))
     facts: list[dict[str, Any]] = []
     definitions = []
     required = list(contract.required_columns)
@@ -267,7 +285,7 @@ def resolve_metrics(
                      and existing.value not in approved_filter.value)
                  or ({existing.operator, approved_filter.operator} == {"=", "!="}
                      and existing.value == approved_filter.value))
-            for existing in contract.filters
+            for existing in [*contract.filters, *filters]
         ):
             raise ValueError("The requested filter conflicts with the approved metric definition.")
     # Do not trust incoming approved-metric labels over a conflicting catalog definition.

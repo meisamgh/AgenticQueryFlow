@@ -1,5 +1,11 @@
 # Queryflow V6.4 requirement matrix
 
+2026-11-07 KPI-first opt-in: implementation and phase evidence are recorded at
+the top of V6_4_PROGRESS.md and in SEMANTIC_GRAPH.md. test_kpi_first.py covers
+36 local acceptance cases. The new flag is false by default; complex formula,
+time-grain and fanout proofs remain explicitly UNRESOLVED. No trained v2 model,
+live-provider accuracy or production identity gate is promoted by this task.
+
 2026-11-07 SQLite failure handling: corrupt schemas, connection initialization
 and stat failures use structured DatabaseError codes; initialization closes its
 handle and inspection failures evict stale cache entries. test_sqlite_failures.py
