@@ -5,11 +5,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
+from test_v63_conversation import ScriptedCompleter, ScriptedSQL, _client, _tool
 
 import semantic_text2sql.api as api
 from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.api import clear_reset_caches, create_app
-from test_v63_conversation import ScriptedCompleter, ScriptedSQL, _client, _tool
 
 
 class _Proposals:

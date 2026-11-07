@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
-from contextlib import closing
+from collections.abc import Iterable
+from contextlib import closing, suppress
 from pathlib import Path
 from time import monotonic
 from typing import Any
@@ -23,10 +25,29 @@ class DatabaseError(RuntimeError):
         super().__init__(message)
 
 
+type FileStamp = tuple[int, int, int, int, int, int]
+type SQLiteStamp = tuple[FileStamp, FileStamp | None]
+
+
+def _file_stamp(path: Path) -> FileStamp:
+    stat = path.stat()
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
+            stat.st_ctime_ns, stat.st_mode)
+
+
+def _database_stamp(path: Path) -> SQLiteStamp:
+    main = _file_stamp(path)
+    try:
+        wal = _file_stamp(path.with_name(path.name + "-wal"))
+    except FileNotFoundError:
+        wal = None
+    return main, wal
+
+
 class DatabaseRegistry:
     def __init__(self, root: Path) -> None:
         self.root = root.expanduser().resolve()
-        self._schema_cache: dict[str, tuple[int, SchemaInfo]] = {}
+        self._schema_cache: dict[str, tuple[SQLiteStamp, SchemaInfo]] = {}
 
     def resolve(self, db_id: str) -> Path:
         if not db_id or any(not (char.isalnum() or char in "_-") for char in db_id):
@@ -49,19 +70,47 @@ class DatabaseRegistry:
 
     def connect(self, db_id: str) -> sqlite3.Connection:
         path = self.resolve(db_id)
-        connection = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
-        connection.execute("PRAGMA query_only = ON")
+        # Encode filesystem characters before appending URI options. Otherwise
+        # fragments/query delimiters can redirect SQLite to a different file.
+        # A read-only database may still change through another writer. Do not
+        # declare it immutable: SQLite would then ignore committed WAL pages.
+        connection: sqlite3.Connection | None = None
+        try:
+            connection = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True)
+            connection.execute("PRAGMA query_only = ON")
+        except sqlite3.Error as exc:
+            if connection is not None:
+                with suppress(sqlite3.Error):
+                    connection.close()
+            raise DatabaseError(
+                "DATABASE_CONNECTION_FAILED",
+                "The read-only database connection could not be opened.",
+            ) from exc
         return connection
 
     def inspect(self, db_id: str) -> SchemaInfo:
+        try:
+            return self._inspect(db_id)
+        except DatabaseError:
+            self._schema_cache.pop(db_id, None)
+            raise
+        except (sqlite3.Error, OSError) as exc:
+            self._schema_cache.pop(db_id, None)
+            raise DatabaseError(
+                "DATABASE_INSPECTION_FAILED", "The database schema could not be inspected safely."
+            ) from exc
+
+    def _inspect(self, db_id: str) -> SchemaInfo:
         path = self.resolve(db_id)
-        modified_ns = path.stat().st_mtime_ns
+        stamp = _database_stamp(path)
         cached = self._schema_cache.get(db_id)
-        if cached is not None and cached[0] == modified_ns:
+        if cached is not None and cached[0] == stamp:
             return cached[1]
         tables: list[TableInfo] = []
         relationships: list[ForeignKeyInfo] = []
         with closing(self.connect(db_id)) as connection:
+            # Inspect all tables and keys from one coherent read snapshot.
+            connection.execute("BEGIN")
             records = connection.execute(
                 "SELECT name, sql FROM sqlite_master "
                 "WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name"
@@ -123,7 +172,7 @@ class DatabaseRegistry:
             }.values()
         )
         schema = SchemaInfo(db_id=db_id, tables=tables, relationships=relationships)
-        self._schema_cache[db_id] = (modified_ns, schema)
+        self._schema_cache[db_id] = (stamp, schema)
         return schema
 
     def explain(self, db_id: str, sql: str, validation: ValidationResult) -> ValidationResult:
@@ -163,8 +212,16 @@ class DatabaseRegistry:
         return columns, [_json_row(row) for row in rows[:max_rows]], len(rows) > max_rows
 
 
-def _json_row(row: tuple[Any, ...]) -> list[Any]:
-    return [
-        value if value is None or isinstance(value, str | int | float | bool) else str(value)
-        for value in row
-    ]
+def _json_row(row: Iterable[Any]) -> list[Any]:
+    values: list[Any] = []
+    for value in row:
+        if isinstance(value, float) and not math.isfinite(value):
+            raise DatabaseError(
+                "SQL_RESULT_NOT_JSON_SAFE",
+                "The query returned a non-finite number that cannot be represented safely. "
+                "Review overflow or non-finite source values; no value was replaced.",
+            )
+        values.append(
+            value if value is None or isinstance(value, str | int | float | bool) else str(value)
+        )
+    return values

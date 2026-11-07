@@ -1,5 +1,43 @@
 # Queryflow V6.4 requirement matrix
 
+2026-11-07 SQLite failure handling: corrupt schemas, connection initialization
+and stat failures use structured DatabaseError codes; initialization closes its
+handle and inspection failures evict stale cache entries. test_sqlite_failures.py
+verifies direct errors, API JSON and zero model calls for unusable schemas.
+This does not promote live-provider or production-identity gates below.
+
+2026-11-07 SQLite freshness: read-only connections respect committed WAL data;
+the existing stat cache includes WAL identity, and schema inspection uses one
+read transaction. test_sqlite_wal.py verifies visible committed/uncommitted
+boundaries, WAL-only invalidation, cache reuse and concurrent inspection. No
+live remote/provider or general semantic-correctness gate is promoted.
+
+2026-11-07 SQLite file identity: connection URIs encode the resolved filesystem
+path before read-only options. test_sqlite_uri_paths.py verifies special-character
+roots, schema inspection, exact source identity and read-only writes rejected
+even after query_only is disabled. This is a local SQLite safeguard, not evidence
+of remote-engine/production authorization completeness.
+
+2026-11-07 result-boundary hardening: non-finite floats fail structurally before
+JSON serialization across adapters; finite values and NULL remain unchanged.
+Real synthetic SQLite, serializer, API failure, failed-acceptance and bounded
+repair tests are in test_nonfinite_results.py and test_agent.py. This does not
+prove general numerical/business semantic correctness or live engine behavior.
+
+2026-11-07 metadata-write hardening: ProfileStore uses contained direct-child
+destinations, refuses file symlinks, atomically replaces complete JSON and evicts
+saved cache entries to avoid concurrent-writer timestamp misassociation.
+test_profile_save_boundaries.py covers partial-write/replacement failure,
+symlink escape, path traversal and the cache race. These local safeguards do not
+promote the broader semantic or production-identity requirements below.
+
+2026-11-07 audit continuation: embedded profile dialect and graph/profile dialect
+consistency are now checked independently (test_profile_dialect_boundary.py).
+Configured Ruff and mypy failures from the merged sidecar/reset helpers were
+repaired without suppressions. NetworkX is default-on at the user's request;
+historical Phase 0 stop/default-off notes do not supersede that request. No
+general semantic, production identity or live-provider requirement is promoted.
+
 2026-11-04 amendment: Phase 0 evidence is in SEMANTIC_GRAPH_PHASE0.md and
 benchmarks/results/semantic_graph_phase0.json. Runtime changes are STOPPED at the
 review gate. Typed ambiguity warnings, independent persistence gating, and later

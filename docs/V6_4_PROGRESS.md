@@ -1,5 +1,200 @@
 # V6.4 progress checkpoint
 
+## 2026-11-07 — SQLite connection/inspection failure boundaries
+
+Five tests failed before fixes: a malformed SQLite file escaped as sqlite3.Error,
+the schema API raised instead of returning JSON, connection failures leaked raw
+driver errors, failed read-only PRAGMA initialization did not close its handle,
+and file-stat failure escaped while retaining a cached schema. connect now
+translates driver failures to DATABASE_CONNECTION_FAILED and closes partially
+initialized connections. inspect translates sqlite3/OSError failures to
+DATABASE_INSPECTION_FAILED and evicts that database's cache entry. Existing
+DatabaseError codes (including identity/authorization and connection failures)
+are preserved. Programming exceptions are not broadly swallowed.
+
+Source: database.py. test_sqlite_failures.py covers these boundaries plus
+generation stopping with database_error and zero model calls on a corrupt schema.
+The existing API DatabaseError handler returns safe JSON using its pre-existing
+diagnostic map; no raw driver path or result data enters the client response.
+Targeted schema/URI/WAL/agent tests: 25 passed (0.25s). Full Python suite:
+856 passed / 2 PostgreSQL skipped (35.55s). Frontend/voice: 211 passed (783ms).
+Ruff, mypy src and configured bare mypy (72 files), and git diff --check pass.
+No live remote-engine/provider or browser verification, no speedup claimed.
+No dependency, SQL rewriting, fallback to previous data, agent or extra model
+call. No commit, push, restart, real business-data or live-provider use.
+
+Audit remains active. Next candidate: verify cache invalidation on same-mtime
+atomic file replacement, then audit per-query row/time bounds in registry callers.
+Broader semantic and production-identity gates remain open.
+
+## 2026-11-07 — Committed SQLite WAL visibility and schema consistency
+
+Two real-SQLite reproductions failed before fixes: execution missed a committed
+row still in WAL, and schema inspection returned a cached pre-ALTER schema when
+only WAL changed. Read-only connections no longer declare changing databases
+immutable. mode=ro and query_only remain enforced. The existing schema cache
+uses main-file and optional WAL stat identity/size/timestamps, rather than adding
+another cache or querying the schema on every cache hit. A read transaction
+keeps multi-statement schema/key inspection internally coherent.
+
+test_sqlite_wal.py verifies committed visibility versus uncommitted data,
+write rejection even with query_only disabled, warm schema reuse, WAL-only
+schema invalidation, and a concurrent ALTER during schema inspection with a
+consistent old snapshot followed by the new schema. Targeted suite: 48 passed
+(0.36s) before the additional coherent-snapshot test; all three WAL tests then
+passed (0.03s). The first full run had 849 passed / 2 skipped and one flaky
+exact-SQL comparison failure: the existing timed optimizer selected equivalent
+reordered conjunctions. test_remaining_multiturn.py now isolates generator/state
+identity from the optional optimizer via a scoped fixture, preserving all exact
+SQL/contract/result assertions. Dedicated optimizer tests remain active. Combined
+WAL/multiturn/optimizer tests: 8 passed (0.79s). Final full Python suite:
+850 passed / 2 PostgreSQL skipped (36.91s). Frontend/voice: 211 passed (781ms).
+Ruff, mypy src and configured bare mypy (72 files), and git diff --check pass.
+Existing URI-path tests retain
+coverage for encoded file identity and mode=ro.
+
+Read-only WAL readers require SQLite's normal WAL/shared-memory access; no
+unsafe immutable fallback is used if that infrastructure is unavailable. No
+credentials, actual business DB, LLM calls, dependencies, commit, push or restart.
+No production latency improvement claimed. Audit and broader semantic/security
+gates remain open; next candidate is file-replacement/cache identity and
+structured handling of SQLite connection/inspection failures.
+
+## 2026-11-07 — SQLite filesystem/URI identity boundary
+
+Four regressions failed before the fix: roots containing #, ? or percent-encoded
+text opened incorrectly, and a root with a # fragment read a different synthetic
+database outside the intended resolved file. DatabaseRegistry.connect now uses
+Path.as_uri() before appending the existing read-only/immutable URI options.
+No filename fragments can replace those options. Existing root containment,
+database ID validation and query-only enforcement remain unchanged.
+
+test_sqlite_uri_paths.py covers six real SQLite cases: reserved characters,
+spaces, Unicode and a decoy database. Cases verify exact row identity and schema
+inspection; disabling query_only still cannot write through mode=ro. Targeted
+URI/result/agent verification: 30 passed (0.25s); six URI tests also
+passed after adding explicit inspection assertions. Full Python suite:
+847 passed / 2 PostgreSQL skipped (34.52s). Frontend/voice: 211 passed (787ms).
+Ruff, mypy src, configured bare mypy (72 files) and git diff --check pass.
+No live remote-engine/provider or browser QA, no speedup claimed.
+No SQL text, LLM calls, dependency, credential or analytical transformation was
+added. No commit, push or restart; prior worktree changes preserved.
+
+The audit remains active. Next candidate: determine whether immutable SQLite
+connections can ignore legitimate uncheckpointed WAL data; reproduce before
+changing the existing immutable policy or schema-cache invalidation.
+
+## 2026-11-07 — Non-finite result serialization failure
+
+Synthetic SQLite SELECT 1e999 returns float infinity, which the prior adapter
+passed through unchanged; Starlette JSONResponse then raises ValueError. Ten
+negative regression cases failed before fixes (real SQLite execution plus three
+float forms across SQLite/PostgreSQL/remote serializers). The shared row
+serializer now rejects non-finite floats with SQL_RESULT_NOT_JSON_SAFE, retaining
+ordinary finite numbers, NULL, booleans and text unchanged. No conversion to
+invented NULL/zero values. PostgreSQL and remote adapters reuse the same guard.
+The API error mapping supplies a safe diagnostic without SQL/result values.
+
+Existing bounded generation repair catches the DatabaseError: acceptance remains
+false on exhausted attempts, and finite repaired SQL may succeed. No extra agent,
+retry policy, SQL/model call or serialization dependency. Tests:
+test_nonfinite_results.py and two generation regressions in test_agent.py.
+Targeted tests: 24 passed (0.27s). Final full Python suite: 841 passed /
+2 PostgreSQL skipped (32.98s). Ruff, mypy src and configured bare mypy pass
+(72 files); git diff --check passes. Frontend/voice: 211 passed (797ms).
+Live PostgreSQL/remote engines, external
+providers and browser QA were not run. No latency improvement claimed.
+
+Scope: non-finite float values returned within the existing row bound; existing
+string serialization of Decimal/dates and exact historical snapshot behavior
+are unchanged. Broader semantic and production-identity requirements remain open.
+No commit, push or restart. Audit remains active.
+Continuation candidate: verify SQLite URI handling for configured root paths
+containing URI-reserved characters; reproduce before changing connection logic.
+
+## 2026-11-07 — Profile-save integrity and containment
+
+Reproduced four failing regressions before fixing ProfileStore.save: partial
+writes destroyed the existing JSON, destination symlinks were followed outside
+the store, crafted IDs escaped the directory, and a concurrent writer could
+attach its timestamp to another version's cached object. ProfileStore now uses
+direct-child filename checks, rejects destination symlinks, writes and fsyncs a
+same-directory temporary file, then publishes with atomic replacement. A saved
+entry is evicted rather than cached with a potentially unrelated timestamp.
+Temporary files are cleaned on failure; concurrent trusted writers remain
+last-successful-replacement-wins, not revision-locked. This is not a claim of
+protection against hostile local directory replacement or power-loss durability.
+
+Source: profiling.py, sidecar_store.py. Acceptance tests:
+test_profile_save_boundaries.py (five scenarios, including replacement failure).
+The full Python suite passed 824 tests / 2 PostgreSQL skipped (39.27s). The
+additional replacement-failure test was then verified with all five save tests
+(5 passed, 0.04s); no runtime source changed after the full run. Frontend/voice:
+211 passed (879ms). Ruff, mypy src and configured bare mypy pass (72 files),
+and git diff --check passes. No live DB/provider or browser QA claimed. No SQL, LLM,
+dependency, analytical behavior, or production-authorization changes. No commit,
+push or restart. Broader audit remains active; next candidate is unsupported
+non-finite query results at JSON serialization boundaries, not yet reproduced.
+
+## 2026-11-07 — Profile engine identity and verification-gate repair
+
+Reproduced two metadata-boundary failures: a postgres-named JSON file containing
+a sqlite profile was accepted, and compile_graph accepted that profile against a
+PostgreSQL schema with the same database ID. Both tests failed before fixes.
+ProfileStore now checks the embedded dialect on cache/load returns, and graph
+compilation independently rejects dialect mismatch. Database IDs and existing
+path/symlink controls remain unchanged. Source: profiling.py / semantic_graph.py;
+regressions: test_profile_dialect_boundary.py.
+
+Repaired pre-existing configured checks: use Python 3.12 generic syntax in the
+shared sidecar loader; distinct tuple-key loop variables in reset_session_caches;
+sort imports in the two affected test modules. No type ignores or validator
+weakening. Targeted metadata/reset/graph suite: 39 passed. Ruff src/tests passed;
+mypy src passed (72 files); frontend/voice 211 passed (815ms); diff check passed.
+Full Python verification: 820 passed, 2 PostgreSQL skipped (37.64s).
+
+Preserved pending graph-default and retired-model cleanup changes. No commit,
+push, restart, actual .env, credentials, business data, model stage, dependency
+or agent change. No live-provider, real PostgreSQL or browser QA claimed.
+
+Continuation candidate: inspect atomicity and containment of metadata save paths;
+do not change them without a concrete reproduction. Broader V6.4/production gates
+are not promoted by these local tests. Earlier Phase 0 stop notes are historical;
+the active user goal explicitly authorizes this continued audit.
+
+## 2026-11-07 — Retired model and vendor-reference cleanup
+
+Removed the obsolete OpenRouter model registration and vendor-specific references
+from README, tests, benchmark code/results and local documentation. Adapter tests
+now use a neutral synthetic model ID while retaining wire-format, token, missing
+key and truncation coverage. The API catalog no longer offers that retired option.
+Deleted one obsolete local .env comment; active provider/model values and secrets
+were not changed. Local graph/ontology functionality remains independent.
+
+Case-insensitive search is clean across src, web, tests, benchmarks, README,
+.env.example, .env and docs. The ignored imported-conversation archive and existing
+Git history were not rewritten. Targeted provider/API suite: 68 passed (2.32s);
+changed-file Ruff, benchmark JSON parse and whitespace checks passed. Full Python
+suite: 818 passed / 2 PostgreSQL skipped (40.87s). No commit, push or restart.
+
+## 2026-11-07 — NetworkX default enabled; external ontology absence verified
+
+User explicitly requested graph-on as the default. Changed fallback defaults in
+API startup, service, linker and hybrid retrieval to true; .env.example and
+README agree. Explicit false still opts out, graph persistence remains false,
+and optional LOCAL ontology recovery remains false. No external ontology service,
+SDK or endpoint is integrated. The obsolete remote model option and vendor
+references were subsequently removed. Actual .env has no graph override. No restart,
+commit or push performed.
+
+Added missing-variable service/approved-metric and bounded bridge regressions.
+Full Python suite: 818 passed, 2 PostgreSQL skipped (39.56s); frontend/voice:
+211 passed (756ms); changed-file Ruff and diff checks pass. Repository-wide
+checks expose pre-existing UP047 in sidecar_store.py, two import-order findings
+in tests, and two mypy errors in the unchanged reset_session_caches helper
+(api.py lines 198–199). These were not introduced by the graph-default change
+and remain outside this scoped request. No live provider/DB or browser claims.
+
 ## 2026-11-04 — Amendment Phase 0 stop gate
 
 Only evaluation/docs/tests changed; no new runtime work or debit-card catalog
@@ -20,7 +215,7 @@ The history fixture has 399 SQL-labeled records, 16/20 question overlaps; 8/10
 prospective heldout questions overlap it. All 20 gold queries were previously
 inspected, so this is not a pristine holdout. Authoring IDs remain empty. Source
 definitions, output shape and time/population conflicts require adjudication
-before treating exact reference matches as business correctness. No NVIDIA work,
+before treating exact reference matches as business correctness. No external ontology work,
 commit/push/restart or changes to unrelated images/environment were performed.
 
 Phase 0 verification: 716 Python tests passed, 2 PostgreSQL integrations skipped;
@@ -53,7 +248,7 @@ The stored debit-card benchmark includes 13 paired failures. AST-difference
 signals are saved as UNADJUDICATED, not invented root-cause labels. New performance
 results are synthetic local build/load/traversal measurements with zero model/DB
 calls; they are not a measured end-to-end speedup or SQL-accuracy improvement.
-Fresh debit-card accuracy, real-provider token use, PostgreSQL and NVIDIA tests
+Fresh debit-card accuracy, real-provider token use, PostgreSQL and external ontology tests
 remain NOT RUN. Production identity constraints and older incomplete V6.4 items
 are unchanged. Local verification results are recorded in the delivery report.
 

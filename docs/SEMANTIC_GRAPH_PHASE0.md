@@ -3,7 +3,7 @@
 **STOPPED after Phase 0.** This amendment changes the implementation order.
 Only evaluation scripts, annotations, a prospective split, tests and these notes
 were added. Production orchestration, flags, catalogs and recovery are unchanged.
-No NVIDIA work, catalog authoring, commit, push or application restart occurred.
+No external ontology work, catalog authoring, commit, push or application restart occurred.
 
 ## 1. Measured evidence and limits
 
@@ -81,7 +81,7 @@ correctness/fanout appropriateness remains UNRESOLVED, not inferred from these c
 - Independent business correctness: questions, reference SQL and metric definitions
   conflict in several cases and need owner adjudication.
 - Graph-on accuracy versus baseline: no paired graph-on predictions exist.
-- NVIDIA integration: deliberately not started.
+- External ontology integration: deliberately not started.
 
 Historical recorded API latency is available, not rerun: retrieval p50=12,399 ms,
 p95=31,615 ms; Model 1 p50=21,279 ms, p95=37,113 ms. These are old full-request
@@ -189,7 +189,7 @@ purged. Warm load includes snapshot copying, not just a cached graph pointer rea
 | KPI grounding | Kept behind `TEXT2SQL_GRAPH_ENABLED=false` by default. No debit-card definitions authored. Phase 4 must follow adjudicated dev definitions. |
 | Local ontology | Kept behind `TEXT2SQL_ONTOLOGY_RECOVERY_ENABLED=false`. Typed formula evidence exists; amendment-specific applicability/repair restrictions and filter/join claims need the later Phase 6 review. |
 | Durable JSON store/CLI/startup builder | Kept. Parent graph flag defaults OFF, but a separate default-OFF persistence flag and request-local in-memory path are **not yet implemented**. Deferred at this explicit Phase 0 stop gate. |
-| NVIDIA adapter implementation | None started; local protocol remains only an optional extension boundary. |
+| External ontology adapter implementation | None started; local protocol remains only an optional extension boundary. |
 
 ### KPI sources — no merging or replacement
 
@@ -211,7 +211,7 @@ purged. Warm load includes snapshot copying, not just a cached graph pointer rea
 Supported next work: Phase 3 bounded resolver/typed ambiguity warnings while
 preserving baseline behavior; output-contract and daily-time regressions; then
 Phase 4 only from adjudicated approved dev definitions. Local ontology follows.
-Durable persistence remains optional; do not start NVIDIA integration.
+Durable persistence remains optional; no external ontology integration is required.
 
 Tests cover alias/CTE normalization, composite predicates, wrong keys/schema,
 unresolved lineage, exact McNemar, split integrity, unknown taxonomy stages,

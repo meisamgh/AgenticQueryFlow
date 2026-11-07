@@ -130,6 +130,8 @@ def compile_graph(
     """Explicit offline compilation from existing metadata; no I/O, inference or probes."""
     if any(item is not None and item.db_id != schema.db_id for item in (profile, glossary)):
         raise ValueError("Datasource mismatch")
+    if profile is not None and profile.dialect != schema.dialect:
+        raise ValueError("Profile dialect mismatch")
     if catalog and catalog.source_db_id != schema.db_id:
         raise ValueError("Catalog datasource mismatch")
     nodes: dict[str, GraphNode] = {}

@@ -11,7 +11,7 @@ from typing import Any
 import psycopg
 from psycopg import Connection
 
-from semantic_text2sql.database import DatabaseError
+from semantic_text2sql.database import DatabaseError, _json_row
 from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.models import (
     ColumnInfo,
@@ -218,10 +218,3 @@ def postgres_databases_from_environment() -> dict[str, str]:
     if legacy_books_dsn:
         databases.setdefault("books_postgres", legacy_books_dsn)
     return databases
-
-
-def _json_row(row: tuple[Any, ...]) -> list[Any]:
-    return [
-        value if value is None or isinstance(value, str | int | float | bool) else str(value)
-        for value in row
-    ]

@@ -99,7 +99,7 @@ formula in the cited observation. They cannot prove that a category exists or
 that a join caused NULLs. Automatic metric repair additionally requires a
 provable AST mismatch; otherwise the outcome is escalation, not a semantic rewrite.
 Relationship definitions describe joins, not live join effects. Inferred concepts
-cannot authorize automatic repairs. No NVIDIA client or network provider is
+cannot authorize automatic repairs. No external ontology client or network provider is
 enabled; optional external integration and provider timeout testing are deferred
 pending a real API contract, credentials and measured benefit.
 
@@ -127,7 +127,7 @@ model/DB calls for these local operations. Safety/ambiguity checks add CPU overh
 over the original BFS. This is not an end-to-end speedup, SQL accuracy improvement,
 token-saving estimate or a live recovery benchmark. Actual inference tokens,
 fresh debit-card business/join accuracy, recovery success/false repairs,
-PostgreSQL and NVIDIA integration remain NOT RUN. Metadata cannot prove arbitrary
+PostgreSQL and external ontology integration remain NOT RUN. Metadata cannot prove arbitrary
 formula equivalence, population/grain correctness or causality.
 
 ### Verified local checks (2026-11-04)

@@ -6,13 +6,13 @@ from pathlib import Path
 from typing import Any
 
 from fastapi.testclient import TestClient
+from test_semantic_catalog import _document
 
 from semantic_text2sql.api import create_app
 from semantic_text2sql.glossary import GlossaryStore
 from semantic_text2sql.models import DatabaseProfile, RelationshipProfile
 from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.semantic_catalog import SemanticCatalogStore
-from test_semantic_catalog import _document
 
 
 def _glossary(db_id: str | None) -> dict[str, Any]:

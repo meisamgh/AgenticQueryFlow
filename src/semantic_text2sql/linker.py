@@ -200,7 +200,7 @@ def _foreign_key_columns(table: str, schema: SchemaInfo) -> set[str]:
 
 
 def _bridge_tables(selected: set[str], schema: SchemaInfo) -> set[str]:
-    legacy = os.environ.get("TEXT2SQL_GRAPH_ENABLED", "false").lower() != "true"
+    legacy = os.environ.get("TEXT2SQL_GRAPH_ENABLED", "true").lower() != "true"
     resolution = resolve_joins(sorted(selected), schema, reject_ambiguous=(
         not legacy), max_depth=len(schema.tables) if legacy else 6,
         max_candidates=max(64, len(schema.tables) * len(selected) ** 2) if legacy else 64)

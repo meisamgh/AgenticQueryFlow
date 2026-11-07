@@ -131,7 +131,6 @@ def main() -> None:
             "business-semantic adjudication",
             "live model tokens",
             "recovery success/false repairs",
-            "NVIDIA integration",
         ],
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

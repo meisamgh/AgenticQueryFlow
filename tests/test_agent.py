@@ -71,6 +71,36 @@ def test_sql_only_generation_executes_read_only_query(registry) -> None:  # type
     assert result.attempts[0].validation.code == "SQL_SAFETY_VALID"
 
 
+def test_nonfinite_execution_is_not_accepted_and_remains_json_serializable(registry) -> None:  # type: ignore[no-untyped-def]
+    from starlette.responses import JSONResponse
+
+    result = asyncio.run(
+        TextToSQLAgent(registry, FakeModel(["SELECT 1e999 AS total"])).generate(
+            GenerateRequest(db_id="shop", question="Return the total", execute=True,
+                            max_attempts=1)
+        )
+    )
+    assert not result.accepted
+    assert result.rows == []
+    assert result.sql is None
+    assert result.attempts[0].validation.code == "DATABASE_ERROR"
+    assert "non-finite" in result.attempts[0].validation.message
+    assert JSONResponse(result.model_dump(mode="json")).status_code == 200
+
+
+def test_nonfinite_execution_uses_existing_bounded_repair(registry) -> None:  # type: ignore[no-untyped-def]
+    model = FakeModel(["SELECT 1e999 AS total", "SELECT 7 AS total"])
+    result = asyncio.run(
+        TextToSQLAgent(registry, model).generate(
+            GenerateRequest(db_id="shop", question="Return the total", execute=True,
+                            max_attempts=2)
+        )
+    )
+    assert result.accepted and result.rows == [[7]]
+    assert len(result.attempts) == 2
+    assert "non-finite" in (model.feedback[1] or "")
+
+
 def test_request_snapshot_avoids_second_schema_inspection(registry, monkeypatch) -> None:  # type: ignore[no-untyped-def]
     schema = registry.inspect("shop")
 

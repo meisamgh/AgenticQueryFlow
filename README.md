@@ -25,7 +25,7 @@ https://github.com/user-attachments/assets/cea65003-e31e-4846-a532-904ffcb6e25f
 
 - **Ask and refine questions.** A LangGraph assistant selects governed tools, maintains conversation context, and supports follow-ups, corrections, explanations, and investigations.
 - **Generate grounded SQL.** Hybrid schema retrieval combines BM25, embeddings, value matching, and optional reranking with business glossary definitions and verified metadata.
-- **Use governed business metrics.** An approved semantic catalog can ground formulas, dependencies, filters, and join relationships. Optional NetworkX graph grounding expands relevant relationships without another LLM call.
+- **Use governed business metrics.** An approved semantic catalog can ground formulas, dependencies, filters, and join relationships. NetworkX graph grounding is enabled by default and expands relevant relationships without another LLM call.
 - **Inspect safe query execution.** SQLGlot checks, source/table allowlists, row limits, timeouts, and request budgets constrain generated queries.
 - **Recover with evidence.** A bounded Recovery Agent investigates detected failures, empty results, unexpected NULLs, and explicit correctness reviews. An optional *local* ontology lookup provides approved semantic evidence; it is not an external ontology service.
 - **Explore interactive charts.** Chart proposals are validated against complete accepted results. Plotly renders charts, with an ECharts fallback. Chart-only changes can reuse existing results without regenerating SQL.
@@ -46,7 +46,7 @@ LangGraph assistant (intent, context, tool selection)
       |                                  |
       |                             Semantic grounding
       |                             (glossary, approved metrics,
-      |                              optional graph join resolver)
+      |                              NetworkX graph join resolver)
       |                                  |
       |                             SQL generation
       |                                  |
@@ -72,9 +72,9 @@ The assistant never treats a successful SQL execution as proof that a business d
 
 **One conversational orchestrator.** The Top-Layer LangGraph assistant delegates SQL generation, result inspection, charting, and dashboard operations to bounded tools. Specialized validation stays outside the LLM.
 
-**Hybrid retrieval with optional graph grounding.** The existing retriever supplies schema candidates. A deterministic NetworkX layer can add permitted join paths and approved KPI dependencies from versioned metadata. Graph grounding is disabled by default until evaluated on the target workload. The semantic catalog—not the derived graph—is authoritative for approved metrics.
+**Hybrid retrieval with graph grounding.** The existing retriever supplies schema candidates. A deterministic NetworkX layer adds permitted join paths and approved KPI dependencies from versioned metadata by default. Set `TEXT2SQL_GRAPH_ENABLED=false` to opt out. The semantic catalog—not the derived graph—is authoritative for approved metrics. JSON graph persistence remains disabled by default.
 
-**Evidence-based recovery.** The existing Recovery Agent uses schema inspection, value inspection, and bounded diagnostic queries. A feature-gated `query_ontology` tool can consult compatible local catalog/graph facts. No external NVIDIA ontology integration is enabled by default.
+**Evidence-based recovery.** The existing Recovery Agent uses schema inspection, value inspection, and bounded diagnostic queries. A feature-gated `query_ontology` tool can consult compatible local catalog/graph facts without an external ontology service.
 
 **Result-aware visualization.** The assistant can propose chart encodings; the plotting service validates them against accepted columns, rows, completeness, and result identity. A dedicated plotting-model fallback may still be used for unresolved chart proposals.
 
@@ -119,7 +119,7 @@ The [`.env.example`](.env.example) file documents all available settings. Common
 | `TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED` | Enable the conversational agent |
 | `TEXT2SQL_CONTEXT_MODE` | Use retrieval or optional model-based context planning |
 | `TEXT2SQL_GLOSSARY_ROOT` / `TEXT2SQL_SEMANTIC_CATALOG_ROOT` | Load business definitions and approved semantic facts |
-| `TEXT2SQL_GRAPH_ENABLED` | Enable optional graph grounding (default: off) |
+| `TEXT2SQL_GRAPH_ENABLED` | NetworkX graph grounding (default: on; false opts out) |
 | `TEXT2SQL_ONTOLOGY_RECOVERY_ENABLED` | Enable optional local ontology evidence during recovery (default: off) |
 | `TEXT2SQL_DASHBOARD_LOCAL_WORKSPACE` | Configure the local dashboard workspace |
 
@@ -135,7 +135,7 @@ deno test -A tests/*.cjs
 git diff --check
 ```
 
-These checks cover software behavior, including scripted integrations. They **do not** establish live connectivity, end-to-end business-semantic correctness, or production readiness. Graph-on accuracy, independent business-rule validation, and external ontology integration still require further evaluation.
+These checks cover software behavior, including scripted integrations. They **do not** establish live connectivity, end-to-end business-semantic correctness, or production readiness. Graph-on accuracy and independent business-rule validation still require evaluation on the target workload.
 
 ## Project status and documentation
 

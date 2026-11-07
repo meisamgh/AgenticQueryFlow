@@ -471,7 +471,6 @@ def test_model_catalog_contains_configured_remote_providers(monkeypatch) -> None
         "justdowork",
         "codecraft",
         "true_sota",
-        "openrouter",
     }
     agentrouter = [item for item in options if item["provider"] == "agentrouter"]
     assert [item["model"] for item in agentrouter] == [
@@ -489,9 +488,7 @@ def test_model_catalog_contains_configured_remote_providers(monkeypatch) -> None
     assert [item["model"] for item in options if item["provider"] == "codecraft"] == [
         "claude-opus-5"
     ]
-    assert [item["model"] for item in options if item["provider"] == "openrouter"] == [
-        "nvidia/nemotron-3-ultra-550b-a55b:free"
-    ]
+    assert [item["model"] for item in options if item["provider"] == "openrouter"] == []
 
 
 def test_production_api_rejects_models_outside_catalog() -> None:

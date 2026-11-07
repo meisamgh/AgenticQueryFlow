@@ -166,7 +166,7 @@ def test_anthropic_and_codecraft_task_limits_reach_provider_payloads(
     assert captured["codecraft"]["max_tokens"] == 456
 
 
-def test_openrouter_nemotron_sql_completion_and_local_json_policy() -> None:
+def test_openrouter_sql_completion_and_local_json_policy() -> None:
     captured: dict[str, Any] = {}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -182,7 +182,7 @@ def test_openrouter_nemotron_sql_completion_and_local_json_policy() -> None:
         "test-key", transport=httpx.MockTransport(handler),
     )
     sql, _, usage = asyncio.run(model.generate(
-        model="nvidia/nemotron-3-ultra-550b-a55b:free",
+        model="test-model",
         question="Return one", evidence=None,
         schema=SchemaInfo(db_id="shop", tables=[]),
         strategy=StrategyHints(mode="exact"), dialect="sqlite",
@@ -193,14 +193,14 @@ def test_openrouter_nemotron_sql_completion_and_local_json_policy() -> None:
     assert captured["path"] == "/api/v1/chat/completions"
     assert captured["authorization"] == "Bearer test-key"
     body = captured["body"]
-    assert body["model"] == "nvidia/nemotron-3-ultra-550b-a55b:free"
+    assert body["model"] == "test-model"
     assert "response_format" not in body
     assert model.native_schema_supported(body["model"], "AgentDecision") is False
 
 
 def test_openrouter_missing_key_and_truncation_fail_safely() -> None:
     with pytest.raises(ModelError, match="OPENROUTER_API_KEY"):
-        asyncio.run(OpenRouterSQLModel(None).complete_detailed("nemotron", "SELECT 1"))
+        asyncio.run(OpenRouterSQLModel(None).complete_detailed("test-model", "SELECT 1"))
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={
@@ -210,7 +210,7 @@ def test_openrouter_missing_key_and_truncation_fail_safely() -> None:
 
     model = OpenRouterSQLModel("test-key", transport=httpx.MockTransport(handler))
     with pytest.raises(ModelError, match="truncated"):
-        asyncio.run(model.complete_detailed("nemotron", "SELECT 1"))
+        asyncio.run(model.complete_detailed("test-model", "SELECT 1"))
 
 
 @pytest.mark.parametrize("global_limit", [1, 12])

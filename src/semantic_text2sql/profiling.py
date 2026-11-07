@@ -27,7 +27,12 @@ from semantic_text2sql.models import (
     ValueFrequency,
 )
 from semantic_text2sql.postgres import PostgresRegistry
-from semantic_text2sql.sidecar_store import contained_sidecar_path, load_sidecar
+from semantic_text2sql.sidecar_store import (
+    atomic_write_sidecar,
+    contained_sidecar_path,
+    load_sidecar,
+    sidecar_write_path,
+)
 
 Database = DatabaseRegistry | PostgresRegistry
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -45,7 +50,7 @@ class ProfileStore:
         self._cache: dict[tuple[str, str], tuple[int, DatabaseProfile]] = {}
 
     def path(self, dialect: str, db_id: str) -> Path:
-        return self.root / f"{dialect}__{db_id}.json"
+        return sidecar_write_path(self.root, f"{dialect}__{db_id}.json")
 
     def load(self, dialect: str, db_id: str) -> DatabaseProfile | None:
         path = contained_sidecar_path(self.root, f"{dialect}__{db_id}.json")
@@ -58,18 +63,21 @@ class ProfileStore:
             return None
         cached = self._cache.get(key)
         if cached is not None and cached[0] == modified_ns:
-            return cached[1]
+            return cached[1] if cached[1].dialect == dialect else None
         profile = load_sidecar(path, DatabaseProfile, "db_id", db_id)
-        if profile is None:
+        if profile is None or profile.dialect != dialect:
             return None
         self._cache[key] = (modified_ns, profile)
         return profile
 
     def save(self, profile: DatabaseProfile) -> Path:
-        self.root.mkdir(parents=True, exist_ok=True)
-        path = self.path(profile.dialect, profile.db_id)
-        path.write_text(profile.model_dump_json(indent=2) + "\n")
-        self._cache[(profile.dialect, profile.db_id)] = (path.stat().st_mtime_ns, profile)
+        path = atomic_write_sidecar(
+            self.root, f"{profile.dialect}__{profile.db_id}.json",
+            profile.model_dump_json(indent=2) + "\n",
+        )
+        # Another writer can replace the file before stat(): never pair this
+        # caller's object with that writer's mtime. The next load reads reality.
+        self._cache.pop((profile.dialect, profile.db_id), None)
         return path
 
 

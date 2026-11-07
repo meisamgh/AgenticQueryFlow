@@ -175,7 +175,7 @@ class TextToSQLService:
         graph_context = None
         graph_latency_ms: int | None = None
         catalog_relationships: list[ContextRelationship] = []
-        graph_enabled = os.environ.get("TEXT2SQL_GRAPH_ENABLED", "false").lower() == "true"
+        graph_enabled = os.environ.get("TEXT2SQL_GRAPH_ENABLED", "true").lower() == "true"
         metric_grounding = (graph_enabled or bool(contract.approved_metrics)
                             or os.environ.get("TEXT2SQL_KPI_GROUNDING_ENABLED", "false").lower()
                             == "true")

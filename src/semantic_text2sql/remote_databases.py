@@ -14,7 +14,7 @@ from typing import Any, cast
 
 from sqlglot import exp, parse_one
 
-from semantic_text2sql.database import DatabaseError
+from semantic_text2sql.database import DatabaseError, _json_row
 from semantic_text2sql.dialects import DatabaseDialect
 from semantic_text2sql.external_connections import ExternalConnection
 from semantic_text2sql.models import (
@@ -381,7 +381,4 @@ class RemoteDatabaseRegistry(PostgresRegistry):
 
 
 def _row(row: Any) -> list[Any]:
-    return [
-        value if value is None or isinstance(value, str | int | float | bool) else str(value)
-        for value in row
-    ]
+    return _json_row(row)

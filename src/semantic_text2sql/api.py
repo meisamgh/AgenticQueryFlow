@@ -193,10 +193,10 @@ def clear_reset_caches(
     if design_proposals:
         design_proposals.clear(session_id)
     dashboard_revisions.clear(session_id)
-    for key in [key for key in dashboard_bundles if key[0] == session_id]:
-        dashboard_bundles.pop(key, None)
-    for key in [key for key in recent_results if key[0] == session_id]:
-        recent_results.pop(key, None)
+    for bundle_key in [key for key in dashboard_bundles if key[0] == session_id]:
+        dashboard_bundles.pop(bundle_key, None)
+    for result_key in [key for key in recent_results if key[0] == session_id]:
+        recent_results.pop(result_key, None)
 
 
 def create_app(
@@ -331,6 +331,10 @@ def create_app(
     async def database_error_response(request: Request, exc: DatabaseError) -> JSONResponse:
         del request
         safe_messages = {
+            "SQL_RESULT_NOT_JSON_SAFE": (
+                "The query returned an unsupported non-finite number. "
+                "Review the calculation or source values; no value was replaced."
+            ),
             "DATABASE_DRIVER_MISSING": "Install the selected database extra and its system driver.",
             "READ_ONLY_ROLE_REQUIRED": "Provision and confirm a read-only database role first.",
             "DATABASE_CONNECTION_FAILED": "Check the local connection settings and credentials.",
@@ -396,7 +400,7 @@ def create_app(
         ),
     )
     async def prepare_semantic_graphs() -> None:
-        if os.environ.get("TEXT2SQL_GRAPH_ENABLED", "false").lower() != "true":
+        if os.environ.get("TEXT2SQL_GRAPH_ENABLED", "true").lower() != "true":
             return
         def build() -> None:
             registries: list[DatabaseRegistry | PostgresRegistry] = [sqlite]

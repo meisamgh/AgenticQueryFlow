@@ -2,9 +2,19 @@
 import sqlite3
 from typing import Any
 
+import pytest
 from test_v63_conversation import ScriptedCompleter, ScriptedSQL, _client, _post, _tool
 
 from semantic_text2sql.validator import normalize_sql
+
+
+@pytest.fixture(autouse=True)
+def stable_generated_sql(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These tests assert generator/state SQL identity, not timing-based optimizer
+    # selection. Equivalent predicate reordering may otherwise win nondeterministically.
+    # Optimizer correctness and selection remain covered in test_sqlglot_optimization.py.
+    monkeypatch.setattr("semantic_text2sql.agent._sqlglot_optimization_candidate",
+                        lambda *args, **kwargs: None)
 
 
 class SQLSequence(ScriptedSQL):

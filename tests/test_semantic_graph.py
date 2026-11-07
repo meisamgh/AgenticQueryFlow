@@ -205,6 +205,7 @@ def test_graph_cli_without_network(
     [
         (False, False, "retrieval", False),
         (False, False, "retrieval", True),
+        (None, False, "retrieval", False),
         (True, False, "retrieval", False),
         (True, True, "retrieval", False),
         (True, True, "model1", False),
@@ -257,7 +258,10 @@ def test_sql_service_approved_metric_grounding(
         semantic_catalogs=SemanticCatalogStore(catalog_root),
         graph_store=graphs,
     )
-    monkeypatch.setenv("TEXT2SQL_GRAPH_ENABLED", str(enabled).lower())
+    if enabled is None:
+        monkeypatch.delenv("TEXT2SQL_GRAPH_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("TEXT2SQL_GRAPH_ENABLED", str(enabled).lower())
     monkeypatch.setenv("TEXT2SQL_KPI_GROUNDING_ENABLED", str(metric_only).lower())
     result = asyncio.run(
         service.execute_question(
@@ -271,8 +275,9 @@ def test_sql_service_approved_metric_grounding(
     )
     assert result.generated.accepted and result.generated.rows == [[170.0]]
     assert model.calls == 1
-    assert bool(result.semantic_contract.approved_metrics) == (enabled or metric_only)
-    assert ("human_approved_semantic_catalog" in model.context) == (enabled or metric_only)
+    graph_active = enabled is not False
+    assert bool(result.semantic_contract.approved_metrics) == (graph_active or metric_only)
+    assert ("human_approved_semantic_catalog" in model.context) == (graph_active or metric_only)
     assert result.planner_usage.total_tokens in (None, 0)
     assert not result.generated.telemetry.planner_call_used
     assert result.generated.telemetry.model1_latency_ms == 0
@@ -280,7 +285,7 @@ def test_sql_service_approved_metric_grounding(
     assert not any(item.component == "context_planner"
                    for item in result.generated.telemetry.call_ledger)
     assert {"order_id", "customer_id"} <= set(result.generated.context_request.columns["orders"])
-    if enabled or metric_only:
+    if graph_active or metric_only:
         document.schema_fingerprint = "stale"
         (catalog_root / "shop.json").write_text(document.model_dump_json())
         rejected = asyncio.run(
@@ -661,4 +666,12 @@ def test_disabled_graph_keeps_legacy_long_bridge_paths(monkeypatch) -> None:
     monkeypatch.setenv("TEXT2SQL_GRAPH_ENABLED", "false")
     assert _expand_bridges(["t0", "t9"], schema) == ["t0", "t9", *[f"t{i}" for i in range(1, 9)]]
     monkeypatch.setenv("TEXT2SQL_GRAPH_ENABLED", "true")
+    assert _expand_bridges(["t0", "t9"], schema) == ["t0", "t9"]
+
+
+def test_graph_bridge_limits_are_active_without_configuration(monkeypatch) -> None:
+    from semantic_text2sql.hybrid_retrieval import _expand_bridges
+
+    schema = join_schema([(f"t{i}", f"t{i + 1}") for i in range(9)])
+    monkeypatch.delenv("TEXT2SQL_GRAPH_ENABLED", raising=False)
     assert _expand_bridges(["t0", "t9"], schema) == ["t0", "t9"]
