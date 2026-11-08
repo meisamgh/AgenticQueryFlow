@@ -76,8 +76,11 @@ def display_node(node: GraphNode, *, detail: bool = False) -> ExplorerNode:
     label = str(facts.get("label") or facts.get("relation") or facts.get("column")
                 or facts.get("term") or ("Mandatory filter" if node.kind == "BUSINESS_RULE"
                                          else node.id.split(":", 1)[-1]))
+    if node.kind == "BUSINESS_RULE" and isinstance(facts.get("predicate"), dict):
+        predicate = facts["predicate"]
+        label = " ".join(str(predicate.get(key, "")) for key in ("operand", "operator", "value"))
     approved = (node.kind == "METRIC" and facts.get("authoritative") is True
-                or node.kind == "BUSINESS_RULE")
+                or node.kind == "BUSINESS_RULE" and facts.get("authoritative") is True)
     return ExplorerNode(id=node.id, kind=node.kind, label=label,
                         status="approved" if approved else "observed" if node.kind
                         in {"TABLE", "COLUMN"} else "suggested",
@@ -93,7 +96,7 @@ def display_edge(edge: GraphEdge) -> ExplorerEdge:
         id=edge.id, source=edge.source, target=edge.target, kind=edge.kind,
         provenance=edge.provenance, authoritative=edge.authoritative,
         status="forbidden" if forbidden else "authoritative" if edge.authoritative else
-               "definition" if edge.kind in {"GROUPABLE_BY", "FILTERED_BY"} else "suggested",
+               "definition" if edge.facts.get("definition_verified") is True else "suggested",
         cardinality=cardinality,
         fanout_risk=bool(edge.facts.get("fanout_risk", cardinality not in
                                        {"many_to_one", "one_to_one"}))
@@ -147,6 +150,12 @@ class ExplorerIndex:
             initial = "TABLE" if view == "schema" else "METRIC" if view == "kpi" else None
             seeds = sorted(key for key in visible if self.nodes[key].kind == initial or
                            initial is None and self.nodes[key].kind != "COLUMN")[:node_limit]
+            if view == "combined" and seeds:
+                seeds = [next((key for key in seeds if self.nodes[key].kind == "METRIC"),
+                              seeds[0])]
+                targets = sorted({edge.target for edge in summary_edges
+                                  if edge.source in seeds})
+                seeds = [*seeds, *targets][:node_limit]
             if view == "kpi":
                 tables = sorted({edge.target for edge in summary_edges if edge.source in seeds})
                 seeds = list(dict.fromkeys([*seeds, *tables]))[:node_limit]
@@ -192,6 +201,16 @@ class ExplorerIndex:
                     distances[neighbor] = distances[current] + 1
                     queue.append(neighbor)
                 visited_edges.add(key)
+        # A KPI's expanded input columns must retain their physical table edges,
+        # even though the table is two hops away in the underlying network.
+        if node_id and self.nodes[node_id].kind == "METRIC" and not lineage and depth:
+            for edge in self.edges.values():
+                if (edge.kind == "HAS_COLUMN" and edge.target in selected
+                        and edge.source in visible and edge.source not in selected):
+                    if len(selected) < node_limit:
+                        selected.add(edge.source)
+                    else:
+                        truncated = True
         if not lineage:
             # Initial pages include only edges whose endpoints are already sent.
             all_edges = [key for key, edge in self.edges.items() if edge.source in selected
@@ -199,8 +218,9 @@ class ExplorerIndex:
         else:
             all_edges = sorted(visited_edges)
         output_edges = [display_edge(self.edges[key]) for key in sorted(all_edges)]
-        output_edges.extend(edge for edge in summary_edges
-                            if edge.source in selected and edge.target in selected)
+        if not lineage:
+            output_edges.extend(edge for edge in summary_edges
+                                if edge.source in selected and edge.target in selected)
         if len(output_edges) > edge_limit:
             truncated = True
         return ExplorerGraph(
@@ -222,7 +242,9 @@ class ExplorerIndex:
             return False
         source = self.nodes[edge.source]
         valid = (edge.authoritative or source.kind == "METRIC" and
-                 source.facts.get("status") == "inferred" or source.kind == "METRIC" and
+                 source.facts.get("status") == "inferred" or
+                 source.kind == "BUSINESS_RULE" and source.facts.get("status") == "inferred"
+                 and edge.kind == "USES_COLUMN" or source.kind == "METRIC" and
                  source.facts.get("authoritative") is True and
                  edge.kind in {"FILTERED_BY", "GROUPABLE_BY"})
         if not valid or direction == "upstream" and edge.kind == "GROUPABLE_BY":
@@ -255,12 +277,24 @@ class ExplorerCache:
             candidates = {node.id for node in snapshot.nodes if node.kind == "METRIC"
                           and node.facts.get("status") == "inferred"}
             rules = {edge.target for edge in snapshot.edges if edge.kind == "FILTERED_BY"
-                     and edge.source in approved}
+                     and edge.source in approved | candidates}
             nodes = {node.id: node for node in snapshot.nodes
                      if (node.kind != "METRIC" or node.id in approved | candidates)
                      and (node.kind != "BUSINESS_RULE" or node.id in rules)}
+            for rule in rules:
+                owners = [edge.source for edge in snapshot.edges
+                          if edge.kind == "FILTERED_BY" and edge.target == rule]
+                nodes[rule] = nodes[rule].model_copy(update={"facts": {
+                    **nodes[rule].facts, "status": "approved" if owners and
+                    all(owner in approved for owner in owners) else "inferred",
+                    "authoritative": bool(owners) and
+                    all(owner in approved for owner in owners)}})
             edges = {edge.id: edge for edge in snapshot.edges
                      if edge.source in nodes and edge.target in nodes}
+            for key, edge in list(edges.items()):
+                if edge.kind in {"FILTERED_BY", "GROUPABLE_BY"}:
+                    edges[key] = edge.model_copy(update={"facts": {
+                        **edge.facts, "definition_verified": edge.source in approved}})
             index = ExplorerIndex(snapshot, network.subgraph(nodes), nodes, edges)
             self._entries[snapshot.content_checksum] = index
             if len(self._entries) > 16:

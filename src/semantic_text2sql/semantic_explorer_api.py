@@ -29,8 +29,6 @@ from semantic_text2sql.semantic_explorer import (
 )
 from semantic_text2sql.semantic_graph import SemanticGraphStore, compile_graph, graph_identity
 
-EXPLORER_DB_ID = "debit_card_specializing"
-
 
 def semantic_explorer_router(
     database: Callable[[str], DatabaseRegistry | PostgresRegistry],
@@ -51,9 +49,6 @@ def semantic_explorer_router(
             raise HTTPException(503, "Semantic exploration is disabled in this workspace.")
 
     def load(db_id: str) -> tuple[ExplorerIndex, list[str], Any]:
-        if db_id != EXPLORER_DB_ID:
-            raise HTTPException(
-                404, "Semantic Explorer is available only for the debit-card database.")
         with lock:
             registry = database(db_id)  # Existing configured datasource allowlist.
             schema = registry.inspect(db_id)  # Metadata only; existing mtime cache.
@@ -99,7 +94,7 @@ def semantic_explorer_router(
     @router.get("/sources")
     def datasource_list(request: Request, response: Response) -> list[str]:
         authorize(request, response)
-        return [db_id for db_id in sources() if db_id == EXPLORER_DB_ID]
+        return sorted(sources())
 
     @router.get("", response_model=ExplorerGraph)
     @router.get("/neighborhood", response_model=ExplorerGraph)
@@ -157,6 +152,12 @@ def semantic_explorer_router(
                               and item.facts.get("table") == node.facts["relation"]),
                              key=lambda item: item.id)
             metadata["columns"] = [display_node(item).model_dump() for item in columns[:100]]
+            foreign_columns = {column for edge in index.edges.values()
+                               if edge.kind == "REFERENCES" and edge.source == node_id
+                               for column in edge.facts.get("child_columns", [])}
+            for column in metadata["columns"]:
+                column["metadata"]["foreign_key"] = (
+                    column["metadata"].get("column") in foreign_columns)
             metadata["column_count"] = len(columns)
             metadata["columns_truncated"] = len(columns) > 100
             metadata["associated_kpis"] = [display_node(item).model_dump() for item in

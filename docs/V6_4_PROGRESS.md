@@ -1,5 +1,18 @@
 # V6.4 progress checkpoint
 
+Compact explorer follow-up: fixed missing table endpoints on expanded input edges;
+auto-selection/column expansion and populated inspector; component-based compact
+visual layout; hover edge labels and mobile inspector toggle. 950 Python / 223
+frontend passed, 2 PostgreSQL skipped; Ruff/mypy pass. Exact browser viewport/theme
+screenshots remain unverified due unavailable IAB and native focus protection.
+
+2026-11-08 explorer refinement: generalized configured local sources; corrected rule
+and definition-edge authority; status-aware lineage; redesigned canvas/inspector;
+default KPI view and deterministic visual layers. 950 Python passed / 2 PostgreSQL
+skipped; 221 frontend passed, Ruff/mypy passed. Exact viewport/light-dark browser
+matrix remains unverified. See SEMANTIC_EXPLORER.md for measured metadata latency
+and browser limitations. Existing V6_4_SPEC.md was recovered locally, not invented.
+
 2026-11-08: retired TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED from environment
 templates and HTTP routing. With the Top layer disabled, chat goes directly to
 the governed SQL service; an old deployment variable cannot activate the competing

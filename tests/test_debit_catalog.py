@@ -44,6 +44,9 @@ def test_debit_candidate_graph_and_formula_semantics(tmp_path: Path) -> None:
                                else "table:transactions_1k") for edge in links)
     assert not any(edge.kind == "SOURCE_TABLE" for edge in snapshot.edges)
     assert all(node.kind != "COLUMN" for node in overview.nodes)
+    expanded = index.graph(view="kpi", node_id="metric:average_unit_price", depth=1)
+    assert {"USES_COLUMN", "HAS_COLUMN"} <= {edge.kind for edge in expanded.edges}
+    assert "table:transactions_1k" in {node.id for node in expanded.nodes}
     filtered = index.graph(view="kpi", relations={"DEPENDS_ON"})
     assert all(edge.kind != "SOURCE_TABLE" for edge in filtered.edges)
     bounded = index.graph(view="kpi", node_limit=2, edge_limit=1)

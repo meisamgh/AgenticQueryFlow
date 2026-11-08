@@ -1,5 +1,13 @@
 # Queryflow V6.4 requirement matrix
 
+2026-11-08 explorer redesign: authority transitions, mixed lineage, configured
+local-source access, KPI default selection and deterministic layered positioning
+have passing regression evidence (950 Python / 221 frontend tests in the full
+run). Production datasource identity remains BLOCKED. Exact three-viewport,
+light/dark browser acceptance remains NOT VERIFIED, including final layered
+layout screenshots; see SEMANTIC_EXPLORER.md. No general semantic correctness
+or production authorization requirement is promoted by these explorer checks.
+
 Explorer extension (2026-11-08): local bounded schema/KPI graph APIs and frontend
 regressions VERIFIED; desktop schema/KPI rendering checked. Production datasource
 authorization BLOCKED; mobile/dark browser QA NOT RUN. This does not promote any

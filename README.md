@@ -75,11 +75,11 @@ The assistant never treats a successful SQL execution as proof that a business d
 
 **One conversational orchestrator.** The Top-Layer LangGraph assistant delegates SQL generation, result inspection, charting, and dashboard operations to bounded tools. Specialized validation stays outside the LLM.
 
-**Hybrid retrieval with graph grounding.** The existing retriever supplies schema candidates. A deterministic NetworkX layer adds permitted join paths and approved KPI dependencies from versioned metadata by default. Set `TEXT2SQL_GRAPH_ENABLED=false` to opt out. The semantic catalog—not the derived graph—is authoritative for approved metrics. JSON graph persistence remains disabled by default.
+**Hybrid retrieval with graph grounding.** The existing retriever supplies schema candidates. A deterministic NetworkX layer adds permitted join paths and approved KPI dependencies from versioned metadata by default. Set `TEXT2SQL_GRAPH_ENABLED=false` to opt out. The semantic catalog—not the derived graph—is authoritative for approved metrics. Compatible JSON graph persistence is enabled by default.
 
 **Evidence-based recovery.** The existing Recovery Agent uses schema inspection, value inspection, and bounded diagnostic queries. A feature-gated `query_ontology` tool can consult compatible local catalog/graph facts without an external ontology service.
 
-**Result-aware visualization.** The assistant can propose chart encodings; the plotting service validates them against accepted columns, rows, completeness, and result identity. A dedicated plotting-model fallback may still be used for unresolved chart proposals.
+**Result-aware visualization.** The assistant proposes chart encodings; the deterministic plotting service validates accepted columns, rows, completeness and result identity, using local recommendations when needed. No separate plotting-model fallback runs.
 
 See [graph design and limitations](docs/SEMANTIC_GRAPH.md), [Phase 0 evaluation](docs/SEMANTIC_GRAPH_PHASE0.md), [dashboard workflow](docs/AUTONOMOUS_DASHBOARDS.md), and [Dashboard Studio](docs/DASHBOARD_STUDIO.md).
 

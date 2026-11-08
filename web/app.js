@@ -1594,7 +1594,7 @@ async function appendAssistant(body, elapsed, options = {}) {
   const approvedKpis = generation.semantic_contract?.approved_metrics
     || body.state?.semantic_contract?.approved_metrics || [];
   if (accepted && window.QueryflowSemanticExplorer &&
-      (generation.db_id || body.db_id || options.run?.db_id) === 'debit_card_specializing') {
+      (generation.db_id || body.db_id || options.run?.db_id)) {
     const dbId = generation.db_id || body.db_id || options.run?.db_id;
     actions.append(actionButton("View schema relationships", "network", () =>
       openSemanticExplorer({dbId, view: "schema"})));
@@ -3345,6 +3345,7 @@ $("#resetButton").addEventListener("click", async () => {
   if (state.busy) return;
   try {
     await api(`/api/conversations/${encodeURIComponent(sessionId)}/reset`, { method: "POST" });
+    semanticExplorerView?.close();
     $("#messages").replaceChildren();
     state.lastBody = null;
     state.activeRunId = null;

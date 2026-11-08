@@ -57,14 +57,14 @@ test('bounded merge preserves IDs, endpoints and raw metadata without aggregatio
   assert.equal(JSON.stringify(schema.nodes),JSON.stringify([table('orders'),table('customers')]));h.controller.dispose();
 });
 test('three views render through Cytoscape with zero chat/SQL/model routes',async()=>{
-  const log=[],h=harness(metadataApi(log));await h.controller.open();
+  const log=[],h=harness(metadataApi(log));await h.controller.open({view:'schema'});
   assert.equal(h.graphs.at(-1).nodes().length,2);
-  await h.click('KPI dependencies');assert.equal(h.graphs.at(-1).nodes()[0].id(),'metric:net');
-  await h.click('Combined');assert.ok(log.some(path=>path.includes('view=combined')));
+  await h.click('KPI Lineage');assert.equal(h.graphs.at(-1).nodes()[0].id(),'metric:net');
+  await h.click('Combined Graph');assert.ok(log.some(path=>path.includes('view=combined')));
   assert.ok(log.every(path=>path.startsWith('/api/semantic-graph')));h.controller.dispose();
 });
 test('node details are safe text, expansion and collapse retain original tables',async()=>{
-  const h=harness(metadataApi([]));await h.controller.open();
+  const h=harness(metadataApi([]));await h.controller.open({view:'schema'});
   h.graphs.at(-1).getElementById('table:orders').emit('tap');await flush();
   assert.ok(h.mount.textContent.includes('<img src=x onerror=alert(1)>'));
   await h.click('Expand neighbors');assert.equal(h.graphs.at(-1).nodes().length,3);
@@ -72,10 +72,10 @@ test('node details are safe text, expansion and collapse retain original tables'
   h.controller.dispose();
 });
 test('layout positions survive view changes and reopen',async()=>{
-  const h=harness(metadataApi([]));await h.controller.open();
+  const h=harness(metadataApi([]));await h.controller.open({view:'schema'});
   const position={x:120,y:180};
   h.graphs.at(-1).getElementById('table:orders').position('x',120).position('y',180);
-  await h.click('KPI dependencies');await h.click('Schema');
+  await h.click('KPI Lineage');await h.click('Database Schema');
   assert.equal(JSON.stringify(h.graphs.at(-1).getElementById('table:orders').position()),JSON.stringify(position));
   h.controller.close();await h.controller.open();
   assert.equal(JSON.stringify(h.graphs.at(-1).getElementById('table:orders').position()),JSON.stringify(position));h.controller.dispose();
@@ -85,7 +85,7 @@ test('source switch is isolated and stale request cannot replace the new view',a
   const h=harness(metadataApi([],path=>{
     if(path.includes('view=schema')&&!delayedOnce){delayedOnce=true;return delayed;}
   }));
-  const first=h.controller.open();await flush();await h.click('KPI dependencies');
+  const first=h.controller.open({view:'schema'});await flush();await h.click('KPI Lineage');
   release(schema);await first;assert.equal(h.graphs.at(-1).nodes()[0].id(),'metric:net');
   const select=h.mount.querySelectorAll('select')[0];select.value='other';select.listeners.change[0]();await flush();
   assert.equal(select.value,'other');h.controller.dispose();
@@ -103,4 +103,69 @@ test('scoped responsive/theme/reduced-motion rules and navigation are shipped',(
   assert.ok(html.includes('id="semanticExplorerButton"'));assert.ok(html.includes('/static/semantic_explorer.js'));
   assert.ok(app.includes('View KPI lineage'));assert.ok(app.includes('Show dependencies'));
   assert.ok(!source.includes('innerHTML'));assert.ok(!source.includes('/api/chat'));
+});
+test('lineage authority labels never promote candidate paths',()=>{
+  const h=harness(async()=>[]), classify=h.module.lineageAuthority;
+  const approved={kind:'USES_COLUMN',authoritative:true,status:'authoritative'};
+  const suggested={kind:'FILTERED_BY',authoritative:false,status:'suggested'};
+  assert.equal(classify({edges:[]}), 'Lineage unavailable');
+  assert.equal(classify({edges:[approved]}),'Approved lineage');
+  assert.equal(classify({edges:[suggested]}),'Suggested lineage');
+  assert.equal(classify({edges:[approved,suggested]}),'Mixed lineage');h.controller.dispose();
+});
+test('layered layout is deterministic and keeps metrics above physical inputs',()=>{
+  const h=harness(async()=>[]);
+  const graph={nodes:[metric,column,table('orders')],edges:[
+    {source:metric.id,target:column.id,kind:'USES_COLUMN'},
+    {source:'table:orders',target:column.id,kind:'HAS_COLUMN'}]};
+  const positions=h.module.layeredPositions(graph);
+  assert.ok(positions[metric.id].y<positions[column.id].y);
+  assert.ok(positions[column.id].y<positions['table:orders'].y);
+  assert.equal(JSON.stringify(positions),JSON.stringify(h.module.layeredPositions(graph)));
+  h.controller.dispose();
+});
+test('component layouts stay compact and non-overlapping for bounded graph sizes',()=>{
+  const h=harness(async()=>[]);
+  for(const size of [2,6,10,50,120]){
+    const nodes=[table('orders'),...Array.from({length:size-1},(_,i)=>({...metric,id:`metric:${i}`}))];
+    const edges=nodes.slice(1).map(node=>({source:node.id,target:'table:orders',kind:'SOURCE_TABLE'}));
+    const positions=h.module.layeredPositions({nodes,edges});
+    assert.equal(new Set(Object.values(positions).map(p=>`${p.x},${p.y}`)).size,size);
+    assert.ok(Object.values(positions).every(p=>Number.isFinite(p.x)&&Number.isFinite(p.y)));
+    if(size<=6)assert.ok(Math.max(...Object.values(positions).map(p=>p.y))<=260);
+  }
+  h.controller.dispose();
+});
+test('KPI view defaults only when configured metadata has metrics',async()=>{
+  const h=harness(metadataApi([]));await h.controller.open();
+  assert.equal(h.graphs.at(-1).nodes()[0].id(),'metric:net');h.controller.dispose();
+});
+test('opening KPI view populates inspector and expands real physical input edges',async()=>{
+  const log=[];
+  const h=harness(metadataApi(log,path=>{
+    if(path.includes('/nodes/metric'))return {node:metric,relationships:[],warnings:[]};
+    if(path.includes('/neighborhood'))return {nodes:[metric,column,table('orders')],edges:[
+      {id:'uses',source:metric.id,target:column.id,kind:'USES_COLUMN',status:'authoritative'},
+      {id:'has',source:'table:orders',target:column.id,kind:'HAS_COLUMN',status:'authoritative'}],truncated:false};
+  }));
+  await h.controller.open();
+  assert.ok(h.mount.textContent.includes('SUM(amount)'));
+  assert.ok(h.mount.textContent.includes('APPROVED METRIC'));
+  assert.equal(h.graphs.at(-1).edges().length,2);
+  await h.click('Collapse expansion');await flush();
+  assert.equal(h.graphs.at(-1).nodes().length,1);
+  assert.ok(log.every(path=>path.startsWith('/api/semantic-graph')));
+  h.controller.dispose();
+});
+test('simplified cards hide removed controls and preserve truthful status and edge types',async()=>{
+  const h=harness(metadataApi([]));await h.controller.open();
+  for(const text of ['Refresh','Fit graph','Reset layout','+','−','Check selected joins','Node and relationship filters'])
+    assert.ok(!h.findButton(text));
+  const data=h.module.elements({nodes:[{...metric,status:'suggested'}],edges:[{...link,kind:'HAS_COLUMN'}]});
+  assert.ok(data[0].data.label.includes('KPI · v1'));
+  assert.ok(!data[0].data.label.includes('Not reviewed'));
+  assert.ok(!data[0].data.label.includes('Candidate'));
+  assert.equal(data[1].data.label,'has column');
+  assert.equal(h.module.elements({nodes:[],edges:[link]})[0].data.label,'foreign key');
+  assert.ok(!h.mount.textContent.includes('CANDIDATE'));h.controller.dispose();
 });

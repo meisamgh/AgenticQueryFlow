@@ -18,8 +18,6 @@ from semantic_text2sql.semantic_graph import compile_graph
 
 @pytest.fixture
 def explorer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
-    # Exercise the same bounded graph pipeline with a synthetic metadata fixture.
-    monkeypatch.setattr("semantic_text2sql.semantic_explorer_api.EXPLORER_DB_ID", "shop")
     registry, document = fixture(tmp_path)
     catalog = tmp_path / "catalogs"
     catalog.mkdir()
@@ -45,16 +43,16 @@ def explorer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     return client, registry, document, path, model
 
 
-def test_debit_only_boundary_on_every_graph_route(
+def test_configured_datasources_and_rejected_unknown_sources(
     explorer: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client, *_ = explorer
-    monkeypatch.setattr("semantic_text2sql.semantic_explorer_api.EXPLORER_DB_ID",
-                        "debit_card_specializing")
-    assert client.get("/api/semantic-graph/sources").json() == []
-    for route in ("?db_id=shop", "/neighborhood?db_id=shop", "/nodes/table:orders?db_id=shop",
-                  "/lineage?db_id=shop&node_id=metric:net_revenue&direction=upstream",
-                  "/connect?db_id=shop&tables=orders&tables=customers"):
+    assert client.get("/api/semantic-graph/sources").json() == ["shop"]
+    assert client.get("/api/semantic-graph?db_id=shop").status_code == 200
+    for route in ("?db_id=outside", "/neighborhood?db_id=outside",
+                  "/nodes/table:orders?db_id=outside",
+                  "/lineage?db_id=outside&node_id=metric:net_revenue&direction=upstream",
+                  "/connect?db_id=outside&tables=orders&tables=customers"):
         response = client.get("/api/semantic-graph" + route)
         assert response.status_code == 404, response.text
 
@@ -209,3 +207,30 @@ def test_composite_keys_and_cycles_retain_bounded_stable_edges() -> None:
     result = index.graph(node_id="table:a", depth=6, node_limit=3)
     assert len(result.nodes) <= 3 and result.truncated
     assert index.graph().edges[0].child_columns == ["id", "part"]
+
+
+@pytest.mark.parametrize("candidate", [False, True])
+def test_rule_authority_tracks_current_source_metric(explorer: Any, candidate: bool) -> None:
+    client, _, document, path, model = explorer
+    if candidate:
+        metric = next(item for item in document.metrics if item.id == "net_revenue")
+        metric.status, metric.approval = "inferred", None
+        path.write_text(document.model_dump_json())
+    detail = client.get("/api/semantic-graph/nodes/rule:net_revenue:0?db_id=shop").json()
+    assert detail["node"]["status"] == ("suggested" if candidate else "approved")
+    metric = client.get("/api/semantic-graph/nodes/metric:net_revenue?db_id=shop").json()
+    defined = [edge for edge in metric["relationships"]
+               if edge["kind"] in {"GROUPABLE_BY", "FILTERED_BY"}]
+    assert defined and all(edge["status"] == ("suggested" if candidate else "definition")
+                           for edge in defined)
+    expanded = client.get("/api/semantic-graph/neighborhood?db_id=shop&view=kpi"
+                          "&node_id=metric:net_revenue&depth=1").json()
+    assert {"FILTERED_BY", "USES_COLUMN", "HAS_COLUMN"} <= {
+        edge["kind"] for edge in expanded["edges"]}
+    lineage = client.get("/api/semantic-graph/lineage?db_id=shop&view=kpi"
+                         "&node_id=metric:net_revenue&direction=upstream&depth=6").json()
+    assert any(edge["kind"] == "DEPENDS_ON" for edge in lineage["edges"])
+    assert any(edge["authoritative"] for edge in lineage["edges"])
+    if candidate:
+        assert any(edge["status"] == "suggested" for edge in lineage["edges"])
+    assert model.calls == 0

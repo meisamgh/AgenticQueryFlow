@@ -29,3 +29,4 @@ build/
 # Design and specification documents are kept locally, outside version control
 docs/*
 !docs/SEMANTIC_EXPLORER.md
+!docs/V6_4_SPEC.md
