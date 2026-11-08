@@ -1009,7 +1009,7 @@ def ontology_repair_supported(sql: str, claims: list[RecoveryClaim], schema: Sch
 
 
 def ontology_recovery_allowed(failure_code: str) -> bool:
-    return (os.environ.get("TEXT2SQL_ONTOLOGY_RECOVERY_ENABLED", "false").lower() == "true"
+    return (os.environ.get("TEXT2SQL_ONTOLOGY_RECOVERY_ENABLED", "true").lower() == "true"
             and any(term in failure_code.upper() for term in
                     ("SEMANTIC", "METRIC", "JOIN", "CORRECTNESS", "GRAIN"))
             and not any(term in failure_code.upper() for term in

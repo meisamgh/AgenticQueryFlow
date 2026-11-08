@@ -396,9 +396,18 @@ def create_app(
         graph_store=SemanticGraphStore(
             Path(os.environ.get("TEXT2SQL_GRAPH_ROOT", "graphs")),
             persistence_enabled=os.environ.get(
-                "TEXT2SQL_GRAPH_PERSISTENCE_ENABLED", "false").casefold() == "true",
+                "TEXT2SQL_GRAPH_PERSISTENCE_ENABLED", "true").casefold() == "true",
         ),
     )
+    from semantic_text2sql.semantic_explorer_api import semantic_explorer_router
+
+    assert question_service.graph_store is not None
+    app.include_router(semantic_explorer_router(
+        configured_database,
+        lambda: [*sqlite.list_ids(), *(postgres.configured_ids() if postgres else [])],
+        profiles, semantic_catalogs, glossaries, question_service.graph_store,
+    ))
+
     async def prepare_semantic_graphs() -> None:
         if os.environ.get("TEXT2SQL_GRAPH_ENABLED", "true").lower() != "true":
             return

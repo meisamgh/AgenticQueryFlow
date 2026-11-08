@@ -1,5 +1,17 @@
 # Queryflow V6.4 requirement matrix
 
+Explorer extension (2026-11-08): local bounded schema/KPI graph APIs and frontend
+regressions VERIFIED; desktop schema/KPI rendering checked. Production datasource
+authorization BLOCKED; mobile/dark browser QA NOT RUN. This does not promote any
+previously unresolved V6.4 semantic or production requirements. Evidence and
+limits: [SEMANTIC_EXPLORER.md](SEMANTIC_EXPLORER.md).
+
+2026-11-08 user default override: graph grounding/persistence, KPI grounding,
+KPI-first retrieval and local ontology recovery default true. Explicit opt-outs
+remain available. test_semantic_feature_defaults.py and startup-persistence
+regressions verify the defaults; historical default-off notes below are superseded
+only for these features, not for authorization, live integrations or untrained ML.
+
 2026-11-08 filter position audit: CASE/CAST/boolean wrappers cannot certify an
 enforced predicate; only required positive WHERE conjunctions can establish proof.
 Eight new regressions preserve real conjunct proof and explicit uncertainty for

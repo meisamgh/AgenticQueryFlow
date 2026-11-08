@@ -1,8 +1,12 @@
 # Offline graph-enhanced semantic grounding
 
-**Amendment gate:** [Phase 0 findings](SEMANTIC_GRAPH_PHASE0.md) supersede the
-implementation order below. Existing code is retained; resolver ambiguity and
-separate default-OFF persistence changes are pending review, not already complete.
+The metadata-only [Semantic Explorer](SEMANTIC_EXPLORER.md) exposes bounded schema,
+approved KPI lineage and potential impact views over this same snapshot.
+
+**Current defaults (2026-11-08):** graph persistence, KPI grounding, KPI-first
+retrieval and local ontology recovery are enabled at the user's request. Explicit
+false still opts out. Earlier [Phase 0 findings](SEMANTIC_GRAPH_PHASE0.md) describe
+historical gates, not the current default settings.
 
 The existing Top-layer LangGraph assistant remains the only conversational agent.
 Hybrid retrieval still selects schema candidates; optional graph grounding adds
@@ -59,17 +63,20 @@ The graph never edits the semantic catalog or the autonomous KPI registry.
 ## Enable, refresh and offline CLI
 
 ```ini
-TEXT2SQL_GRAPH_ENABLED=false
+TEXT2SQL_GRAPH_ENABLED=true
+TEXT2SQL_GRAPH_PERSISTENCE_ENABLED=true
+TEXT2SQL_KPI_GROUNDING_ENABLED=true
+TEXT2SQL_KPI_FIRST_ENABLED=true
 TEXT2SQL_GRAPH_ROOT=graphs
 TEXT2SQL_SEMANTIC_CATALOG_ROOT=data/semantic_catalogs
-TEXT2SQL_ONTOLOGY_RECOVERY_ENABLED=false
+TEXT2SQL_ONTOLOGY_RECOVERY_ENABLED=true
 ```
 
-Enable graph grounding explicitly after review. The application compiles metadata
+The application compiles metadata
 at startup for registered datasource IDs (schema inspection only; no row sampling).
-It does not compile graphs per question. Metadata changes invalidate a snapshot;
-restart or explicitly rebuild after updating schema, profile, catalog or glossary.
-Missing snapshots do not trigger on-demand construction. Graph-off retains stable
+Metadata changes invalidate a snapshot. KPI-first requests with approved metric
+facts can rebuild a missing compatible snapshot from the already verified metadata;
+other requests use the startup or explicit CLI snapshot. Graph-off retains stable
 legacy bridge tie selection; graph-on rejects equally ranked paths instead.
 
 For exported `SchemaInfo` JSON and optional existing catalog/profile/glossary files:
@@ -158,13 +165,16 @@ Each operation makes zero model and business-database calls. Added governance
 costs more CPU than the original BFS; no speedup is claimed. The raw reproducible
 report is `benchmarks/results/semantic_graph_offline.json`.
 
-## KPI-first grounding (opt-in)
+<a id="kpi-first-grounding-opt-in"></a>
+
+## KPI-first grounding (default-on)
 
 Set `TEXT2SQL_GRAPH_ENABLED=true` and `TEXT2SQL_KPI_FIRST_ENABLED=true`.
-The new flag defaults to false. Existing exact-name grounding, graph-off behavior,
+Both flags default to true. Existing exact-name grounding, explicit graph-off behavior,
 catalog-free databases and v1 LightGBM feature vectors remain compatible.
 `TEXT2SQL_KPI_GROUNDING_ENABLED` and the independent local recovery flag retain
-their existing roles. The actual local .env is not changed by implementation.
+their existing roles. On 2026-11-08 the five semantic flags in the local .env were
+enabled at the user's request; provider/model/key settings were not changed.
 
 The existing approved metric entry accepts optional `aliases`, for example:
 

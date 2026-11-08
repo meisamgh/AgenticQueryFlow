@@ -9,6 +9,16 @@ const state = {
   restorePending: false,
 };
 let voiceInput = null;
+let semanticExplorerView = null;
+function openSemanticExplorer(options = {}) {
+  semanticExplorerView ||= window.QueryflowSemanticExplorer.create({
+    mount: $("#semanticExplorer"), api,
+    defaultDb: () => $("#databaseSelect").value,
+    onOpen: () => setInspectorOpen(false),
+    onClose: () => $("#messageInput").focus(),
+  });
+  return semanticExplorerView.open({dbId: options.dbId || $("#databaseSelect").value, ...options});
+}
 import("/static/voice.js?v=voice-1").then(async ({VoiceInput}) => {
   voiceInput = new VoiceInput({
     button: $("#voiceButton"), cancelButton: $("#voiceCancelButton"),
@@ -1581,6 +1591,18 @@ async function appendAssistant(body, elapsed, options = {}) {
   fragment.querySelector(".result-panel-pane").hidden = sqlNotAvailable || explanatory || plotOnly;
 
   const actions = fragment.querySelector(".answer-actions");
+  const approvedKpis = generation.semantic_contract?.approved_metrics
+    || body.state?.semantic_contract?.approved_metrics || [];
+  if (accepted && window.QueryflowSemanticExplorer &&
+      (generation.db_id || body.db_id || options.run?.db_id) === 'debit_card_specializing') {
+    const dbId = generation.db_id || body.db_id || options.run?.db_id;
+    actions.append(actionButton("View schema relationships", "network", () =>
+      openSemanticExplorer({dbId, view: "schema"})));
+    approvedKpis.slice(0, 4).forEach(metric => {
+      actions.append(actionButton(`View KPI lineage · ${metric.id}`, "network", () =>
+        openSemanticExplorer({dbId, view: "kpi", nodeId: `metric:${metric.id}`})));
+    });
+  }
   if (accepted && !explanatory && !sqlNotAvailable && !plotOnly) {
     const sqlActions = fragment.querySelector(".sql-actions");
     const runId = body.run_id || options.run?.run_id || null;
@@ -2077,6 +2099,11 @@ function renderInspectorSchema() {
   const context = generation?.model_context || {};
   const rawTables = context.tables || context.execution_context?.tables || {};
   const names = Object.keys(rawTables);
+  if (names.length && window.QueryflowSemanticExplorer) {
+    detail.append(actionButton("Show dependencies", "network", () => openSemanticExplorer({
+      dbId: generation.db_id, view: "schema", nodeId: `table:${names[0]}`,
+    })));
+  }
   graphBox.replaceChildren();
   if (!names.length && !browserTables.length) {
     graphBox.append(emptyNote("The verified tables used by the current query appear here."));
@@ -3333,9 +3360,12 @@ $("#resetButton").addEventListener("click", async () => {
 
 initialize();
 
+$("#semanticExplorerButton")?.addEventListener("click", () => openSemanticExplorer());
+
 document.querySelectorAll(".side-nav a[data-view]").forEach(link => {
   link.addEventListener("click", event => {
     event.preventDefault();
+    semanticExplorerView?.close();
     $("#messageInput").focus();
   });
 });

@@ -179,7 +179,7 @@ class TextToSQLService:
         catalog_relationships: list[ContextRelationship] = []
         graph_enabled = os.environ.get("TEXT2SQL_GRAPH_ENABLED", "true").lower() == "true"
         metric_grounding = (graph_enabled or bool(contract.approved_metrics)
-                            or os.environ.get("TEXT2SQL_KPI_GROUNDING_ENABLED", "false").lower()
+                            or os.environ.get("TEXT2SQL_KPI_GROUNDING_ENABLED", "true").lower()
                             == "true")
         try:
             catalog = (self.semantic_catalogs.load(db_id)
@@ -189,7 +189,7 @@ class TextToSQLService:
             catalog = None
         metric_facts: list[dict[str, Any]] = []
         kpi_first = (graph_enabled and os.environ.get(
-            "TEXT2SQL_KPI_FIRST_ENABLED", "false").casefold() == "true")
+            "TEXT2SQL_KPI_FIRST_ENABLED", "true").casefold() == "true")
         glossary = self.glossaries.load(db_id)
         if metric_grounding:
             try:

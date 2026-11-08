@@ -584,7 +584,7 @@ def test_ontology_definitions_do_not_authorize_unproven_repairs() -> None:
     assert not ontology_repair_supported("SELECT ???", claims, _schema())
 
 
-@pytest.mark.parametrize("persist", [False, True])
+@pytest.mark.parametrize("persist", [None, False, True])
 def test_application_startup_builds_metadata_graph_without_queries(
     tmp_path, monkeypatch, persist,
 ) -> None:
@@ -597,7 +597,10 @@ def test_application_startup_builds_metadata_graph_without_queries(
 
     registry = _registry(tmp_path)
     monkeypatch.setenv("TEXT2SQL_GRAPH_ENABLED", "true")
-    monkeypatch.setenv("TEXT2SQL_GRAPH_PERSISTENCE_ENABLED", str(persist).lower())
+    if persist is None:
+        monkeypatch.delenv("TEXT2SQL_GRAPH_PERSISTENCE_ENABLED", raising=False)
+    else:
+        monkeypatch.setenv("TEXT2SQL_GRAPH_PERSISTENCE_ENABLED", str(persist).lower())
     monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(tmp_path))
     monkeypatch.setenv("TEXT2SQL_GRAPH_ROOT", str(tmp_path / "graphs"))
     monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
@@ -628,7 +631,7 @@ def test_application_startup_builds_metadata_graph_without_queries(
         assert client.get("/").status_code == 200
     identity = graph_identity(registry.inspect("shop"))
     assert captured["shop"].load("shop", identity=identity) is not None
-    if persist:
+    if persist is not False:
         assert SemanticGraphStore(tmp_path / "graphs").load("shop", identity=identity) is not None
     else:
         assert not (tmp_path / "graphs").exists()

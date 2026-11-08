@@ -23,10 +23,12 @@ https://github.com/user-attachments/assets/cea65003-e31e-4846-a532-904ffcb6e25f
 
 ## What you can do
 
+- Explore tables, relationships and approved KPI dependencies in the local **Semantic Explorer**. Search, expand neighborhoods, inspect upstream lineage and potential downstream impact without SQL execution or model calls.
+
 - **Ask and refine questions.** A LangGraph assistant selects governed tools, maintains conversation context, and supports follow-ups, corrections, explanations, and investigations.
 - **Generate grounded SQL.** Hybrid schema retrieval combines BM25, embeddings, value matching, and optional reranking with business glossary definitions and verified metadata.
 - **Use governed business metrics.** An approved semantic catalog can ground formulas, dependencies, filters, and join relationships. NetworkX graph grounding is enabled by default and expands relevant relationships without another LLM call.
-- **Opt into KPI-first grounding.** `TEXT2SQL_KPI_FIRST_ENABLED=true` resolves approved aliases, pins metric dependencies before retrieval, and checks mandatory joins. It is off by default; [configuration, example and measured limits](docs/SEMANTIC_GRAPH.md#kpi-first-grounding-opt-in).
+- **Use KPI-first grounding.** Enabled by default, it resolves approved aliases, pins metric dependencies before retrieval, and checks mandatory joins. [Configuration, example and measured limits](docs/SEMANTIC_GRAPH.md#kpi-first-grounding-default-on).
 - **Inspect safe query execution.** SQLGlot checks, source/table allowlists, row limits, timeouts, and request budgets constrain generated queries.
 - **Recover with evidence.** A bounded Recovery Agent investigates detected failures, empty results, unexpected NULLs, and explicit correctness reviews. An optional *local* ontology lookup provides approved semantic evidence; it is not an external ontology service.
 - **Explore interactive charts.** Chart proposals are validated against complete accepted results. Plotly renders charts, with an ECharts fallback. Chart-only changes can reuse existing results without regenerating SQL.

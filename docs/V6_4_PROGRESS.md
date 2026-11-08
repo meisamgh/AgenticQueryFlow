@@ -1,5 +1,37 @@
 # V6.4 progress checkpoint
 
+## 2026-11-08 — Local Semantic Explorer
+
+Implemented bounded metadata GET routes and a vendored Cytoscape frontend over
+the existing NetworkX graph. Schema/KPI/combined views, safe details, lazy expansion,
+lineage/impact, search, join connectivity and context links are tested. No new SQL
+execution, model calls or accepted-state mutations. Local regression: 946 Python
+passed, 2 PostgreSQL skipped; 218 frontend passed; Ruff/mypy passed. Desktop browser
+rendering checked; remote tenant authorization and full mobile visual QA remain
+unverified/blocked as detailed in [SEMANTIC_EXPLORER.md](SEMANTIC_EXPLORER.md).
+
+## 2026-11-08 — Semantic features enabled by default
+
+User explicitly requested all new features true. Enabled graph persistence,
+catalog KPI grounding, KPI-first retrieval and local ontology recovery in runtime
+fallbacks and .env.example; graph grounding was already default-on. Added all five
+true semantic flags to the ignored local .env without touching provider/model/key
+settings. Explicit false still disables each feature. No inactive/untrained v2
+ranker, duplicate legacy router, admin execution or external sharing was enabled;
+unavailable identity infrastructure is not fabricated by a flag.
+
+test_semantic_feature_defaults.py verifies missing-variable KPI/alias execution
+with one scripted SQL call and local recovery/persistence defaults plus explicit
+opt-out. Application-startup graph persistence now also tests missing-variable
+default behavior with real temporary snapshot storage and zero business queries
+or model calls. Targeted graph/default checks: 34 passed (0.36s). README and graph
+configuration instructions now describe the actual defaults. Full Python:
+933 passed / 2 dedicated PostgreSQL skipped (35.18s); frontend/voice: 211 passed
+(815ms); Ruff, mypy src / configured mypy (73 files) and git diff --check pass.
+No live-provider, remote-database or browser verification claimed.
+No server restart, commit or push; existing running servers need restart to load
+the edited .env. Graph files contain metadata, not business rows.
+
 ## 2026-11-08 — Predicate position proof and publishing checkpoint
 
 Seven failing reproductions exposed false filter proof from comparisons nested

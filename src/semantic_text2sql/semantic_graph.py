@@ -19,7 +19,7 @@ from semantic_text2sql.graph_grounding import resolve_metrics
 from semantic_text2sql.models import DatabaseProfile, SchemaInfo, SemanticContract, StrictModel
 from semantic_text2sql.semantic_catalog import CatalogDocument, schema_fingerprint
 
-BUILDER_VERSION = "1"
+BUILDER_VERSION = "2"
 
 
 def digest(value: Any) -> str:
@@ -66,7 +66,7 @@ class GraphEdge(StrictModel):
 
 class GraphSnapshot(StrictModel):
     db_id: str
-    builder_version: Literal["1"] = "1"
+    builder_version: Literal["1", "2"] = "2"
     identity: str
     schema_fingerprint: str
     catalog_version: int | None = None
@@ -172,6 +172,12 @@ def compile_graph(
             "TABLE",
             relation=table.name,
             primary_key=[col.name for col in table.columns if col.primary_key],
+            description=next((entity.description for entity in catalog.entities
+                              if entity.relation == table.name), None) if catalog and (
+                                  catalog.metadata_status not in {"stale", "conflicting"}
+                                  and (not catalog.schema_fingerprint or
+                                       catalog.schema_fingerprint == schema_fingerprint(schema))
+                              ) else None,
             grain=(
                 observed.grain
                 if observed
@@ -189,6 +195,7 @@ def compile_graph(
                 column=col.name,
                 type=col.data_type,
                 primary_key=col.primary_key,
+                nullable=col.nullable,
             )
             edge(tid, cid, "HAS_COLUMN", "live_schema", True)
 
@@ -270,6 +277,8 @@ def compile_graph(
                     predicate=predicate.model_dump(mode="json"),
                 )
                 edge(mid, rid, "FILTERED_BY", "semantic_catalog")
+                edge(rid, f"column:{predicate.operand}", "USES_COLUMN", "semantic_catalog",
+                     current_catalog and metric.status == "approved" and valid)
         for entity in catalog.entities:
             for column, definition in entity.columns.items():
                 cid = f"column:{entity.relation}.{column}"

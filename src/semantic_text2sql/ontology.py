@@ -111,7 +111,7 @@ def configured_local_ontology(
         SemanticGraphStore(
             Path(os.environ.get("TEXT2SQL_GRAPH_ROOT", "graphs")),
             persistence_enabled=os.environ.get(
-                "TEXT2SQL_GRAPH_PERSISTENCE_ENABLED", "false").casefold() == "true",
+                "TEXT2SQL_GRAPH_PERSISTENCE_ENABLED", "true").casefold() == "true",
         ),
         GlossaryStore(Path(os.environ.get("TEXT2SQL_GLOSSARY_ROOT", "data/business_glossaries"))),
     )
