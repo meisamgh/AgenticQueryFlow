@@ -86,7 +86,7 @@ def resolve_semantic_contract(
                 values["output_grain"].append(replacement)
             values["requires_grouping"] = True
         elif change.operation == "REMOVE_DIMENSION":
-            for field in ("grain", "output_grain"):
+            for field in ("grain", "output_grain", "outputs"):
                 values[field] = [
                     item for item in values[field] if item.casefold() != target.casefold()
                 ]
@@ -265,6 +265,44 @@ def resolve_semantic_contract(
             continue
         else:
             raise ValueError(f"Unsupported or incomplete contract change: {change.operation}.")
+    if base.kpi_grounding and any(change.operation in {
+        "CHANGE_METRIC", "CHANGE_GRAIN", "ADD_DIMENSION", "REMOVE_DIMENSION",
+        "ADD_FILTER", "REMOVE_FILTER", "REPLACE_FILTER", "COMPARE", "CHANGE_PERIOD",
+    } for change in changes):
+        # Grounding is derived from the accepted analysis, not an independent
+        # source of requirements. Rebuild it after an analytical delta so old
+        # metric roots and bridge keys cannot resurrect superseded constraints.
+        obsolete = {column.casefold() for column in base.kpi_grounding.requested_dimensions}
+        obsolete.update(item.operand.casefold() for item in [*base.filters,
+                                                            *base.temporal_boundaries])
+        for relationship in base.kpi_grounding.required_relationships:
+            for side in ("child", "parent"):
+                table = relationship[f"{side}_table"]
+                obsolete.update(f"{table}.{column}".casefold()
+                                for column in relationship[f"{side}_columns"])
+        protected = {
+            *values["grain"], *values["output_grain"], *values["outputs"],
+            *[item["operand"] for item in [*values["filters"],
+                                         *values["temporal_boundaries"],
+                                         *values["mandatory_metric_filters"]]],
+            *[f"{metric['source_relation']}.{column}" for metric in values["approved_metrics"]
+              for column in metric["required_fields"]],
+            *[argument for formula in values["structural_formulas"]
+              for argument in formula["arguments"]],
+        }
+        retained = {item.casefold() for item in protected}
+        values["required_columns"] = [column for column in values["required_columns"]
+                                      if column.casefold() not in obsolete
+                                      or column.casefold() in retained]
+        # Metric identity is an unaffected accepted constraint on grouping/filter
+        # changes. Keep roots separately from the invalidated derived facts;
+        # otherwise a large dependency closure could be mistaken for many roots.
+        values["kpi_grounding"] = (None if any(
+            change.operation == "CHANGE_METRIC" for change in changes
+        ) else {
+            "resolution": base.kpi_grounding.resolution.model_dump(),
+            "catalog_version": base.kpi_grounding.catalog_version,
+        })
     active_period = values.get("active_period")
     if isinstance(active_period, str) and re.fullmatch(r"\d{4}", active_period):
         comparison_years = {

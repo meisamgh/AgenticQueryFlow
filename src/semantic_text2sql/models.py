@@ -272,7 +272,7 @@ class ApprovedMetricDefinition(StrictModel):
 
 
 type KPIMatchMethod = Literal[
-    "exact_id", "exact_label", "approved_alias", "glossary_alias", "retrieval"
+    "exact_id", "exact_label", "approved_alias", "glossary_alias", "retrieval", "accepted_state"
 ]
 
 

@@ -32,6 +32,7 @@ from semantic_text2sql.models import (
     GenerateRequest,
     GenerateResponse,
     HistoricalExample,
+    KPICandidate,
     ModelProvider,
     PipelineTelemetry,
     PlannerMetadataRequirement,
@@ -205,8 +206,19 @@ class TextToSQLService:
                 )
                 if kpi_resolution and catalog:
                     if not kpi_resolution.selected_ids and contract.approved_metrics:
-                        kpi_resolution.selected_ids = [m.id for m in contract.approved_metrics]
-                    grounding = build_kpi_grounding(kpi_resolution, contract, catalog, question)
+                        kpi_resolution.selected_ids = (
+                            list(contract.kpi_grounding.resolution.selected_ids)
+                            if contract.kpi_grounding else [m.id for m in contract.approved_metrics]
+                        )
+                        kpi_resolution.status = "RESOLVED"
+                        kpi_resolution.candidates = [KPICandidate(
+                            metric_id=key, method="accepted_state",
+                            source="accepted_semantic_contract",
+                            evidence=["Accepted identity revalidated against the current catalog"],
+                            score=1, authoritative_identity=True,
+                        ) for key in kpi_resolution.selected_ids]
+                    grounding = build_kpi_grounding(kpi_resolution, contract, catalog, question,
+                                                   schema=schema)
                     contract = contract.model_copy(update={
                         "kpi_grounding": grounding,
                         "required_columns": grounding.mandatory_columns,

@@ -1,5 +1,138 @@
 # V6.4 progress checkpoint
 
+## 2026-11-08 — Predicate position proof and publishing checkpoint
+
+Seven failing reproductions exposed false filter proof from comparisons nested
+inside CASE, CAST, IS FALSE, COALESCE or another equality, hidden BETWEEN bounds,
+and a false rejection of a negated alternate operator. _filter_findings now only
+certifies an atomic predicate required by its WHERE conjunction (through AND and
+parentheses). Wrapped/disjunctive/negated comparisons remain UNRESOLVED rather
+than proof. Separate genuine conjuncts still establish the mandatory condition
+even if an unrelated wrapped comparison also exists. This does not implement a
+general boolean-equivalence solver or change the handling of UNRESOLVED results.
+
+Source: validator.py; test_filter_predicate_positions.py adds eight cases.
+Targeted predicate/output/semantic/KPI suite: 92 passed (0.50s). Full Python:
+929 passed / 2 dedicated PostgreSQL skipped (21.75s); frontend/voice 211 passed
+(716ms). Ruff, mypy src / configured mypy (73 files), and git diff --check pass.
+No live-provider, real remote-database or browser QA was performed. User explicitly
+requested network access and GitHub publication; fetch succeeded. This publishing
+checkpoint includes the verified KPI delta/filter/output/projection fixes.
+No .env, credentials, local business databases or screenshots added.
+
+## 2026-11-07 — Final physical-output projection proof
+
+Twelve initial cases failed: explicit physical outputs had no final-projection
+gate, so a field used only in WHERE, GROUP BY, an unused CTE or a fabricated
+literal alias could escape the output contract. validate_sql_semantics now reuses
+its existing bounded output lineage and verified physical metadata to inspect
+qualified contract.outputs. Direct physical projections and simple renamed CTE
+projections pass; proven omissions fail with REQUIRED_PHYSICAL_OUTPUT_MISSING.
+Aggregated/transformed inputs, wildcard/union/quoted scopes, unavailable source
+evidence and unsupported verified identifier syntax remain UNRESOLVED, not
+false PASS or mandatory raw-column insertion.
+
+Source: validator.py; test_physical_output_validation.py has 16 acceptance cases.
+Real SQLite agent tests show an omitted field fails before any execution, one
+attempt stays unaccepted, and the existing two-attempt repair returns customer
+names without executing the wrong country-only candidate. No new SQL/model
+stage, change to raw results, or relaxation of SQL safety. Targeted output/
+semantic/KPI suite: 83 passed (0.49s) before the final identifier-syntax test.
+Full Python: 921 passed / 2 dedicated PostgreSQL skipped (56.52s).
+Frontend/voice: 211 passed (826ms); Ruff, mypy src / configured mypy (73 files)
+and git diff --check pass. No live provider/database or browser QA; no measured
+latency improvement claimed. Prior local KPI/delta/filter fixes preserved.
+No commit, push, restart or local .env change; broader audit remains active.
+
+## 2026-11-07 — Explicit KPI outputs and multi-root grouping compatibility
+
+Two tests failed before fixes: a live explicitly requested physical output was
+absent from pinned schema, and two independently requested KPIs could use a
+dimension supported by only one root. KPI grounding now pins live physical
+outputs, excludes derived aliases from physical inputs and rejects unknown
+qualified output columns. Output pinning does not invent a grouping instruction.
+Grouping support is intersected across requested roots, not unioned across the
+dependency closure; unsupported combined grain fails explicitly before SQL.
+
+Related continuation repair: when a follow-up has no fresh explicit KPI match,
+the service retains the accepted root IDs rather than promoting every dependency
+to a requested output. Structured provenance is accepted_state only after current
+catalog revalidation; semantic similarity still cannot certify identity.
+The real SQLite generic follow-up test executes the original total, then groups
+the same net-revenue metric by department, returning A / 135.0 with two scripted
+SQL calls across two turns and no resolution model. No old accepted state changes.
+
+Source: kpi_resolution.py, service.py, models.py; three additional test cases in
+test_kpi_first.py, now 49 cases. Targeted KPI suite: 49 passed (0.62s), before
+line-length-only cleanup. Full Python: 905 passed / 2 dedicated PostgreSQL skipped
+(73.31s); frontend/voice 211 passed (1s). Ruff, mypy src / configured mypy
+(73 files), and git diff --check pass. No live database/provider or browser QA.
+Current local delta
+and filter fixes remain preserved; no further commit, push, restart or .env change.
+No production benchmark or general business-correctness proof claimed. Broader
+audit remains active.
+Next candidate: confirm explicit physical output columns are actually projected,
+not merely retrieved; reproduce before changing semantic projection validation.
+
+## 2026-11-07 — KPI filter dependencies before joins and after removal
+
+Three new cases failed before fixes: a live user-filter column was not pinned
+before KPI join planning, and REMOVE_FILTER retained obsolete column/bridge
+requirements (with and without an active grouping). build_kpi_grounding now
+includes current live physical filter/temporal operands before ranking and join
+resolution. The service supplies its existing verified schema; direct callers
+can use catalog-declared columns. Unknown qualified physical filter columns
+produce KPI_FILTER_COLUMN_UNAVAILABLE instead of being silently omitted.
+
+The typed delta resolver rebuilds derived grounding on filter, comparison and
+period changes as well as grouping changes. Removed filter/time operands and
+old join keys are released only when no active output, grouping, filter,
+mandatory metric input or structural formula still needs them. Approved root
+identity and accepted state isolation remain intact.
+
+Five additional cases in test_kpi_first.py: filter pinning, removal with/without
+retained grouping, real SQLite filtered → unfiltered execution and temporal/
+unavailable-column handling. The real SQLite test returns synthetic 135.0 for
+department A, then 225.0 overall with only orders selected. Two analytical turns
+use two scripted SQL calls; no additional resolution model or exploratory SQL.
+Targeted filter suite: 8 passed (0.22s); broader KPI/conversation checks passed
+before the final two added acceptance cases. Final Python suite: 902 passed /
+2 dedicated PostgreSQL skipped (44.11s). Frontend/voice: 211 passed (775ms).
+Ruff, mypy src / configured mypy (73 files), and git diff --check pass.
+Live providers, real remote databases and browser QA were not run; no measured
+latency improvement is claimed.
+
+Changes remain local, including the previous delta fixes. No further commit,
+push, restart, .env change, real business-data or provider call. Broader audit
+and full semantic/authorization gates remain open.
+
+## 2026-11-07 — KPI follow-up derived-state invalidation
+
+After published 9e0606f, three targeted cases reproduced two defects: CHANGE_METRIC
+reintroduced the old KPI through prior grounding roots, and REMOVE_DIMENSION kept
+obsolete dimension/bridge requirements. The typed delta resolver now removes the
+dimension from explicit outputs, drops obsolete KPI dimension/join-key dependencies
+only when not needed by active outputs, filters, time boundaries, metric inputs or
+structural formulas, and invalidates derived grounding. Metric changes clear the
+old root identity; grouping-only changes retain identity/version in a minimal
+grounding shell, so a six-metric closure is not mistaken for six requested roots.
+Catalog definitions are still revalidated before generation.
+
+Source: conversation.py. Five new test cases in test_kpi_first.py cover metric
+replacement, grouping removal with/without a retained filter, real SQLite
+grouped → total execution with obsolete bridge removal, and large-closure root
+continuity. Deep-copy assertions preserve accepted state. The real follow-up
+retains net revenue / complete-status semantics, returns 135.0 and selects only
+orders; two scripted SQL calls serve the two analytical turns, with no extra
+resolution model. Targeted KPI/conversation suite: 66 passed (1.50s).
+
+Full Python: 897 passed / 2 dedicated PostgreSQL skipped (40.12s).
+Frontend/voice: 211 passed (766ms); Ruff, mypy src / configured mypy (73 files)
+and git diff --check pass. Live providers, real PostgreSQL/remote engines and
+browser QA were not rerun; no latency improvement claimed.
+Changes remain local; no further commit, push,
+restart, local .env change or external inference. Broader audit remains active.
+
 ## 2026-11-07 — KPI-first semantic grounding task
 
 Pre-implementation checkpoint: 2a9740a. User requested commit-before and

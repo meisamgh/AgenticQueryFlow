@@ -274,6 +274,7 @@ def validate_sql_semantics(
                 evidence=f"Required output alias {required!r} is present.",
             ))
     output_lineage = ExpressionLineage(root, verified_context).output_expressions()
+    findings.extend(_physical_output_findings(root, contract, output_lineage, verified_context))
     aggregates = {type(node) for output in output_lineage if output is not None
                   for node in output.find_all(exp.AggFunc)}
     expected: dict[str, type[exp.AggFunc]] = {
@@ -338,6 +339,64 @@ def validate_sql_semantics(
             code=("DISTINCT_PRESENT" if final_distinct or counted_distinct
                   else "DISTINCT_NOT_OBVIOUS"),
             evidence="Checked DISTINCT in the final output lineage, not unrelated CTEs.",
+        ))
+    return findings
+
+
+def _physical_output_findings(
+    root: exp.Expression, contract: SemanticContract,
+    outputs: list[exp.Expression | None], context: dict[str, object] | None,
+) -> list[SemanticFinding]:
+    """Explicit physical outputs must reach the final projection, not just a scan."""
+    tables = (context or {}).get("tables", {})
+    known = {f"{table}.{column}".casefold() for table, metadata in tables.items()
+             if isinstance(metadata, dict) for column in metadata.get("columns", {})} if (
+                 isinstance(tables, dict)) else set()
+    wildcard = False
+    if isinstance(root, exp.Query):
+        for item in root.selects:
+            projection = item.this if isinstance(item, exp.Alias) else item
+            wildcard |= isinstance(projection, exp.Star) or (
+                isinstance(projection, exp.Column) and isinstance(projection.this, exp.Star))
+    findings: list[SemanticFinding] = []
+    for requirement in dict.fromkeys(contract.outputs):
+        try:
+            expected = sqlglot.parse_one(requirement)
+        except (ParseError, TokenError):
+            expected = None
+        if (not isinstance(expected, exp.Column) or not expected.table
+                or isinstance(expected.this, exp.Star)):
+            if requirement.casefold() in known:
+                findings.append(SemanticFinding(
+                    status="UNRESOLVED", code="REQUIRED_PHYSICAL_OUTPUT_UNPROVEN",
+                    evidence="The verified physical output identifier needs dialect-aware proof.",
+                ))
+            continue
+        key = expression_key(expected)
+        physical = ".".join(part.name for part in expected.parts).casefold()
+        exact = any(isinstance(item, exp.Column) and expression_key(item) == key
+                    for item in outputs)
+        transformed = any(item is not None and any(expression_key(column) == key
+                                                   for column in item.find_all(exp.Column))
+                          for item in outputs)
+        status: Literal["PASS", "FAIL", "UNRESOLVED"]
+        if physical not in known:
+            status = "UNRESOLVED"
+        elif exact:
+            status = "PASS"
+        elif transformed or wildcard or not outputs or any(item is None for item in outputs):
+            status = "UNRESOLVED"
+        else:
+            status = "FAIL"
+        findings.append(SemanticFinding(
+            status=status,
+            code="REQUIRED_PHYSICAL_OUTPUT_PRESENT" if status == "PASS" else
+                 "REQUIRED_PHYSICAL_OUTPUT_MISSING" if status == "FAIL" else
+                 "REQUIRED_PHYSICAL_OUTPUT_UNPROVEN",
+            evidence=f"Final projection of {requirement}: " + (
+                "verified physical lineage." if status == "PASS" else
+                "absent from resolved output expressions." if status == "FAIL" else
+                "source or transformation equivalence needs additional proof."),
         ))
     return findings
 
@@ -674,6 +733,7 @@ def _filter_findings(
     lineage = ExpressionLineage(root, verified_context)
     context_tables = verified_context.get("tables", {}) if verified_context else {}
     predicates = []
+    guaranteed: set[int] = set()
     for scope in lineage.reachable():
         where = scope.expression.args.get("where")
         if not isinstance(where, exp.Where):
@@ -683,6 +743,11 @@ def _filter_findings(
                                   exp.In, exp.Between))
                     and node.find_ancestor(exp.Select) is scope.expression):
                 predicates.append((node, scope))
+                parent = node.parent
+                while parent is not where and isinstance(parent, exp.And | exp.Paren):
+                    parent = parent.parent
+                if parent is where:
+                    guaranteed.add(id(node))
     for required, temporal in [
         *((item, False) for item in contract.filters),
         *((item, False) for item in contract.mandatory_metric_filters),
@@ -720,6 +785,7 @@ def _filter_findings(
             ):
                 continue
             relevant.append(node)
+            unknown_operand |= id(node) not in guaranteed
             if not all(isinstance(value, exp.Literal) for value in values) or not values:
                 unknown_operand = True
                 continue
@@ -727,7 +793,7 @@ def _filter_findings(
             if (observed != requested and [value.casefold() for value in observed]
                     == [value.casefold() for value in requested]):
                 unknown_operand = True  # Collation/canonical-value proof is not in this context.
-            if not node.find_ancestor(exp.Or, exp.Not) and len(requested) == 2:
+            if id(node) in guaranteed and len(requested) == 2:
                 if operator == ">=" and observed == [requested[0]]:
                     bounds.setdefault((id(scope), "lower"), []).append(node)
                 if operator == "<=" and observed == [requested[1]]:
@@ -747,6 +813,9 @@ def _filter_findings(
                 if lower and upper:
                     matches.extend([*lower, *upper])
         if matches:
+            direct_matches = [node for node in matches if id(node) in guaranteed]
+            if direct_matches:
+                matches = direct_matches
             ambiguous = (
                 required_table is None and isinstance(context_tables, dict)
                 and sum(
@@ -757,7 +826,7 @@ def _filter_findings(
             )
             status: Literal["PASS", "UNRESOLVED"] = (
                 "UNRESOLVED"
-                if ambiguous or any(node.find_ancestor(exp.Or, exp.Not) for node in matches)
+                if ambiguous or any(id(node) not in guaranteed for node in matches)
                 or (any(root.find_all(exp.Join))
                     and any(node.find_ancestor(exp.Select) is not root for node in matches))
                 else "PASS"

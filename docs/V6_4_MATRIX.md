@@ -1,5 +1,34 @@
 # Queryflow V6.4 requirement matrix
 
+2026-11-08 filter position audit: CASE/CAST/boolean wrappers cannot certify an
+enforced predicate; only required positive WHERE conjunctions can establish proof.
+Eight new regressions preserve real conjunct proof and explicit uncertainty for
+unsupported wrappers. General boolean and cross-scope equivalence remain open.
+
+2026-11-07 final output audit: explicit qualified physical outputs are checked
+against final scoped lineage, not just retrieved/filter/grouping columns. New
+tests distinguish provable omission, valid renamed/CTE projection and unsupported
+transformation/wildcard/scope proof, and verify execution is blocked before repair.
+General output expression equivalence and business correctness remain unproven.
+
+2026-11-07 KPI output/root audit: explicit physical outputs are pinned and invalid
+identifiers fail before generation; combined roots require shared dimension
+support. Generic follow-ups preserve requested roots with revalidated accepted
+provenance rather than projecting the whole dependency closure. Three regressions
+in test_kpi_first.py support these local claims, not overall semantic completion.
+
+2026-11-07 KPI filter audit: live user filter/time operands enter mandatory schema
+requirements before graph planning; removed filter/period dependencies invalidate
+derived joins while preserving active constraints. New real SQLite and typed
+delta regressions are in test_kpi_first.py; the whole ContractDelta matrix and
+general semantic correctness remain IN_PROGRESS.
+
+2026-11-07 KPI delta audit: conversation.py invalidates superseded derived
+grounding while preserving unaffected metric root identity and active column
+requirements. Five additional KPI follow-up regressions cover metric switching,
+dimension removal, filter retention, real SQLite execution and closure continuity.
+This is not a claim that the full ContractDelta or semantic matrix is complete.
+
 2026-11-07 KPI-first opt-in: implementation and phase evidence are recorded at
 the top of V6_4_PROGRESS.md and in SEMANTIC_GRAPH.md. test_kpi_first.py covers
 36 local acceptance cases. The new flag is false by default; complex formula,

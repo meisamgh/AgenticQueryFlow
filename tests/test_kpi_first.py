@@ -1,6 +1,7 @@
 """KPI-first acceptance: governed identity, closure, graph, SQL and ML boundaries."""
 import asyncio
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,6 +12,7 @@ from test_semantic_catalog import APPROVAL, _registry
 from test_semantic_graph import approved_document, join_schema
 
 from semantic_text2sql.agent import TextToSQLAgent
+from semantic_text2sql.conversation import resolve_semantic_contract
 from semantic_text2sql.glossary import BusinessGlossary, GlossaryStore
 from semantic_text2sql.graph_grounding import resolve_metrics
 from semantic_text2sql.historical import HistoricalQueryStore
@@ -23,7 +25,7 @@ from semantic_text2sql.hybrid_retrieval import (
 )
 from semantic_text2sql.join_resolver import resolve_joins
 from semantic_text2sql.kpi_resolution import build_kpi_grounding, resolve_kpi_candidates
-from semantic_text2sql.models import SchemaInfo, SemanticContract, SemanticFilter
+from semantic_text2sql.models import RequestedChange, SchemaInfo, SemanticContract, SemanticFilter
 from semantic_text2sql.profiling import ProfileStore
 from semantic_text2sql.semantic_catalog import (
     CatalogDocument,
@@ -496,3 +498,253 @@ def test_dimension_mention_is_not_an_instruction_to_group(tmp_path: Path) -> Non
     contract.original_question = "Remove the department grouping"
     assert build_kpi_grounding(resolution, contract, document,
                                "do not group by department").requested_dimensions == []
+
+
+def test_metric_change_does_not_reintroduce_previous_kpi(tmp_path: Path) -> None:
+    registry, document = fixture(tmp_path)
+    schema = registry.inspect("shop")
+    resolution = resolve_kpi_candidates("net_revenue", schema, document)
+    accepted, _ = resolve_metrics("net_revenue", schema, document, SemanticContract())
+    accepted.kpi_grounding = build_kpi_grounding(resolution, accepted, document, "net_revenue")
+    changed = resolve_semantic_contract(
+        accepted, original_question="Use refunds instead", resolved_question="Refunds",
+        changes=[RequestedChange(operation="CHANGE_METRIC", target="metric", new_value="refunds")],
+    )
+    resolved, _ = resolve_metrics("Refunds", schema, document, changed, metric_ids=["refunds"])
+    assert {metric.id for metric in resolved.approved_metrics} == {"refunds"}
+    assert resolved.mandatory_metric_filters == []
+    assert accepted.kpi_grounding.resolution.selected_ids == ["net_revenue"]
+
+
+@pytest.mark.parametrize("keep_dimension_filter", [False, True])
+def test_removing_grouping_drops_only_obsolete_kpi_dimension_dependencies(
+    tmp_path: Path, keep_dimension_filter: bool,
+) -> None:
+    _, accepted = grounded(tmp_path)
+    old = accepted.kpi_grounding
+    assert old
+    accepted.grain = accepted.output_grain = ["departments.name"]
+    accepted.outputs = ["departments.name", "net_revenue"]
+    accepted.required_columns = [*old.mandatory_columns, "orders.customer_id", "customers.id",
+                                 "customers.department_id", "departments.id"]
+    old.required_relationships = [{
+        "child_table": "customers", "child_columns": ["department_id"],
+        "parent_table": "departments", "parent_columns": ["id"],
+    }]
+    if keep_dimension_filter:
+        accepted.filters = [SemanticFilter(operand="departments.name", operator="=", value="A")]
+    changed = resolve_semantic_contract(
+        accepted, original_question="Remove grouping", resolved_question="Net revenue total",
+        changes=[RequestedChange(operation="REMOVE_DIMENSION", target="departments.name")],
+    )
+    assert changed.grain == changed.output_grain == []
+    assert changed.outputs == ["net_revenue"]
+    assert ("departments.name" in changed.required_columns) == keep_dimension_filter
+    assert "departments.id" not in changed.required_columns
+    assert "orders.amount" in changed.required_columns
+    assert "orders.refund_amount" in changed.required_columns
+    assert changed.kpi_grounding is not None
+    assert changed.kpi_grounding.resolution == old.resolution
+    assert changed.kpi_grounding.required_relationships == []
+    assert changed.kpi_grounding.mandatory_columns == []
+    assert accepted.kpi_grounding is not None  # Provisional delta cannot mutate accepted state.
+
+
+def test_real_sqlite_group_removal_rebuilds_minimal_kpi_context(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    registry, document = fixture(tmp_path)
+    monkeypatch.setenv("TEXT2SQL_KPI_FIRST_ENABLED", "true")
+    model = SQLModel("SELECT d.name, SUM(o.amount)-SUM(o.refund_amount) AS net_revenue "
+                     "FROM orders o JOIN customers c ON o.customer_id=c.id "
+                     "JOIN departments d ON c.department_id=d.id "
+                     "WHERE o.status='complete' GROUP BY d.name")
+    svc = service(tmp_path, registry, document, model)
+    first = execute(svc)
+    assert first.generated.accepted
+    accepted = first.semantic_contract.model_copy(deep=True)
+    changed = resolve_semantic_contract(
+        accepted, original_question="Remove the department grouping",
+        resolved_question="Net revenue total", changes=[RequestedChange(
+            operation="REMOVE_DIMENSION", target="departments.name")],
+    )
+    model.sql = ("SELECT SUM(amount)-SUM(refund_amount) AS net_revenue FROM orders "
+                 "WHERE status='complete'")
+    result = asyncio.run(svc.execute_question(
+        question="Net revenue total", db_id="shop", provider="groq", model="scripted",
+        max_attempts=1, semantic_contract=changed,
+    ))
+    assert result.generated.accepted, result.generated.model_error
+    assert result.generated.rows == [[135.0]]
+    assert result.approved_tables == ["orders"]
+    assert result.semantic_contract.kpi_grounding.requested_dimensions == []
+    assert model.calls == 2
+    assert first.semantic_contract == accepted
+
+
+def test_group_change_keeps_root_identity_not_dependency_roots(tmp_path: Path) -> None:
+    registry, document = fixture(tmp_path)
+    schema = registry.inspect("shop")
+    base = document.metrics[1]
+    document.metrics = [base.model_copy(update={
+        "id": f"k{i}", "label": f"KPI {i}", "dependencies": [f"k{i + 1}"] if i < 5 else [],
+    }) for i in range(6)]
+    resolution = resolve_kpi_candidates("k0", schema, document)
+    contract, _ = resolve_metrics("k0", schema, document, SemanticContract(), metric_ids=["k0"])
+    contract.kpi_grounding = build_kpi_grounding(resolution, contract, document, "k0")
+    changed = resolve_semantic_contract(
+        contract, original_question="Remove grouping", resolved_question="KPI 0 total",
+        changes=[RequestedChange(operation="REMOVE_DIMENSION", target="department")],
+    )
+    result, _ = resolve_metrics("again", schema, document, changed, metric_ids=[])
+    assert len(result.approved_metrics) == 6
+    assert changed.kpi_grounding.resolution.selected_ids == ["k0"]
+
+
+def test_user_filter_dependency_is_pinned_before_join_grounding(tmp_path: Path) -> None:
+    registry, document = fixture(tmp_path)
+    schema = registry.inspect("shop")
+    resolution = resolve_kpi_candidates("net_revenue", schema, document)
+    contract, _ = resolve_metrics("net_revenue", schema, document, SemanticContract(filters=[
+        SemanticFilter(operand="departments.name", operator="=", value="A")]))
+    grounding = build_kpi_grounding(resolution, contract, document, "Net revenue for department A")
+    assert "departments.name" in grounding.mandatory_columns
+    assert "departments" in grounding.mandatory_tables
+    assert grounding.requested_dimensions == []
+
+
+@pytest.mark.parametrize("still_grouped", [False, True])
+def test_removed_filter_releases_only_unneeded_column_and_join_dependencies(
+    tmp_path: Path, still_grouped: bool,
+) -> None:
+    _, accepted = grounded(tmp_path)
+    accepted.filters = [SemanticFilter(operand="departments.name", operator="=", value="A")]
+    accepted.required_columns = [*accepted.kpi_grounding.mandatory_columns, "departments.id",
+                                 "customers.department_id"]
+    accepted.kpi_grounding.required_relationships = [{
+        "child_table": "customers", "child_columns": ["department_id"],
+        "parent_table": "departments", "parent_columns": ["id"],
+    }]
+    if still_grouped:
+        accepted.grain = ["departments.name"]
+    changed = resolve_semantic_contract(
+        accepted, original_question="Remove the department filter", resolved_question="Net revenue",
+        changes=[RequestedChange(operation="REMOVE_FILTER", target="departments.name")],
+    )
+    assert changed.filters == []
+    assert ("departments.name" in changed.required_columns) == still_grouped
+    assert "departments.id" not in changed.required_columns
+    assert "orders.amount" in changed.required_columns
+    assert accepted.filters[0].value == "A"
+
+
+def test_real_sqlite_filter_add_then_remove_replans_required_joins(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    registry, document = fixture(tmp_path)
+    with sqlite3.connect(registry.resolve("shop")) as connection:
+        connection.execute("INSERT INTO orders VALUES (4,2,100,'complete','2026-10-04',10)")
+    monkeypatch.setenv("TEXT2SQL_KPI_FIRST_ENABLED", "true")
+    model = SQLModel("SELECT SUM(o.amount)-SUM(o.refund_amount) AS net_revenue FROM orders o "
+                     "JOIN customers c ON o.customer_id=c.id "
+                     "JOIN departments d ON c.department_id=d.id "
+                     "WHERE o.status='complete' AND d.name='A'")
+    svc = service(tmp_path, registry, document, model)
+    filtered = SemanticContract(original_question="Net revenue for department A",
+                                filters=[SemanticFilter(operand="departments.name",
+                                                        operator="=", value="A")])
+    first = asyncio.run(svc.execute_question(
+        question="Net revenue for department A", db_id="shop", provider="groq", model="scripted",
+        max_attempts=1, semantic_contract=filtered,
+    ))
+    assert first.generated.accepted, first.generated.model_error
+    assert first.generated.rows == [[135.0]]
+    assert set(first.approved_tables) == {"orders", "customers", "departments"}
+    changed = resolve_semantic_contract(
+        first.semantic_contract, original_question="Remove department filter",
+        resolved_question="Net revenue total", changes=[RequestedChange(
+            operation="REMOVE_FILTER", target="departments.name")],
+    )
+    model.sql = ("SELECT SUM(amount)-SUM(refund_amount) AS net_revenue FROM orders "
+                 "WHERE status='complete'")
+    second = asyncio.run(svc.execute_question(
+        question="Net revenue total", db_id="shop", provider="groq", model="scripted",
+        max_attempts=1, semantic_contract=changed,
+    ))
+    assert second.generated.accepted, second.generated.model_error
+    assert second.generated.rows == [[225.0]]
+    assert second.approved_tables == ["orders"] and model.calls == 2
+    assert first.semantic_contract.filters[0].value == "A"
+
+
+def test_temporal_filter_pinning_and_missing_filter_column_fail_closed(tmp_path: Path) -> None:
+    registry, document = fixture(tmp_path)
+    schema = registry.inspect("shop")
+    resolution = resolve_kpi_candidates("net_revenue", schema, document)
+    contract, _ = resolve_metrics("net_revenue", schema, document, SemanticContract(
+        temporal_boundaries=[SemanticFilter(operand="orders.ordered_on", operator=">=",
+                                             value="2026-01-01")]))
+    grounding = build_kpi_grounding(resolution, contract, document, "net_revenue", schema=schema)
+    assert "orders.ordered_on" in grounding.mandatory_columns
+    contract.filters = [SemanticFilter(operand="missing.secret", operator="=", value="x")]
+    with pytest.raises(ValueError, match="KPI_FILTER_COLUMN_UNAVAILABLE"):
+        build_kpi_grounding(resolution, contract, document, "net_revenue", schema=schema)
+
+
+def test_explicit_physical_outputs_are_pinned_without_guessing_new_grouping(tmp_path: Path) -> None:
+    registry, document = fixture(tmp_path)
+    schema = registry.inspect("shop")
+    resolution = resolve_kpi_candidates("net_revenue", schema, document)
+    contract, _ = resolve_metrics("net_revenue", schema, document,
+                                  SemanticContract(outputs=["orders.ordered_on", "net_revenue"]))
+    grounding = build_kpi_grounding(resolution, contract, document, "Net revenue", schema=schema)
+    assert "orders.ordered_on" in grounding.mandatory_columns
+    assert "net_revenue" not in grounding.mandatory_columns
+    assert grounding.requested_dimensions == []
+    contract.outputs = ["missing.secret"]
+    with pytest.raises(ValueError, match="KPI_OUTPUT_COLUMN_UNAVAILABLE"):
+        build_kpi_grounding(resolution, contract, document, "Net revenue", schema=schema)
+
+
+def test_combined_root_metrics_require_shared_dimension_support(tmp_path: Path) -> None:
+    registry, document = fixture(tmp_path)
+    schema = registry.inspect("shop")
+    resolution = resolve_kpi_candidates("net_revenue and refunds", schema, document)
+    contract, _ = resolve_metrics("net_revenue and refunds", schema, document,
+                                  SemanticContract(grain=["departments.name"]),
+                                  metric_ids=resolution.selected_ids)
+    with pytest.raises(ValueError, match="KPI_DIMENSION_UNSUPPORTED"):
+        build_kpi_grounding(resolution, contract, document, "by department", schema=schema)
+
+
+def test_generic_followup_preserves_requested_roots_not_all_dependency_metrics(
+    tmp_path: Path, monkeypatch: Any,
+) -> None:
+    registry, document = fixture(tmp_path)
+    monkeypatch.setenv("TEXT2SQL_KPI_FIRST_ENABLED", "true")
+    model = SQLModel("SELECT SUM(amount)-SUM(refund_amount) AS net_revenue FROM orders "
+                     "WHERE status='complete'")
+    svc = service(tmp_path, registry, document, model)
+    first = execute(svc, "Net revenue")
+    assert first.generated.accepted
+    changed = resolve_semantic_contract(
+        first.semantic_contract, original_question="Group the same metric by department",
+        resolved_question="Same metric by department", changes=[RequestedChange(
+            operation="ADD_DIMENSION", target="departments.name", new_value="departments.name")],
+    )
+    model.sql = ("SELECT d.name, SUM(o.amount)-SUM(o.refund_amount) AS net_revenue "
+                 "FROM orders o JOIN customers c ON o.customer_id=c.id "
+                 "JOIN departments d ON c.department_id=d.id "
+                 "WHERE o.status='complete' GROUP BY d.name")
+    second = asyncio.run(svc.execute_question(
+        question="Same metric by department", db_id="shop", provider="groq", model="scripted",
+        max_attempts=1, semantic_contract=changed,
+    ))
+    assert second.generated.accepted, second.generated.model_error
+    assert second.generated.rows == [["A", 135.0]]
+    resolution = second.semantic_contract.kpi_grounding.resolution
+    assert resolution.selected_ids == ["net_revenue"]
+    assert resolution.status == "RESOLVED"
+    assert resolution.candidates[0].method == "accepted_state"
+    assert resolution.candidates[0].authoritative_identity
+    assert model.calls == 2

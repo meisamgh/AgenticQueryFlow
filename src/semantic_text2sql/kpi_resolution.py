@@ -103,7 +103,7 @@ def resolve_kpi_candidates(
 
 def build_kpi_grounding(
     resolution: KPIResolution, contract: SemanticContract, document: CatalogDocument,
-    question: str,
+    question: str, *, schema: SchemaInfo | None = None,
 ) -> KPIGrounding:
     metrics = {m.id: m for m in document.metrics}
     approved = {m.id for m in contract.approved_metrics}
@@ -128,8 +128,9 @@ def build_kpi_grounding(
     # dimension (e.g. a filter) must not introduce a new GROUP BY.
     grouping_text = (grouping.group(1) if grouping and not contract.original_question
                      and not contract.resolved_question else "")
-    supported_requested = {col for key in resolution.selected_ids
-                           for col in supported.get(key, [])}
+    supported_requested = (set.intersection(*[
+        set(supported.get(key, [])) for key in resolution.selected_ids
+    ]) if resolution.selected_ids else set())
     for column in [*contract.grain, *contract.output_grain]:
         if "." in column and column not in supported_requested:
             raise ValueError("KPI_DIMENSION_UNSUPPORTED: " + column)
@@ -144,7 +145,26 @@ def build_kpi_grounding(
             for alias in aliases if alias
         )):
             dimensions.add(column)
-    columns = list(dict.fromkeys([*contract.required_columns, *sorted(dimensions)]))
+    if not dimensions <= supported_requested:
+        raise ValueError("KPI_DIMENSION_UNSUPPORTED: no shared approved dimensional grain.")
+    live_columns = ({f"{table.name}.{column.name}" for table in schema.tables
+                     for column in table.columns} if schema else {
+                         f"{entity.relation}.{column}" for entity in document.entities
+                         for column in entity.columns})
+    filter_columns = []
+    for predicate in [*contract.filters, *contract.temporal_boundaries]:
+        if predicate.operand in live_columns:
+            filter_columns.append(predicate.operand)
+        elif re.fullmatch(r"\w+(?:\.\w+)+", predicate.operand):
+            raise ValueError("KPI_FILTER_COLUMN_UNAVAILABLE: " + predicate.operand)
+    output_columns = []
+    for output in contract.outputs:
+        if output in live_columns:
+            output_columns.append(output)
+        elif re.fullmatch(r"\w+(?:\.\w+)+", output):
+            raise ValueError("KPI_OUTPUT_COLUMN_UNAVAILABLE: " + output)
+    columns = list(dict.fromkeys([*contract.required_columns, *filter_columns, *output_columns,
+                                 *sorted(dimensions)]))
     return KPIGrounding(
         resolution=resolution,
         dependency_chain={key: list(metrics[key].dependencies) for key in sorted(approved)},
