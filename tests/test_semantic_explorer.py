@@ -161,7 +161,9 @@ def test_missing_or_inferred_only_catalog_has_no_approved_kpis(explorer: Any) ->
     for metric in document.metrics:
         metric.status, metric.approval = "inferred", None
     path.write_text(document.model_dump_json())
-    assert client.get("/api/semantic-graph?db_id=shop&view=kpi").json()["nodes"] == []
+    nodes = client.get("/api/semantic-graph?db_id=shop&view=kpi").json()["nodes"]
+    metrics = [node for node in nodes if node["kind"] == "METRIC"]
+    assert metrics and all(node["status"] == "suggested" for node in metrics)
 
 
 def test_snapshot_is_compiled_once_until_metadata_changes(explorer: Any, monkeypatch: Any) -> None:

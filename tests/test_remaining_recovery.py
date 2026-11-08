@@ -17,7 +17,6 @@ def test_failed_post_result_repair_preserves_attempts_and_tokens(
     monkeypatch.setenv("TEXT2SQL_PROFILE_ROOT", str(tmp_path / "profiles"))
     monkeypatch.setenv("TEXT2SQL_GLOSSARY_ROOT", str(tmp_path / "glossaries"))
     monkeypatch.setenv("TEXT2SQL_CONVERSATIONAL_AGENT_ENABLED", "false")
-    monkeypatch.setenv("TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED", "false")
 
     async def review(*args: Any, **kwargs: Any) -> RecoveryTrace:
         return RecoveryTrace(failure_code="ZERO_RESULT", failure_category="data_grounding",

@@ -1,0 +1,62 @@
+{
+  "catalog_version": 1,
+  "id": "debit_card_specializing",
+  "source_db_id": "debit_card_specializing",
+  "metadata_status": "inferred",
+  "entities": [
+    {
+      "id": "monthly_consumption", "relation": "yearmonth",
+      "description": "Customer-period consumption; glossary defines the period as YYYYMM. Consumption units are not established.",
+      "columns": {"CustomerID": {"role": "identifier"}, "Date": {"role": "time", "semantic_type": "YYYYMM"}, "Consumption": {"role": "measure"}},
+      "quality": {"required": ["CustomerID", "Date", "Consumption"]},
+      "grain": {"keys": ["CustomerID", "Date"], "meaning": "one row per customer and YYYYMM period", "entity_role": "declared_primary_key"},
+      "time": {"event_time": "Date", "expected_frequency": "monthly"}
+    },
+    {
+      "id": "transactions", "relation": "transactions_1k",
+      "description": "Transaction payment Price and purchased quantity Amount. Never combine account currencies without an explicit conversion definition.",
+      "columns": {"TransactionID": {"role": "identifier"}, "CustomerID": {"role": "identifier"}, "Date": {"role": "time", "semantic_type": "YYYY-MM-DD"}, "Price": {"role": "measure"}, "Amount": {"role": "measure"}},
+      "quality": {"required": ["TransactionID", "CustomerID", "Date", "Price", "Amount"]},
+      "grain": {"keys": ["TransactionID"], "meaning": "one row per transaction", "entity_role": "declared_primary_key"},
+      "time": {"event_time": "Date"}
+    }
+  ],
+  "metrics": [
+    {
+      "id": "total_consumption", "label": "Total consumption",
+      "description": "Copied from business glossary monthly consumption. Sum recorded consumption at the requested grouping grain; no physical or monetary unit inferred.",
+      "source_relation": "yearmonth", "formula": "SUM(Consumption)", "required_fields": ["Consumption"],
+      "dimensions": ["CustomerID", "Date"], "valid_time_grains": ["monthly"],
+      "unit": "unspecified", "format": "number", "aggregation": "additive",
+      "aliases": ["monthly consumption", "consumption", "usage"],
+      "missing_data_policy": "Preserve NULL for no observations; do not fill missing months or remove negative adjustments."
+    },
+    {
+      "id": "total_spending", "label": "Total spending",
+      "description": "Copied from glossary total spending. Price is transaction payment, not quantity. Restrict or group by verified customer currency; never sum mixed currencies as one monetary total.",
+      "source_relation": "transactions_1k", "formula": "SUM(Price)", "required_fields": ["Price"],
+      "dimensions": ["CustomerID", "Date"], "valid_time_grains": ["daily", "weekly", "monthly"],
+      "unit": "account_currency_not_normalized", "format": "number", "aggregation": "semi_additive",
+      "rollup": "Only within a single verified currency; no exchange-rate conversion is defined.",
+      "aliases": ["total spend", "total spent", "money spent"]
+    },
+    {
+      "id": "average_unit_price", "label": "Average unit price",
+      "description": "Copied exactly from glossary: unweighted mean of transaction-level unit prices. Not a weighted price and not an average of subgroup averages. Requires compatible product units and a single currency.",
+      "source_relation": "transactions_1k", "formula": "AVG(CAST(Price AS REAL) / NULLIF(Amount, 0))", "required_fields": ["Price", "Amount"],
+      "dimensions": ["CustomerID", "Date"], "valid_time_grains": ["daily", "weekly", "monthly"],
+      "unit": "account_currency_per_purchased_unit", "format": "number", "aggregation": "non_additive",
+      "aliases": ["average price per item", "average price per single item"],
+      "missing_data_policy": "Zero quantities produce NULL unit prices excluded by AVG; no zero imputation."
+    },
+    {
+      "id": "weighted_average_unit_price", "label": "Weighted average unit price",
+      "description": "Glossary quantity-weighted unit price, only when explicitly requested. Requires compatible product units and one currency. Cast enforces real division without changing the intended ratio.",
+      "source_relation": "transactions_1k", "formula": "CAST(SUM(Price) AS REAL) / NULLIF(SUM(Amount), 0)", "required_fields": ["Price", "Amount"],
+      "dimensions": ["CustomerID", "Date"], "valid_time_grains": ["daily", "weekly", "monthly"],
+      "unit": "account_currency_per_purchased_unit", "format": "number", "aggregation": "non_additive",
+      "aliases": ["weighted average price", "weighted unit price"],
+      "missing_data_policy": "Return NULL when total quantity is zero; do not replace ordinary average unit price."
+    }
+  ]
+}

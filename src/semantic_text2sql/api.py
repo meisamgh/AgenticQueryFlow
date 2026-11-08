@@ -2777,15 +2777,7 @@ def create_app(
                 history_anchor.reset(anchor_token)
                 if token is not None:
                     branch_context.reset(token)
-        if os.environ.get("TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED", "false").casefold() != "true":
-            return await execute_chat(request)
-        try:
-            outcome = await bridge.run(request)
-        except DatabaseError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        if outcome.route == "sql":
-            return outcome.response
-        return await save_response(request, outcome.response)
+        return await execute_chat(request)
 
     async def refresh_historical_sql(
         run_id: str, session_id: str, *, persist: bool = True,

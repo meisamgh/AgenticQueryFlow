@@ -8,6 +8,17 @@ Product scope: only `debit_card_specializing` is exposed. Other configured datab
 remain usable by Text-to-SQL but are rejected by every explorer graph/detail route
 and omitted from its source list. The underlying graph implementation is reusable.
 
+The debit-card catalog contains four glossary-derived candidate metrics: total
+consumption, total spending, average unit price and weighted average unit price.
+Candidates display as suggested metadata with non-authoritative edges; this does
+not promote them to approved contracts for SQL grounding. Physical units, currency
+conversion, annual growth definitions and human approval are not inferred.
+
+The KPI overview shows source tables by default. `SOURCE_TABLE` links are display
+summaries of existing required-column lineage, not new joins or approved business
+relationships. Individual columns remain expandable; upstream lineage retains the
+full column-level evidence. Summary links honor node, edge and relationship filters.
+
 Search metadata, select nodes/edges, expand or collapse neighborhoods, fit/zoom/pan,
 inspect approved formulas and source columns, or trace upstream lineage and potential
 downstream impact. The accessible node list provides keyboard access. Select 2–8

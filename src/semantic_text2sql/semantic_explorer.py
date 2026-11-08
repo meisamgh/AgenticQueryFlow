@@ -20,7 +20,7 @@ type ExplorerView = Literal["schema", "kpi", "combined"]
 type Direction = Literal["upstream", "downstream", "both"]
 NODE_KINDS = ("TABLE", "COLUMN", "METRIC", "DIMENSION", "BUSINESS_CONCEPT", "BUSINESS_RULE")
 EDGE_KINDS = ("REFERENCES", "DEPENDS_ON", "USES_COLUMN", "GROUPABLE_BY", "FILTERED_BY",
-              "HAS_COLUMN", "TIME_BY")
+              "HAS_COLUMN", "TIME_BY", "SOURCE_TABLE")
 
 
 class ExplorerNode(StrictModel):
@@ -76,7 +76,8 @@ def display_node(node: GraphNode, *, detail: bool = False) -> ExplorerNode:
     label = str(facts.get("label") or facts.get("relation") or facts.get("column")
                 or facts.get("term") or ("Mandatory filter" if node.kind == "BUSINESS_RULE"
                                          else node.id.split(":", 1)[-1]))
-    approved = node.kind in {"METRIC", "BUSINESS_RULE"}
+    approved = (node.kind == "METRIC" and facts.get("authoritative") is True
+                or node.kind == "BUSINESS_RULE")
     return ExplorerNode(id=node.id, kind=node.kind, label=label,
                         status="approved" if approved else "observed" if node.kind
                         in {"TABLE", "COLUMN"} else "suggested",
@@ -121,6 +122,23 @@ class ExplorerIndex:
     ) -> ExplorerGraph:
         visible = self.visible(view, kinds if kinds is not None else set(NODE_KINDS))
         allowed_edges = relations if relations is not None else set(EDGE_KINDS)
+        # Display-only rollup of existing metric -> required column -> table facts.
+        # Never add these summary links to the snapshot or join/SQL resolver.
+        summaries: dict[tuple[str, str], list[GraphEdge]] = {}
+        if view != "schema" and "SOURCE_TABLE" in allowed_edges:
+            for metric_edge in self.edges.values():
+                if (metric_edge.kind != "USES_COLUMN"
+                        or self.nodes[metric_edge.source].kind != "METRIC"):
+                    continue
+                table = f"table:{self.nodes[metric_edge.target].facts.get('table', '')}"
+                if metric_edge.source in visible and table in visible:
+                    summaries.setdefault((metric_edge.source, table), []).append(metric_edge)
+        summary_edges = [ExplorerEdge(
+            id=f"source-table:{source}:{target}", source=source, target=target,
+            kind="SOURCE_TABLE", provenance="required_column_lineage_summary",
+            authoritative=all(edge.authoritative for edge in evidence),
+            status="authoritative" if all(edge.authoritative for edge in evidence) else "suggested",
+        ) for (source, target), evidence in sorted(summaries.items())]
         if node_id is not None and node_id not in visible:
             raise KeyError("Node not available in the selected datasource/view.")
         if node_id:
@@ -129,6 +147,10 @@ class ExplorerIndex:
             initial = "TABLE" if view == "schema" else "METRIC" if view == "kpi" else None
             seeds = sorted(key for key in visible if self.nodes[key].kind == initial or
                            initial is None and self.nodes[key].kind != "COLUMN")[:node_limit]
+            if view == "kpi":
+                tables = sorted({edge.target for edge in summary_edges if edge.source in seeds})
+                seeds = list(dict.fromkeys([*seeds, *tables]))[:node_limit]
+                depth = 0  # Initial overview keeps physical columns expandable.
         distances = dict.fromkeys(seeds, 0)
         selected = set(seeds)
         queue = deque(seeds)
@@ -176,15 +198,18 @@ class ExplorerIndex:
                          and edge.target in selected and edge.kind in allowed_edges]
         else:
             all_edges = sorted(visited_edges)
-        if len(all_edges) > edge_limit:
+        output_edges = [display_edge(self.edges[key]) for key in sorted(all_edges)]
+        output_edges.extend(edge for edge in summary_edges
+                            if edge.source in selected and edge.target in selected)
+        if len(output_edges) > edge_limit:
             truncated = True
         return ExplorerGraph(
             db_id=self.snapshot.db_id, view=view,
             nodes=[display_node(self.nodes[key]) for key in sorted(selected)],
-            edges=[display_edge(self.edges[key]) for key in sorted(all_edges)[:edge_limit]],
+            edges=output_edges[:edge_limit],
             total_nodes=len(visible), total_edges=sum(
                 edge.source in visible and edge.target in visible and edge.kind in allowed_edges
-                for edge in self.edges.values()),
+                for edge in self.edges.values()) + len(summary_edges),
             truncated=truncated, distances=distances if node_id else {},
             catalog_version=self.snapshot.catalog_version,
             potential_impact=lineage and direction == "downstream",
@@ -197,6 +222,7 @@ class ExplorerIndex:
             return False
         source = self.nodes[edge.source]
         valid = (edge.authoritative or source.kind == "METRIC" and
+                 source.facts.get("status") == "inferred" or source.kind == "METRIC" and
                  source.facts.get("authoritative") is True and
                  edge.kind in {"FILTERED_BY", "GROUPABLE_BY"})
         if not valid or direction == "upstream" and edge.kind == "GROUPABLE_BY":
@@ -226,10 +252,12 @@ class ExplorerCache:
                 return cached
             approved = {node.id for node in snapshot.nodes if node.kind == "METRIC"
                         and node.facts.get("authoritative") is True}
+            candidates = {node.id for node in snapshot.nodes if node.kind == "METRIC"
+                          and node.facts.get("status") == "inferred"}
             rules = {edge.target for edge in snapshot.edges if edge.kind == "FILTERED_BY"
                      and edge.source in approved}
             nodes = {node.id: node for node in snapshot.nodes
-                     if (node.kind != "METRIC" or node.id in approved)
+                     if (node.kind != "METRIC" or node.id in approved | candidates)
                      and (node.kind != "BUSINESS_RULE" or node.id in rules)}
             edges = {edge.id: edge for edge in snapshot.edges
                      if edge.source in nodes and edge.target in nodes}

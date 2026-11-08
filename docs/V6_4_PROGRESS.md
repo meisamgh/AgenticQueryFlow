@@ -1,5 +1,10 @@
 # V6.4 progress checkpoint
 
+2026-11-08: retired TEXT2SQL_CONVERSATIONAL_BRIDGE_ENABLED from environment
+templates and HTTP routing. With the Top layer disabled, chat goes directly to
+the governed SQL service; an old deployment variable cannot activate the competing
+legacy router. Existing bridge tools remain available to the Top layer.
+
 ## 2026-11-08 — Local Semantic Explorer
 
 Implemented bounded metadata GET routes and a vendored Cytoscape frontend over

@@ -2,7 +2,7 @@
 window.QueryflowSemanticExplorer = (() => {
   const colors = {TABLE:'#2563eb',COLUMN:'#0f766e',METRIC:'#7c3aed',DIMENSION:'#15803d',
     BUSINESS_RULE:'#b45309',BUSINESS_CONCEPT:'#64748b'};
-  const relations = ['REFERENCES','DEPENDS_ON','USES_COLUMN','GROUPABLE_BY','FILTERED_BY','HAS_COLUMN','TIME_BY'];
+  const relations = ['REFERENCES','DEPENDS_ON','USES_COLUMN','GROUPABLE_BY','FILTERED_BY','HAS_COLUMN','TIME_BY','SOURCE_TABLE'];
   const el = (tag, cls, text) => {
     const node = document.createElement(tag); node.className = cls || '';
     if (text != null) node.textContent = text;
@@ -150,7 +150,9 @@ window.QueryflowSemanticExplorer = (() => {
       else if(memories.get(key())?.zoom) {cy.zoom(memories.get(key()).zoom);cy.pan(memories.get(key()).pan);}
       listBody.replaceChildren(...graph.nodes.map(node=>button(`${node.label} · ${node.kind.toLowerCase()}`,()=>inspect(node.id))));
       status.textContent=graph.nodes.length?`${graph.nodes.length} nodes · ${graph.edges.length} links${graph.truncated?' · bounded view; expand a node or search to explore more':''}. ${(graph.warnings||[]).join(' ')}`:
-        `No ${view==='kpi'?'approved KPIs':'matching metadata'} in this view. ${(graph.warnings||[]).join(' ')}`;
+        `No ${view==='kpi'?'KPI definitions':'matching metadata'} in this view. ${(graph.warnings||[]).join(' ')}`;
+      if(graph.nodes.some(node=>node.kind==='METRIC' && node.status==='suggested'))
+        status.textContent+=' Candidate definitions are not human-approved business contracts.';
     }
     async function load(mode='root',nodeId=null) {
       const token=++epoch; ++detailEpoch;

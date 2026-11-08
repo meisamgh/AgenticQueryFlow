@@ -81,7 +81,7 @@ def test_bridge_routes_metadata_without_sql_and_preserves_sql_handler(
     assert calls == ["Count customers"]
 
 
-def test_opt_in_bridge_preserves_existing_chat_sql_path(
+def test_removed_bridge_setting_cannot_enable_competing_chat_router(
     registry: Any, monkeypatch: Any, tmp_path: Any
 ) -> None:
     monkeypatch.setenv("TEXT2SQL_DATABASE_ROOT", str(registry.root))
@@ -95,9 +95,11 @@ def test_opt_in_bridge_preserves_existing_chat_sql_path(
     base = {"session_id": "bridge-api", "db_id": "shop", "model": "test-model"}
     schema = client.post("/api/chat", json={**base, "message": "What tables are available?"})
     assert schema.status_code == 200
-    assert schema.json()["operation"] == "EXPLAIN_CONTEXT"
-    assert model.calls == 0
-    analytical = client.post("/api/chat", json={**base, "message": "Count customers"})
+    assert schema.json()["generation"]["accepted"] is True
+    assert model.calls == 1
+    analytical = client.post("/api/chat", json={
+        **base, "session_id": "sql-api", "message": "Count customers",
+    })
     assert analytical.status_code == 200
     assert analytical.json()["generation"]["accepted"] is True
-    assert model.calls == 1
+    assert model.calls == 2
