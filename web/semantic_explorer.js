@@ -1,6 +1,6 @@
 /* Read-only metadata exploration. No chat, result mutation, SQL or LLM calls. */
 window.QueryflowSemanticExplorer = (() => {
-  const colors = {TABLE:'#2563eb',COLUMN:'#0f766e',METRIC:'#7c3aed',DIMENSION:'#15803d',
+  const colors = {TABLE:'#2563eb',COLUMN:'#0f766e',METRIC:'#8b5cf6',DIMENSION:'#15803d',
     BUSINESS_RULE:'#b45309',BUSINESS_CONCEPT:'#64748b'};
   const relations = ['REFERENCES','DEPENDS_ON','USES_COLUMN','GROUPABLE_BY','FILTERED_BY','HAS_COLUMN','TIME_BY','SOURCE_TABLE'];
   const el = (tag, cls, text) => {
@@ -12,11 +12,27 @@ window.QueryflowSemanticExplorer = (() => {
     const node = el('button','secondary-button',label); node.type = 'button';
     node.addEventListener('click', run); return node;
   };
+  function connectionLabel(edge) {
+    if(edge.kind!=='REFERENCES')return edge.kind.replaceAll('_',' ').toLowerCase();
+    const cardinality=String(edge.cardinality||'unknown').toLowerCase().replaceAll('_','-');
+    const known=['one-to-one','one-to-many','many-to-one','many-to-many'];
+    return 'foreign key · '+(known.includes(cardinality)?cardinality:'cardinality unknown');
+  }
+  function cardBackground(kind,dark=false) {
+    // Decorative, locally generated SVG only. Metadata remains plain canvas text.
+    const color=colors[kind]||colors.BUSINESS_CONCEPT;
+    const glyph=kind==='METRIC'?'<path d="M192 10l5 5-5 5-5-5z"/>':
+      kind==='TABLE'?'<path fill="none" stroke="currentColor" d="M187 10h10v10h-10zM187 14h10M192 14v6"/>':
+      kind==='BUSINESS_RULE'?'<path d="M188 10h8l-2 4 2 4h-7v4h-1z"/>':
+      '<rect x="188" y="11" width="9" height="9" rx="2"/>';
+    const svg=`<svg xmlns="http://www.w3.org/2000/svg" width="210" height="78" viewBox="0 0 210 78"><defs><clipPath id="card"><rect width="210" height="78" rx="10"/></clipPath></defs><g clip-path="url(#card)"><rect width="210" height="78" fill="${dark?'#18232f':'#ffffff'}"/><rect width="6" height="78" fill="${color}"/><rect x="181" y="5" width="22" height="22" rx="6" fill="${color}" fill-opacity=".12"/><g fill="${color}" color="${color}">${glyph}</g></g></svg>`;
+    return 'data:image/svg+xml;charset=utf-8,'+encodeURIComponent(svg);
+  }
   const elements = graph => [
     ...graph.nodes.map(node => ({group:'nodes',data:{id:node.id,label:node.label+'\n'+(node.kind==='METRIC'?(node.status==='approved'?'Approved KPI':'KPI')+' · v'+(node.metadata?.version||1):node.kind.toLowerCase().replaceAll('_',' ')),
       kind:node.kind,status:node.status}})),
     ...graph.edges.map(edge => ({group:'edges',data:{id:edge.id,source:edge.source,target:edge.target,
-      label:edge.kind==='REFERENCES'?'foreign key':edge.kind.replaceAll('_',' ').toLowerCase(),kind:edge.kind,status:edge.status}})),
+      label:connectionLabel(edge),kind:edge.kind,status:edge.status}})),
   ];
   function mergeGraph(previous, next, limit=250) {
     const nodes = new Map(previous.nodes.map(node => [node.id,node]));
@@ -85,12 +101,14 @@ window.QueryflowSemanticExplorer = (() => {
     const text = theme.getPropertyValue('--text').trim() || '#0f172a';
     const dark=document.documentElement.dataset.theme==='dark';
     const tints=dark?{TABLE:'#18243a',COLUMN:'#152d2d',METRIC:'#29213b',DIMENSION:'#192e22',BUSINESS_RULE:'#302719',BUSINESS_CONCEPT:'#252b35'}:
-      {TABLE:'#f0f5ff',COLUMN:'#eff9f7',METRIC:'#f6f1ff',DIMENSION:'#f0f9f2',BUSINESS_RULE:'#fff8e9',BUSINESS_CONCEPT:'#f5f6f8'};
+      {TABLE:'#eff6ff',COLUMN:'#eff9f7',METRIC:'#f3edff',DIMENSION:'#f0f9f2',BUSINESS_RULE:'#fff8e9',BUSINESS_CONCEPT:'#f5f6f8'};
     return [
       {selector:'node',style:{label:'data(label)','background-color':theme.getPropertyValue('--surface').trim()||'#fff',color:text,
-        'text-valign':'center','text-halign':'center','text-wrap':'wrap','text-max-width':178,
-        'font-size':14,'font-family':'Inter, sans-serif',width:218,height:82,
-        shape:'round-rectangle','border-width':1.5,'border-color':'#cbd5e1',
+        'text-valign':'center','text-halign':'center','text-wrap':'wrap','text-max-width':155,
+        'text-justification':'left','text-margin-x':-6,'text-margin-y':4,
+        'font-size':13,'font-weight':600,'font-family':'Inter, sans-serif',width:210,height:78,
+        shape:'round-rectangle','border-width':2,'border-color':'#cbd5e1',
+        'background-image':node=>cardBackground(node.data('kind'),dark),'background-fit':'contain',
         'underlay-color':'#103d32','underlay-opacity':.045,'underlay-padding':4,'underlay-shape':'round-rectangle'}},
       ...Object.entries(colors).map(([kind,color])=>({selector:`node[kind="${kind}"]`,
         style:{'border-color':color,'background-color':tints[kind],'background-opacity':1}})),
@@ -100,7 +118,7 @@ window.QueryflowSemanticExplorer = (() => {
       {selector:'edge[status="suggested"]',style:{'line-style':'dashed'}},
       {selector:'edge[status="definition"]',style:{'line-style':'dotted'}},
       {selector:'edge[status="forbidden"]',style:{'line-color':'#dc2626','target-arrow-color':'#dc2626','line-style':'dashed'}},
-      {selector:'node:selected',style:{'border-width':3,'underlay-opacity':.12}},
+      {selector:'node:selected',style:{'border-width':3,'border-color':'#0f766e','underlay-opacity':.12}},
       {selector:'edge:selected',style:{'line-color':'#168447','target-arrow-color':'#168447',width:3}},
       {selector:'edge.hovered, edge:selected',style:{label:'data(label)'}},
       {selector:'.lineage',style:{'line-color':'#168447','target-arrow-color':'#168447',width:2.5}},
@@ -307,5 +325,5 @@ window.QueryflowSemanticExplorer = (() => {
     observer.observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
     return {open,close,dispose(){close();observer.disconnect();mount.replaceChildren();}};
   }
-  return {create,elements,mergeGraph,colors,layeredPositions,lineageAuthority};
+  return {create,elements,mergeGraph,colors,layeredPositions,lineageAuthority,connectionLabel,cardBackground};
 })();

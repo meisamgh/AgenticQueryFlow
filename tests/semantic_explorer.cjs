@@ -166,6 +166,26 @@ test('simplified cards hide removed controls and preserve truthful status and ed
   assert.ok(!data[0].data.label.includes('Not reviewed'));
   assert.ok(!data[0].data.label.includes('Candidate'));
   assert.equal(data[1].data.label,'has column');
-  assert.equal(h.module.elements({nodes:[],edges:[link]})[0].data.label,'foreign key');
+  assert.equal(h.module.elements({nodes:[],edges:[link]})[0].data.label,'foreign key · cardinality unknown');
   assert.ok(!h.mount.textContent.includes('CANDIDATE'));h.controller.dispose();
+});
+test('edge cardinality is metadata-backed and never invented for other connections',()=>{
+  const h=harness(async()=>[]);
+  for(const cardinality of ['one_to_one','one_to_many','many_to_one','many_to_many'])
+    assert.equal(h.module.connectionLabel({...link,cardinality}),`foreign key · ${cardinality.replaceAll('_','-')}`);
+  for(const cardinality of [null,'UNKNOWN','unsupported'])
+    assert.equal(h.module.connectionLabel({...link,cardinality}),'foreign key · cardinality unknown');
+  assert.equal(h.module.connectionLabel({...link,kind:'HAS_COLUMN',cardinality:'many_to_many'}),'has column');
+  h.controller.dispose();
+});
+test('node cards have visible accents and distinct type badges without embedding metadata',()=>{
+  const h=harness(async()=>[]);
+  const metricSvg=decodeURIComponent(h.module.cardBackground('METRIC').split(',')[1]);
+  const tableSvg=decodeURIComponent(h.module.cardBackground('TABLE').split(',')[1]);
+  assert.ok(metricSvg.includes('width="6" height="78"'));
+  assert.ok(metricSvg.includes('#8b5cf6'));assert.ok(tableSvg.includes('#2563eb'));
+  assert.notEqual(metricSvg,tableSvg);
+  assert.ok(!metricSvg.includes('http://127.0.0.1'));
+  assert.ok(decodeURIComponent(h.module.cardBackground('METRIC',true)).includes('#18232f'));
+  h.controller.dispose();
 });

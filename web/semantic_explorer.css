@@ -75,9 +75,16 @@ body.semantic-explorer-open .composer-zone { display:none; }
 .semantic-explorer button:focus-visible,.semantic-explorer input:focus-visible,
 .semantic-explorer select:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
 [data-theme="dark"] .semantic-canvas { box-shadow:none; }
+.semantic-body {
+  grid-template-columns:minmax(0,1fr) 320px; gap:16px; padding:20px;
+  min-height:500px; border-radius:20px; flex:none;
+}
+.semantic-canvas { min-height:420px; height:clamp(420px,60vh,620px); border-radius:16px; }
+.semantic-detail { padding:20px; border-radius:16px; max-height:620px; }
 @media(max-width:1100px) { .semantic-body { grid-template-columns:minmax(0,1fr) 260px; } .semantic-explorer { padding:16px; } }
 @media(max-width:760px) {
   .semantic-body { grid-template-columns:1fr; min-height:0; }
+  .semantic-body { padding:12px; gap:12px; }
   .semantic-canvas { min-height:380px; height:50vh; }
   .semantic-detail { max-height:none; }
   .semantic-heading { align-items:start; }
