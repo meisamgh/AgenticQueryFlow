@@ -1,5 +1,6 @@
 """Real metadata HTTP/graph tests; no business execution or external inference."""
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 
@@ -10,6 +11,7 @@ from test_semantic_graph import join_schema
 
 from semantic_text2sql.agent import TextToSQLAgent
 from semantic_text2sql.api import create_app
+from semantic_text2sql.conversation import ConversationStore
 from semantic_text2sql.database import DatabaseRegistry
 from semantic_text2sql.models import ForeignKeyInfo
 from semantic_text2sql.semantic_explorer import ExplorerCache
@@ -38,6 +40,8 @@ def explorer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
         raise AssertionError("Explorer attempted a business query")
 
     monkeypatch.setattr(DatabaseRegistry, "execute", forbidden)
+    monkeypatch.setattr(ConversationStore, "put", forbidden)
+    monkeypatch.setattr(ConversationStore, "reset", forbidden)
     client = TestClient(create_app(TextToSQLAgent(registry, model)), base_url="http://127.0.0.1",
                         client=("127.0.0.1", 42000))
     return client, registry, document, path, model
@@ -64,6 +68,9 @@ def test_schema_bounds_determinism_composite_details_and_no_calls(explorer: Any)
     first = client.get(path)
     assert first.status_code == 200, first.text
     assert first.json() == client.get(path).json()
+    assert not first.json()["truncated"]
+    assert first.json()["collapsed_nodes"] > 0
+    assert first.json()["truncation_reasons"] == []
     assert all(node["kind"] == "TABLE" for node in first.json()["nodes"])
     assert first.headers["cache-control"] == "no-store, private"
     detail = client.get("/api/semantic-graph/nodes/table:orders?db_id=shop").json()
@@ -75,6 +82,37 @@ def test_schema_bounds_determinism_composite_details_and_no_calls(explorer: Any)
                       "cache", "password", "examples", "top_values", "create_sql"):
         assert forbidden not in text
     assert model.calls == 0
+
+
+def test_local_sources_and_metadata_caches_are_isolated(explorer: Any) -> None:
+    client, registry, *_ = explorer
+    other = registry.root / "other"
+    other.mkdir()
+    with sqlite3.connect(other / "other.sqlite") as connection:
+        connection.execute("CREATE TABLE orders(other_only INTEGER PRIMARY KEY)")
+    assert client.get("/api/semantic-graph/sources").json() == ["other", "shop"]
+    for db_id in ("shop", "other", "shop"):
+        body = client.get("/api/semantic-graph/nodes/table:orders?db_id=" + db_id).json()
+        columns = {column["label"] for column in body["columns"]}
+        assert ("other_only" in columns) == (db_id == "other")
+    assert client.get("/api/semantic-graph?db_id=other&view=kpi").json()["nodes"] == []
+
+
+def test_missing_candidate_source_columns_are_not_presented_as_complete_lineage(
+    explorer: Any,
+) -> None:
+    _, registry, document, _, _ = explorer
+    metric = document.metrics[0]
+    metric.status, metric.approval = "inferred", None
+    metric.required_fields.append("missing_column")
+    entity = next(item for item in document.entities if item.relation == metric.source_relation)
+    entity.quality.required.append("missing_column")
+    schema = registry.inspect("shop")
+    snapshot = compile_graph(schema, document)
+    before = snapshot.model_dump_json()
+    index = ExplorerCache().get(snapshot, snapshot.network())
+    assert "metric:" + metric.id not in index.nodes
+    assert snapshot.model_dump_json() == before
 
 
 def test_upstream_lineage_and_reverse_potential_impact(explorer: Any) -> None:
@@ -103,6 +141,7 @@ def test_lazy_expansion_search_and_limits(explorer: Any) -> None:
     limited = client.get(
         "/api/semantic-graph?db_id=shop&view=combined&node_limit=2&edge_limit=1").json()
     assert len(limited["nodes"]) <= 2 and len(limited["edges"]) <= 1 and limited["truncated"]
+    assert limited["truncation_reasons"]
     searched = client.get("/api/semantic-graph?db_id=shop&view=kpi&search=refund_amount").json()
     assert any(node["id"] == "column:orders.refund_amount" for node in searched["nodes"])
     assert client.get("/api/semantic-graph?db_id=shop&depth=99").status_code == 422

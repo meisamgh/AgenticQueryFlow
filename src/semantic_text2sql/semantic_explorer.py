@@ -54,6 +54,9 @@ class ExplorerGraph(StrictModel):
     total_nodes: int
     total_edges: int
     truncated: bool
+    collapsed_nodes: int = 0
+    collapsed_edges: int = 0
+    truncation_reasons: list[str] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     distances: dict[str, int] = Field(default_factory=dict)
     catalog_version: int | None = None
@@ -94,7 +97,7 @@ def display_edge(edge: GraphEdge) -> ExplorerEdge:
     cardinality = edge.facts.get("cardinality") if edge.kind == "REFERENCES" else None
     return ExplorerEdge(
         id=edge.id, source=edge.source, target=edge.target, kind=edge.kind,
-        provenance=edge.provenance, authoritative=edge.authoritative,
+        provenance=edge.provenance, authoritative=edge.authoritative and not forbidden,
         status="forbidden" if forbidden else "authoritative" if edge.authoritative else
                "definition" if edge.facts.get("definition_verified") is True else "suggested",
         cardinality=cardinality,
@@ -149,23 +152,27 @@ class ExplorerIndex:
         else:
             initial = "TABLE" if view == "schema" else "METRIC" if view == "kpi" else None
             seeds = sorted(key for key in visible if self.nodes[key].kind == initial or
-                           initial is None and self.nodes[key].kind != "COLUMN")[:node_limit]
+                           initial is None and self.nodes[key].kind != "COLUMN")
             if view == "combined" and seeds:
                 seeds = [next((key for key in seeds if self.nodes[key].kind == "METRIC"),
                               seeds[0])]
                 targets = sorted({edge.target for edge in summary_edges
                                   if edge.source in seeds})
-                seeds = [*seeds, *targets][:node_limit]
+                seeds = [*seeds, *targets]
             if view == "kpi":
                 tables = sorted({edge.target for edge in summary_edges if edge.source in seeds})
-                seeds = list(dict.fromkeys([*seeds, *tables]))[:node_limit]
+                seeds = list(dict.fromkeys([*seeds, *tables]))
                 depth = 0  # Initial overview keeps physical columns expandable.
+        reasons: set[str] = set()
+        if len(seeds) > node_limit:
+            reasons.add("node_limit")
+            seeds = seeds[:node_limit]
         distances = dict.fromkeys(seeds, 0)
         selected = set(seeds)
         queue = deque(seeds)
         visited_edges: set[str] = set()
         examined = 0
-        truncated = len(seeds) < len(visible) if node_id is None else False
+        truncated = bool(reasons)
         while queue:
             current = queue.popleft()
             if distances[current] >= depth:
@@ -189,13 +196,15 @@ class ExplorerIndex:
                 links.append((key, neighbor))
             for key, neighbor in sorted(set(links)):
                 examined += 1
-                if examined > 5000 or len(visited_edges) >= edge_limit:
+                if examined > 5000 or key not in visited_edges and len(visited_edges) >= edge_limit:
                     truncated = True
+                    reasons.add("scan_limit" if examined > 5000 else "edge_limit")
                     queue.clear()
                     break
                 if neighbor not in selected:
                     if len(selected) >= node_limit:
                         truncated = True
+                        reasons.add("node_limit")
                         continue
                     selected.add(neighbor)
                     distances[neighbor] = distances[current] + 1
@@ -211,6 +220,7 @@ class ExplorerIndex:
                         selected.add(edge.source)
                     else:
                         truncated = True
+                        reasons.add("node_limit")
         if not lineage:
             # Initial pages include only edges whose endpoints are already sent.
             all_edges = [key for key, edge in self.edges.items() if edge.source in selected
@@ -223,13 +233,18 @@ class ExplorerIndex:
                                 if edge.source in selected and edge.target in selected)
         if len(output_edges) > edge_limit:
             truncated = True
+            reasons.add("edge_limit")
+        total_edges = sum(edge.source in visible and edge.target in visible
+                          and edge.kind in allowed_edges for edge in self.edges.values())
+        total_edges += len(summary_edges)
         return ExplorerGraph(
             db_id=self.snapshot.db_id, view=view,
             nodes=[display_node(self.nodes[key]) for key in sorted(selected)],
             edges=output_edges[:edge_limit],
-            total_nodes=len(visible), total_edges=sum(
-                edge.source in visible and edge.target in visible and edge.kind in allowed_edges
-                for edge in self.edges.values()) + len(summary_edges),
+            total_nodes=len(visible), total_edges=total_edges,
+            collapsed_nodes=max(0, len(visible) - len(selected)) if not truncated else 0,
+            collapsed_edges=max(0, total_edges - len(output_edges)) if not truncated else 0,
+            truncation_reasons=sorted(reasons),
             truncated=truncated, distances=distances if node_id else {},
             catalog_version=self.snapshot.catalog_version,
             potential_impact=lineage and direction == "downstream",
@@ -272,10 +287,15 @@ class ExplorerCache:
             if cached:
                 self._entries.move_to_end(snapshot.content_checksum)
                 return cached
+            snapshot_ids = {node.id for node in snapshot.nodes}
             approved = {node.id for node in snapshot.nodes if node.kind == "METRIC"
                         and node.facts.get("authoritative") is True}
             candidates = {node.id for node in snapshot.nodes if node.kind == "METRIC"
-                          and node.facts.get("status") == "inferred"}
+                          and node.facts.get("status") == "inferred"
+                          and f"table:{node.facts.get('source_relation')}" in snapshot_ids
+                          and all(f"column:{node.facts.get('source_relation')}.{column}" in
+                                  snapshot_ids
+                                  for column in node.facts.get("required_fields", []))}
             rules = {edge.target for edge in snapshot.edges if edge.kind == "FILTERED_BY"
                      and edge.source in approved | candidates}
             nodes = {node.id: node for node in snapshot.nodes

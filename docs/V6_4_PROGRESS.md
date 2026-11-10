@@ -1,5 +1,32 @@
 # V6.4 progress checkpoint
 
+## 2026-11-09 — Measured latency refinement
+
+Bounded immutable BM25 term reuse preserves exact reference scores. Explorer
+reuses the initial KPI response, avoids duplicate root inspection and reconciles
+stable Cytoscape IDs without layout on unchanged topology. No routing, SQL safety,
+provider configuration or conversation-state changes. Retained existing integrated
+chart proposals, complete-result reuse, retrieval-only context and early recovery
+exit. 953 Python passed / 2 skipped; 235 frontend/voice passed; Ruff/mypy (75 files)
+and diff checks passed. `LATENCY_REFINEMENT.md` records paired CPU/headless results,
+before/after TestClient timings and unchanged call counts. Small-schema API p95
+did not improve; no production latency/token-saving claim. Live providers,
+PostgreSQL and browser paint performance not measured. No restart/commit/push.
+
+## 2026-11-09 — Explorer correctness audit
+
+Fixed collapsed-column false truncation; explicit completeness counts/reasons;
+stale frontend continuation/error guards; non-authoritative definition/forbidden
+lineage classification; missing physical candidate inputs. Added datasource cache
+isolation and guards forbidding accepted-state mutations. Retained source-backed
+cards, compact component layout and inspector; options/filters are collapsed and
+edge labels appear on interaction. See SEMANTIC_EXPLORER.md for measurements and
+verification limits. Full verification: 952 Python passed, 2 skipped; 232
+frontend/voice passed; Ruff, mypy (75 files), diff passed. Desktop Chrome light/dark
+captures verified the new cards and inspector; corrected observed dark contrast.
+Exact responsive viewport matrix remains unverified due native focus protection;
+production identity remains blocked. No SQL grounding or agent changes.
+
 Compact explorer follow-up: fixed missing table endpoints on expanded input edges;
 auto-selection/column expansion and populated inspector; component-based compact
 visual layout; hover edge labels and mobile inspector toggle. 950 Python / 223

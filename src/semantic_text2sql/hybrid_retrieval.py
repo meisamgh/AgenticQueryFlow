@@ -7,9 +7,11 @@ import math
 import os
 import re
 from collections import Counter, OrderedDict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from functools import lru_cache
 from pathlib import Path
 from threading import RLock
+from types import MappingProxyType
 from typing import Any, Literal, Protocol
 
 from semantic_text2sql.glossary import BusinessGlossary, GlossaryTerm
@@ -513,26 +515,36 @@ def _glossary_columns(terms: Iterable[GlossaryTerm], schema: SchemaInfo) -> set[
     return {column for term in terms for column in term.columns if column in live}
 
 
+@lru_cache(maxsize=1024)
+def _document_terms(text: str) -> tuple[int, Mapping[str, int]]:
+    """Immutable, bounded text-only reuse; glossary enrichment stays query-local."""
+    tokens = _tokens(text)
+    return len(tokens), MappingProxyType(dict(Counter(tokens)))
+
+
 def _bm25(
     query: str, documents: dict[str, str], *, k1: float = 1.5, b: float = 0.75
 ) -> dict[str, float]:
     query_tokens = _tokens(query)
-    tokenized = {key: _tokens(value) for key, value in documents.items()}
+    # Very large documents are processed without retaining their text in cache.
+    tokenized = {key: (_document_terms(value) if len(value) <= 4096
+                       else _document_terms.__wrapped__(value))
+                 for key, value in documents.items()}
     count = len(tokenized)
-    average_length = sum(map(len, tokenized.values())) / count if count else 1.0
-    document_frequency = Counter(token for tokens in tokenized.values() for token in set(tokens))
+    average_length = sum(length for length, _ in tokenized.values()) / count if count else 1.0
+    document_frequency = Counter(token for _, frequencies in tokenized.values()
+                                 for token in frequencies)
     scores: dict[str, float] = {}
-    for key, tokens in tokenized.items():
-        frequencies = Counter(tokens)
+    for key, (length, frequencies) in tokenized.items():
         score = 0.0
         for token in query_tokens:
-            frequency = frequencies[token]
+            frequency = frequencies.get(token, 0)
             if not frequency:
                 continue
             inverse = math.log(
                 1 + (count - document_frequency[token] + 0.5) / (document_frequency[token] + 0.5)
             )
-            denominator = frequency + k1 * (1 - b + b * len(tokens) / max(average_length, 1))
+            denominator = frequency + k1 * (1 - b + b * length / max(average_length, 1))
             score += inverse * frequency * (k1 + 1) / denominator
         scores[key] = score
     return scores

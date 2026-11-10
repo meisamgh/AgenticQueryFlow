@@ -140,6 +140,50 @@ test('KPI view defaults only when configured metadata has metrics',async()=>{
   const h=harness(metadataApi([]));await h.controller.open();
   assert.equal(h.graphs.at(-1).nodes()[0].id(),'metric:net');h.controller.dispose();
 });
+test('initial KPI overview is reused and unchanged refresh preserves nodes and layout',async()=>{
+  const log=[],h=harness(metadataApi(log));await h.controller.open();
+  const overviews=log.filter(path=>!path.includes('/nodes/')&&!path.includes('/neighborhood')&&!path.endsWith('/sources'));
+  assert.equal(overviews.length,1,'must not fetch the same KPI overview twice');
+  await h.click('Database Schema');
+  const cy=h.graphs.at(-1),node=cy.getElementById('table:orders')[0];
+  let layouts=0;const layout=cy.layout.bind(cy);cy.layout=(...args)=>{layouts++;return layout(...args);};
+  await h.click('Refresh');await flush();
+  assert.equal(cy.getElementById('table:orders')[0],node);
+  assert.equal(layouts,0,'metadata-only refresh must not relayout the graph');
+  h.controller.dispose();
+});
+test('incremental updates retain identity but detect changed endpoints and deleted metadata',async()=>{
+  const h=harness(metadataApi([]));await h.controller.open({view:'schema'});
+  const cy=h.graphs.at(-1),original=cy.getElementById('table:orders')[0];
+  assert.equal(h.module.updateElements(cy,schema),false);
+  assert.equal(cy.getElementById('table:orders')[0],original);
+  const changed={...schema,edges:[{...link,source:link.target,target:link.source}]};
+  assert.equal(h.module.updateElements(cy,changed),true);
+  assert.equal(cy.getElementById('join').source().id(),link.target);
+  assert.equal(h.module.updateElements(cy,{nodes:[table('orders')],edges:[]}),true);
+  assert.equal(cy.nodes().length,1);assert.equal(cy.edges().length,0);h.controller.dispose();
+});
+test('paired headless unchanged-refresh benchmark (not browser paint latency)',async()=>{
+  const graph={nodes:Array.from({length:100},(_,i)=>table(`source${i}`)),
+    edges:Array.from({length:99},(_,i)=>({...link,id:`edge${i}`,source:`table:source${i}`,target:`table:source${i+1}`}))};
+  const h=harness(async path=>path.endsWith('/sources')?['shop']:graph);
+  await h.controller.open({view:'schema'});const cy=h.graphs.at(-1),timings={before:[],after:[]};
+  for(let i=0;i<40;i++)for(const mode of i%2?['before','after']:['after','before']){
+    const started=performance.now();
+    if(mode==='before'){
+      cy.batch(()=>{cy.elements().remove();cy.add(h.module.elements(graph));});
+      cy.layout({name:'breadthfirst',directed:false,spacingFactor:1.4,animate:false}).run();
+    }else if(h.module.updateElements(cy,graph)){
+      cy.layout({name:'breadthfirst',directed:false,spacingFactor:1.4,animate:false}).run();
+    }
+    timings[mode].push(performance.now()-started);
+    assert.equal(cy.nodes().length,100);assert.equal(cy.edges().length,99);
+  }
+  for(const [mode,values] of Object.entries(timings)){
+    values.sort((a,b)=>a-b);console.log(`${mode}: unchanged-refresh p50=${values[20].toFixed(3)}ms p95=${values[37].toFixed(3)}ms; 100 nodes, 99 links; no network/SQL/LLM`);
+  }
+  h.controller.dispose();
+});
 test('opening KPI view populates inspector and expands real physical input edges',async()=>{
   const log=[];
   const h=harness(metadataApi(log,path=>{
@@ -159,8 +203,9 @@ test('opening KPI view populates inspector and expands real physical input edges
 });
 test('simplified cards hide removed controls and preserve truthful status and edge types',async()=>{
   const h=harness(metadataApi([]));await h.controller.open();
-  for(const text of ['Refresh','Fit graph','Reset layout','+','−','Check selected joins','Node and relationship filters'])
+  for(const text of ['Fit graph','+','−','Check selected joins','Node and relationship filters'])
     assert.ok(!h.findButton(text));
+  assert.ok(h.mount.querySelectorAll('details').some(node=>node.textContent.includes('View options')&&!node.open));
   const data=h.module.elements({nodes:[{...metric,status:'suggested'}],edges:[{...link,kind:'HAS_COLUMN'}]});
   assert.ok(data[0].data.label.includes('KPI · v1'));
   assert.ok(!data[0].data.label.includes('Not reviewed'));
@@ -188,4 +233,29 @@ test('node cards have visible accents and distinct type badges without embedding
   assert.ok(!metricSvg.includes('http://127.0.0.1'));
   assert.ok(decodeURIComponent(h.module.cardBackground('METRIC',true)).includes('#18232f'));
   h.controller.dispose();
+});
+test('definition and forbidden edges cannot certify approved lineage',()=>{
+  const h=harness(async()=>[]);
+  assert.equal(h.module.lineageAuthority({edges:[{kind:'FILTERED_BY',status:'definition',authoritative:false}]}),'Suggested lineage');
+  assert.equal(h.module.lineageAuthority({edges:[{kind:'REFERENCES',status:'forbidden',authoritative:true}]}),'Lineage unavailable');
+  h.controller.dispose();
+});
+test('stale source-list failure cannot overwrite a newer successful graph',async()=>{
+  let reject,first=true;
+  const delayed=new Promise((_,bad)=>{reject=bad;});
+  const h=harness(metadataApi([],path=>{if(path.endsWith('/sources')&&first){first=false;return delayed;}}));
+  const older=h.controller.open();await flush();await h.controller.open({view:'schema'});
+  reject(Error('Old request failed'));await older;
+  assert.ok(!h.mount.textContent.includes('Old request failed'));
+  assert.equal(h.graphs.at(-1).nodes().length,2);h.controller.dispose();
+});
+test('bounded layout and element preparation benchmark (not browser rendering)',()=>{
+  const h=harness(async()=>[]);
+  for(const size of [50,250]){
+    const nodes=[table('orders'),...Array.from({length:size-1},(_,i)=>({...metric,id:`metric:${i}`}))];
+    const graph={nodes,edges:nodes.slice(1).map(node=>({source:node.id,target:'table:orders',kind:'SOURCE_TABLE'}))};
+    const samples=[];
+    for(let i=0;i<50;i++){const start=performance.now();h.module.layeredPositions(graph);h.module.elements(graph);samples.push(performance.now()-start);}
+    samples.sort((a,b)=>a-b);console.log(`${size} nodes: layout+elements p50=${samples[24].toFixed(3)}ms p95=${samples[47].toFixed(3)}ms; zero network/SQL/LLM calls`);
+  }h.controller.dispose();
 });

@@ -1,5 +1,18 @@
 # Queryflow V6.4 requirement matrix
 
+2026-11-09 latency refinement: exact BM25 reference equality, stable-ID graph
+updates and initial overview reuse verified; full 953 Python/235 frontend pass,
+2 PostgreSQL skipped, Ruff/mypy/diff pass. See LATENCY_REFINEMENT.md for scoped
+measurements; no general production latency or semantic requirement promoted.
+
+2026-11-09 explorer checks: collapsed-vs-truncated counts, datasource cache
+isolation, absent physical inputs, source-graph immutability and stale response
+guards have targeted passing evidence. Read-only fixture forbids business SQL
+and ConversationStore writes. 952 Python / 232 frontend tests pass, 2 PostgreSQL
+tests skipped; Ruff/mypy/diff pass. Desktop Chrome light/dark checked; exact
+responsive viewport matrix NOT VERIFIED; remote
+identity BLOCKED. This does not certify general SQL semantic completeness.
+
 2026-11-08 explorer redesign: authority transitions, mixed lineage, configured
 local-source access, KPI default selection and deterministic layered positioning
 have passing regression evidence (950 Python / 221 frontend tests in the full

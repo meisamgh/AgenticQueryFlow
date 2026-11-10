@@ -134,6 +134,9 @@ def semantic_explorer_router(
                             [:edge_limit]]
             result.total_nodes, result.total_edges = len(matches), len(edges)
             result.truncated = len(matches) > node_limit or len(edges) > edge_limit
+            result.collapsed_nodes = result.collapsed_edges = 0
+            result.truncation_reasons = (["node_limit"] if len(matches) > node_limit else []) + (
+                ["edge_limit"] if len(edges) > edge_limit else [])
         result.warnings.extend(warnings)
         return result
 

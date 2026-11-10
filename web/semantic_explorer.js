@@ -34,6 +34,21 @@ window.QueryflowSemanticExplorer = (() => {
     ...graph.edges.map(edge => ({group:'edges',data:{id:edge.id,source:edge.source,target:edge.target,
       label:connectionLabel(edge),kind:edge.kind,status:edge.status}})),
   ];
+  function updateElements(cy,graph) {
+    const nextElements=elements(graph),wanted=new Set(nextElements.map(item=>item.data.id));
+    let topologyChanged=false;
+    cy.batch(()=>{
+      cy.elements().forEach(item=>{if(!wanted.has(item.id())){topologyChanged=true;item.remove();}});
+      nextElements.forEach(item=>{
+        const existing=cy.getElementById(item.data.id);
+        if(!existing.length){topologyChanged=true;cy.add(item);}
+        else if(existing.isEdge()&&(existing.data('source')!==item.data.source||existing.data('target')!==item.data.target)){
+          topologyChanged=true;existing.remove();cy.add(item);
+        } else existing.data(item.data);
+      });
+    });
+    return topologyChanged;
+  }
   function mergeGraph(previous, next, limit=250) {
     const nodes = new Map(previous.nodes.map(node => [node.id,node]));
     next.nodes.forEach(node => { if (nodes.has(node.id) || nodes.size < limit) nodes.set(node.id,node); });
@@ -45,9 +60,9 @@ window.QueryflowSemanticExplorer = (() => {
   }
   let rendererPromise;
   function lineageAuthority(graph) {
-    const proof=graph.edges.filter(edge=>edge.kind!=='HAS_COLUMN');
-    const approved=proof.some(edge=>edge.authoritative||edge.status==='definition');
-    const suggested=proof.some(edge=>!edge.authoritative&&edge.status!=='definition');
+    const proof=graph.edges.filter(edge=>edge.kind!=='HAS_COLUMN'&&edge.status!=='forbidden');
+    const approved=proof.some(edge=>edge.authoritative);
+    const suggested=proof.some(edge=>!edge.authoritative);
     return !proof.length?'Lineage unavailable':approved&&suggested?'Mixed lineage':suggested?'Suggested lineage':'Approved lineage';
   }
   function layeredPositions(graph) {
@@ -112,7 +127,7 @@ window.QueryflowSemanticExplorer = (() => {
         'underlay-color':'#103d32','underlay-opacity':.045,'underlay-padding':4,'underlay-shape':'round-rectangle'}},
       ...Object.entries(colors).map(([kind,color])=>({selector:`node[kind="${kind}"]`,
         style:{'border-color':color,'background-color':tints[kind],'background-opacity':1}})),
-      {selector:'edge',style:{label:'data(label)','font-size':11,color:text,'text-background-color':theme.getPropertyValue('--surface').trim()||'#fff',
+      {selector:'edge',style:{label:'','font-size':11,color:text,'text-background-color':theme.getPropertyValue('--surface').trim()||'#fff',
         'text-background-opacity':.9,'text-background-padding':3,'curve-style':'bezier',width:1.5,
         'target-arrow-shape':'triangle','line-color':'#94a3b8','target-arrow-color':'#94a3b8'}},
       {selector:'edge[status="suggested"]',style:{'line-style':'dashed'}},
@@ -120,7 +135,8 @@ window.QueryflowSemanticExplorer = (() => {
       {selector:'edge[status="forbidden"]',style:{'line-color':'#dc2626','target-arrow-color':'#dc2626','line-style':'dashed'}},
       {selector:'node:selected',style:{'border-width':3,'border-color':'#0f766e','underlay-opacity':.12}},
       {selector:'edge:selected',style:{'line-color':'#168447','target-arrow-color':'#168447',width:3}},
-      {selector:'edge.hovered, edge:selected',style:{label:'data(label)'}},
+      {selector:'edge.hovered, edge:selected, edge.connected',style:{label:'data(label)'}},
+      {selector:'edge.connected',style:{width:2.5}},
       {selector:'.lineage',style:{'line-color':'#168447','target-arrow-color':'#168447',width:2.5}},
       {selector:'.matched',style:{'border-width':4,'border-color':'#168447'}},
       {selector:'.dimmed',style:{opacity:.6}},
@@ -128,7 +144,7 @@ window.QueryflowSemanticExplorer = (() => {
   }
   function create({mount,api,defaultDb,onOpen=()=>{},onClose=()=>{}}) {
     let cy=null, graph={nodes:[],edges:[]}, dbId='', view='schema', epoch=0, detailEpoch=0;
-    let focus=null, nodeKinds=new Set(Object.keys(colors)), edgeKinds=new Set(relations), dragged=new Set();
+    let focus=null, navigation=0, nodeKinds=new Set(Object.keys(colors)), edgeKinds=new Set(relations), dragged=new Set();
     const memories = new Map(), expansions = new Map(); let initial=new Set();
     let selectedTab=null;
     const heading=el('header','semantic-heading'), title=el('div');
@@ -145,6 +161,18 @@ window.QueryflowSemanticExplorer = (() => {
       const tab=button(label,()=>switchView(value)); tab.dataset.view=value; tabs.append(tab);
     }
     controls.append(sourceLabel,tabs,searchLabel,button('Search',()=>load('search')));
+    const options=el('details','semantic-options');options.append(el('summary','','View options'));
+    const tools=el('div','semantic-option-tools');
+    tools.append(button('Fit',()=>cy?.fit(undefined,36)),button('Refresh',()=>load('root')),
+      button('Reset layout',()=>{memories.delete(key());dragged.clear();cy?.destroy();cy=null;draw(graph);}));
+    options.append(tools);
+    for(const [label,values,chosen] of [['Node types',Object.keys(colors),nodeKinds],['Connections',relations,edgeKinds]]){
+      const fieldset=el('fieldset');fieldset.append(el('legend','',label));
+      values.forEach(value=>{const item=el('label'),box=el('input');box.type='checkbox';box.checked=chosen.has(value);box.dataset.filter=value;
+        box.addEventListener('change',()=>{box.checked?chosen.add(value):chosen.delete(value);load('root');});item.append(box,el('span','',value.toLowerCase().replaceAll('_',' ')));fieldset.append(item);});
+      options.append(fieldset);
+    }
+    controls.append(options);
     const status=el('p','semantic-status'); status.setAttribute('role','status'); status.setAttribute('aria-live','polite');
     const body=el('div','semantic-body'), canvas=el('div','semantic-canvas');
     canvas.setAttribute('role','img'); canvas.setAttribute('aria-label','Interactive metadata graph. Use the node list for keyboard navigation.');
@@ -161,7 +189,7 @@ window.QueryflowSemanticExplorer = (() => {
     });
     legend.append(el('span','','Solid: authoritative · dotted: catalog definition · dashed: suggested · red: forbidden'));
     mount.replaceChildren(heading,controls,status,body,list,legend);
-    source.addEventListener('change',()=>{remember();cy?.destroy();cy=null; dbId=source.value; focus=null; restore(); load('root');});
+    source.addEventListener('change',()=>{++navigation;remember();cy?.destroy();cy=null;graph={nodes:[],edges:[]};listBody.replaceChildren();dragged.clear();dbId=source.value;focus=null;restore();load('root');});
     search.addEventListener('keydown',event=>{if(event.key==='Enter'){event.preventDefault(); load('search');}});
     function key(){return `${dbId}:${view}`;}
     function remember() {
@@ -173,6 +201,7 @@ window.QueryflowSemanticExplorer = (() => {
       const saved=memories.get(key());
       nodeKinds.clear(); (saved?.kinds||Object.keys(colors)).forEach(kind=>nodeKinds.add(kind));
       edgeKinds.clear(); (saved?.relations||relations).forEach(kind=>edgeKinds.add(kind));
+      options.querySelectorAll('input').forEach(box=>box.checked=nodeKinds.has(box.dataset.filter)||edgeKinds.has(box.dataset.filter));
     }
     function params(extra={}) {
       const query=new URLSearchParams({db_id:dbId,view,node_limit:'120',edge_limit:'300',...extra});
@@ -196,7 +225,8 @@ window.QueryflowSemanticExplorer = (() => {
         cy.on('mouseout','edge',event=>event.target.removeClass('hovered'));
         cy.on('dragfree','node',event=>dragged.add(event.target.id()));
       }
-      cy.batch(()=>{cy.elements().remove(); cy.add(elements(graph));});
+      const topologyChanged=updateElements(cy,graph);
+      if(topologyChanged){
       const layers=layeredPositions(graph);
       cy.layout(view==='schema'?{name:'breadthfirst',directed:false,padding:40,spacingFactor:1.4,animate:false,fit:true}:
         {name:'preset',positions:node=>layers[node.id()],padding:45,animate:false,fit:true}).run();
@@ -204,11 +234,12 @@ window.QueryflowSemanticExplorer = (() => {
       if(merge) cy.fit(undefined,36);
       else if(memories.get(key())?.zoom) {cy.zoom(memories.get(key()).zoom);cy.pan(memories.get(key()).pan);}
       else cy.zoom(Math.min(cy.zoom(),1.25));
+      }
       listBody.replaceChildren(...graph.nodes.map(node=>button(`${node.label} · ${node.kind.toLowerCase()}`,()=>selectNode(node.id))));
-      status.textContent=graph.nodes.length?`${graph.nodes.length} nodes · ${graph.edges.length} links${graph.truncated?' · expandable':''}. ${(graph.warnings||[]).join(' ')}`:
+      status.textContent=graph.nodes.length?`${graph.nodes.length} nodes · ${graph.edges.length} links${graph.truncated?' · response limit reached':graph.collapsed_nodes?' · more metadata collapsed':''}. ${(graph.warnings||[]).join(' ')}`:
         `No ${view==='kpi'?'KPI definitions':'matching metadata'} in this view. ${(graph.warnings||[]).join(' ')}`;
     }
-    async function load(mode='root',nodeId=null) {
+    async function load(mode='root',nodeId=null,preloaded=null) {
       const token=++epoch; ++detailEpoch;
       status.textContent='Loading metadata…';
       if(mode!=='expand')panel.replaceChildren(el('p','semantic-inspector-label','NODE INSPECTOR'),el('p','','Select a node or relationship to inspect.'));
@@ -218,12 +249,13 @@ window.QueryflowSemanticExplorer = (() => {
         const query=params(lineage?{node_id:nodeId,direction:mode,depth:'6'}:
           mode==='expand'?{node_id:nodeId,depth:'1'}:mode==='search'?{search:search.value,depth:'0'}:{depth:'0'});
         const route=lineage?'lineage':mode==='expand'?'neighborhood':'';
-        const next=await api(`/api/semantic-graph${route?'/'+route:''}?${query}`);
+        const next=preloaded||await api(`/api/semantic-graph${route?'/'+route:''}?${query}`);
         if(token!==epoch || mount.hidden) return;
         if(!edgeKinds.size)next.edges=[];
         if(mode==='expand') expansions.set(nodeId,new Set([...(expansions.get(nodeId)||[]),...next.nodes.filter(n=>!graph.nodes.some(old=>old.id===n.id)).map(n=>n.id)]));
         else {expansions.clear(); initial=new Set(next.nodes.map(n=>n.id));}
         await draw(next,{merge:mode==='expand'});
+        if(token!==epoch||mount.hidden)return;
         if(mode==='search')cy?.nodes().addClass('matched');
         if(lineage) {
           cy?.edges().addClass('lineage');
@@ -254,8 +286,9 @@ window.QueryflowSemanticExplorer = (() => {
         cy?.nodes().unselect();cy?.getElementById(id).select();
         cy?.elements().removeClass('dimmed');
         const selected=cy?.getElementById(id);
-        if(selected?.length){cy.elements().addClass('dimmed');selected.closedNeighborhood().removeClass('dimmed');}
-        panel.replaceChildren(el('p','semantic-inspector-label','NODE INSPECTOR'),el('p','semantic-node-badge',`${data.node.status==='approved'?'APPROVED':data.node.status==='suggested'?'NOT REVIEWED':'OBSERVED'} ${data.node.kind}`),el('h2','',data.node.label),el('p','semantic-provenance',String(data.node.provenance||'Metadata').replaceAll('candidate','unreviewed')));
+        cy?.edges().removeClass('connected');
+        if(selected?.length){cy.elements().addClass('dimmed');selected.closedNeighborhood().removeClass('dimmed');selected.connectedEdges().addClass('connected');}
+        panel.replaceChildren(el('p','semantic-inspector-label','NODE INSPECTOR'),el('p','semantic-node-badge',`${data.node.status==='approved'?'APPROVED':data.node.status==='suggested'?'CANDIDATE · NOT APPROVED':'OBSERVED'} ${data.node.kind}`),el('h2','',data.node.label),el('p','semantic-provenance',String(data.node.provenance||'Metadata')));
         const actions=el('div','semantic-detail-actions');
         actions.append(button('Expand neighbors',()=>load('expand',id)),button('Collapse expansion',()=>collapse(id)),
           button('Upstream lineage',()=>load('upstream',id)),button('Potential downstream impact',()=>load('downstream',id)));
@@ -292,18 +325,22 @@ window.QueryflowSemanticExplorer = (() => {
     function inspectEdge(id){const edge=graph.edges.find(e=>e.id===id);if(edge)edgeDetails(edge);}
     function collapse(id) {
       const removed=expansions.get(id); if(!removed)return;
+      ++epoch;++detailEpoch;
       expansions.delete(id);
       const retained=new Set([...initial,...expansions.keys(),...[...expansions.values()].flatMap(ids=>[...ids])]);
       const nodes=graph.nodes.filter(node=>!removed.has(node.id)||retained.has(node.id)||node.id===id);
       const ids=new Set(nodes.map(node=>node.id));
       draw({...graph,nodes,edges:graph.edges.filter(e=>ids.has(e.source)&&ids.has(e.target))});
     }
-    async function switchView(value,nodeId=null) {
+    async function switchView(value,nodeId=null,preloaded=null) {
+      const navToken=++navigation;
       const previousFocus=nodeId||focus;
       remember(); cy?.destroy(); cy=null; view=value; focus=previousFocus; search.value='';restore();
       selectedTab=value; tabs.querySelectorAll('button').forEach(tab=>tab.setAttribute('aria-pressed',String(tab.dataset.view===value)));
-      await load(nodeId?(value==='schema'?'expand':'upstream'):'root',nodeId);
-      if(previousFocus && graph.nodes.some(node=>node.id===previousFocus))await inspect(previousFocus);
+      await load(nodeId?(value==='schema'?'expand':'upstream'):'root',nodeId,preloaded);
+      if(navToken!==navigation||mount.hidden)return;
+      if(previousFocus && !(view==='kpi'&&!nodeId&&focus===previousFocus)
+        && graph.nodes.some(node=>node.id===previousFocus))await inspect(previousFocus);
     }
     async function open(options={}) {
       if(cy){remember();cy.destroy();cy=null;}
@@ -315,15 +352,21 @@ window.QueryflowSemanticExplorer = (() => {
         dbId=options.dbId||dbId||defaultDb();
         if(!values.includes(dbId))dbId=values[0]||''; source.value=dbId;
         if(!dbId){status.textContent='No configured datasource is available.';return;}
-        let destination=options.view||selectedTab;
-        if(!destination){const overview=await api(`/api/semantic-graph?${new URLSearchParams({db_id:dbId,view:'kpi',depth:'0'})}`);if(token!==epoch)return;destination=overview.nodes.some(node=>node.kind==='METRIC')?'kpi':'schema';}
-        await switchView(destination,options.nodeId||null);
-      }catch(error){status.textContent=error.message;}
+        let destination=options.view||selectedTab,overview=null;
+        if(!destination){
+          // Reuse this request's verified overview, not a cross-session cache.
+          const query=params({view:'kpi',depth:'0'});
+          overview=await api(`/api/semantic-graph?${query}`);if(token!==epoch)return;
+          destination=overview.nodes.some(node=>node.kind==='METRIC')?'kpi':'schema';
+          if(destination!=='kpi'||options.nodeId)overview=null;
+        }
+        await switchView(destination,options.nodeId||null,overview);
+      }catch(error){if(token===epoch)status.textContent=error.message;}
     }
-    function close() {remember();++epoch;++detailEpoch;cy?.destroy();cy=null;mount.hidden=true;document.body.classList.remove('semantic-explorer-open');onClose();}
+    function close() {remember();++navigation;++epoch;++detailEpoch;cy?.destroy();cy=null;mount.hidden=true;document.body.classList.remove('semantic-explorer-open');onClose();}
     const observer=new MutationObserver(()=>{if(cy)cy.style(styles());});
     observer.observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
     return {open,close,dispose(){close();observer.disconnect();mount.replaceChildren();}};
   }
-  return {create,elements,mergeGraph,colors,layeredPositions,lineageAuthority,connectionLabel,cardBackground};
+  return {create,elements,updateElements,mergeGraph,colors,layeredPositions,lineageAuthority,connectionLabel,cardBackground};
 })();

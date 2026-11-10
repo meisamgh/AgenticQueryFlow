@@ -23,7 +23,7 @@ https://github.com/user-attachments/assets/cea65003-e31e-4846-a532-904ffcb6e25f
 
 ## What you can do
 
-- Explore tables, relationships and approved KPI dependencies in the local **Semantic Explorer**. Search, expand neighborhoods, inspect upstream lineage and potential downstream impact without SQL execution or model calls.
+- Explore tables and KPI lineage in the local **Semantic Explorer**. Inspect approval status, expand columns, trace potential impact, and distinguish collapsed metadata from response limits—without analytical SQL or model calls.
 
 - **Ask and refine questions.** A LangGraph assistant selects governed tools, maintains conversation context, and supports follow-ups, corrections, explanations, and investigations.
 - **Generate grounded SQL.** Hybrid schema retrieval combines BM25, embeddings, value matching, and optional reranking with business glossary definitions and verified metadata.

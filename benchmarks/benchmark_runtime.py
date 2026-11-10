@@ -7,6 +7,8 @@ measure local orchestration rather than model download or provider latency.
 
 from __future__ import annotations
 
+import argparse
+import math
 import os
 import sqlite3
 import statistics
@@ -35,6 +37,15 @@ class FixedModel:
 
 
 def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--reference-bm25", action="store_true",
+                        help="Use the pre-refinement scoring algorithm for a local baseline")
+    args = parser.parse_args()
+    if args.reference_bm25:
+        from benchmark_latency_refinement import reference
+
+        import semantic_text2sql.hybrid_retrieval as retrieval
+        retrieval._bm25 = reference
     with tempfile.TemporaryDirectory() as root:
         base = Path(root)
         db_dir = base / "bench"
@@ -68,6 +79,7 @@ def main() -> None:
                 ("gzip", "gzip", 10),
             ):
                 observations: list[dict[str, float | int]] = []
+                stages: dict[str, list[float]] = {}
                 for iteration in range(repetitions):
                     before_calls = model.calls
                     started = time.perf_counter()
@@ -84,6 +96,13 @@ def main() -> None:
                     )
                     elapsed_ms = (time.perf_counter() - started) * 1000
                     body = response.json()
+                    per_request: dict[str, float] = {}
+                    for entry in body.get("call_ledger", []):
+                        if entry.get("latency_ms") is not None:
+                            name = entry["component"]
+                            per_request[name] = per_request.get(name, 0) + entry["latency_ms"]
+                    for name, duration in per_request.items():
+                        stages.setdefault(name, []).append(duration)
                     observations.append(
                         {
                             "status": response.status_code,
@@ -102,11 +121,12 @@ def main() -> None:
                 print(
                     {
                         "mode": label,
+                        "scoring": "reference" if args.reference_bm25 else "cached",
                         "requests": repetitions,
                         "status": int(observations[-1]["status"]),
                         "median_latency_ms": round(statistics.median(latencies), 2),
                         "p95_latency_ms": round(
-                            latencies[max(0, int(0.95 * len(latencies)) - 1)], 2
+                            latencies[max(0, math.ceil(0.95 * len(latencies)) - 1)], 2
                         ),
                         "model_calls_per_request": int(observations[-1]["model_calls"]),
                         "db_ledger_calls_per_request": int(observations[-1]["db_calls"]),
@@ -115,6 +135,13 @@ def main() -> None:
                         ),
                         "decoded_bytes": int(observations[-1]["decoded_bytes"]),
                         "peak_memory_kib": round(tracemalloc.get_traced_memory()[1] / 1024, 1),
+                        "stages_ms": {
+                            name: {"p50": round(statistics.median(values), 2),
+                                   "p95": round(sorted(values)[
+                                       max(0, math.ceil(.95*len(values))-1)], 2)}
+                            for name, values in stages.items()
+                        },
+                        "token_usage_last_request": body.get("token_usage"),
                     }
                 )
 

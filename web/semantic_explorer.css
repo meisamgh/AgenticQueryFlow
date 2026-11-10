@@ -29,6 +29,13 @@ body.semantic-explorer-open .composer-zone { display:none; }
 .semantic-toolbar .semantic-icon-control { width:34px; height:34px; padding:0; font-size:21px; }
 .semantic-extra { margin-top:16px; font-size:12px; }
 .semantic-extra summary { cursor:pointer; font-weight:600; }
+.semantic-options { font-size:12px; position:relative; }
+.semantic-options > summary { cursor:pointer; border:1px solid var(--border); border-radius:9px; padding:10px; background:var(--surface); }
+.semantic-options[open] { flex-basis:100%; }
+.semantic-option-tools { display:flex; gap:6px; margin:10px 0; }
+.semantic-options fieldset { display:flex; flex-wrap:wrap; gap:10px; border:1px solid var(--border); border-radius:9px; margin:8px 0; padding:10px; }
+.semantic-options label { display:inline-flex; flex-direction:row; align-items:center; gap:4px; }
+.semantic-options input { min-height:0; width:auto; }
 .semantic-inspector-toggle { display:none; }
 .semantic-body { flex:none; min-height:420px; }
 .semantic-canvas { min-height:420px; height:clamp(420px,62vh,680px); }
@@ -75,6 +82,8 @@ body.semantic-explorer-open .composer-zone { display:none; }
 .semantic-explorer button:focus-visible,.semantic-explorer input:focus-visible,
 .semantic-explorer select:focus-visible { outline:2px solid var(--accent); outline-offset:3px; }
 [data-theme="dark"] .semantic-canvas { box-shadow:none; }
+[data-theme="dark"] .semantic-view-tabs [aria-pressed="true"] { color:#a7f3d0; }
+[data-theme="dark"] .semantic-node-badge { color:#c4b5fd; }
 .semantic-body {
   grid-template-columns:minmax(0,1fr) 320px; gap:16px; padding:20px;
   min-height:500px; border-radius:20px; flex:none;
@@ -93,5 +102,6 @@ body.semantic-explorer-open .composer-zone { display:none; }
   .semantic-explorer { padding:14px; }
   .semantic-detail { max-height:45vh; overflow:auto; }
   .semantic-inspector-toggle { display:inline-flex; }
+  .semantic-options input { width:auto; max-width:none; min-height:0; }
 }
 @media(prefers-reduced-motion:reduce) { .semantic-explorer * { animation:none!important; transition:none!important; } }

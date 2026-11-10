@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import math
 import sys
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 from typing import Any
@@ -16,9 +18,11 @@ from semantic_text2sql.hybrid_retrieval import (
     _bm25,
     _column_document,
     _dense_scores,
+    _document_terms,
     _ranks,
     _relevant_glossary_terms,
     _rrf,
+    _tokens,
     _value_scores,
 )
 from semantic_text2sql.models import ChatResponse, GenerateResponse, StrategyHints
@@ -29,6 +33,40 @@ from semantic_text2sql.run_history import RunHistoryStore
 class StableEncoder:
     def encode(self, texts: Any) -> list[list[float]]:
         return [[float(len(text)), 1.0] for text in texts]
+
+
+def test_bm25_cached_terms_match_uncached_reference_and_remain_immutable() -> None:
+    documents = {"a": "country country Germany", "b": "monthly consumption",
+                 "empty": "", "c": "country revenue Germany"}
+    def reference(query: str) -> dict[str, float]:
+        tokens = {key: _tokens(value) for key, value in documents.items()}
+        count = len(tokens)
+        average = sum(map(len, tokens.values())) / count
+        frequency = Counter(word for words in tokens.values() for word in set(words))
+        output = {}
+        for key, words in tokens.items():
+            counts = Counter(words)
+            score = 0.0
+            for token in _tokens(query):
+                if counts[token]:
+                    inverse = math.log(1 + (count-frequency[token]+.5)/(frequency[token]+.5))
+                    denominator = counts[token]+1.5*(.25+.75*len(words)/max(average,1))
+                    score += inverse*counts[token]*2.5/denominator
+            output[key] = score
+        return output
+    _document_terms.cache_clear()
+    for query in ("country Germany", "monthly consumption", "country country", ""):
+        assert _bm25(query, documents) == reference(query)
+    assert _document_terms.cache_info().hits > 0
+    # A newly enriched glossary document must not inherit another question's terms.
+    documents["a"] += " special approved metric"
+    assert _bm25("special", documents) == reference("special")
+    import pytest
+    with pytest.raises(TypeError):
+        _document_terms("fixed")[1]["fixed"] = 9  # type: ignore[index]
+    before = _document_terms.cache_info().currsize
+    _bm25("large", {"large": "large " * 2000})
+    assert _document_terms.cache_info().currsize == before
 
 
 def test_fastembed_initializes_once_with_concurrent_callers(monkeypatch: Any) -> None:
